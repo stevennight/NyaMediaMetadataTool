@@ -126,37 +126,49 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 			return err
 		}
 		_ = r.store.AddTaskLog(ctx, task.ID, "info", "nfo generated", nfoResult.Path)
-		if nfoResult.ShowNFOPath != "" {
-			if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "tvshow-nfo", nfoResult.ShowNFOPath, "generated"); err != nil {
-				return err
-			}
-			_ = r.store.AddTaskLog(ctx, task.ID, "info", "tvshow nfo generated", nfoResult.ShowNFOPath)
-		}
-		if nfoResult.SeasonNFOPath != "" {
-			if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "season-nfo", nfoResult.SeasonNFOPath, "generated"); err != nil {
-				return err
-			}
-			_ = r.store.AddTaskLog(ctx, task.ID, "info", "season nfo generated", nfoResult.SeasonNFOPath)
-		}
 		if nfoResult.ThumbPath != "" {
 			if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "thumb", nfoResult.ThumbPath, "generated"); err != nil {
 				return err
 			}
 			_ = r.store.AddTaskLog(ctx, task.ID, "info", "thumb generated", nfoResult.ThumbPath)
 		}
-		for _, image := range nfoResult.Images {
-			if image.Status == "generated" {
-				if err := r.store.SaveArtifact(ctx, media.ID, task.ID, image.Type, image.Path, "generated"); err != nil {
-					return err
-				}
-			}
-			_ = r.store.AddTaskLog(ctx, task.ID, "info", image.Type+" "+image.Status, image.Path)
-		}
 		if nfoResult.TMDBStatus != "" {
 			_ = r.store.AddTaskLog(ctx, task.ID, "info", "tmdb "+nfoResult.TMDBStatus, tmdbLogDetail(nfoResult))
 		}
 	} else {
 		_ = r.store.AddTaskLog(ctx, task.ID, "info", "nfo skipped", "")
+	}
+
+	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate series nfo", "")
+	seriesResult, err := pipeline.GenerateSeriesNFO(ctx, r.cfg, media)
+	if err != nil {
+		return err
+	}
+	if seriesResult.ShowNFOPath != "" {
+		if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "tvshow-nfo", seriesResult.ShowNFOPath, "generated"); err != nil {
+			return err
+		}
+		_ = r.store.AddTaskLog(ctx, task.ID, "info", "tvshow nfo generated", seriesResult.ShowNFOPath)
+	}
+	if seriesResult.SeasonNFOPath != "" {
+		if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "season-nfo", seriesResult.SeasonNFOPath, "generated"); err != nil {
+			return err
+		}
+		_ = r.store.AddTaskLog(ctx, task.ID, "info", "season nfo generated", seriesResult.SeasonNFOPath)
+	}
+
+	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate series images", "")
+	imageResult, err := pipeline.GenerateSeriesImages(ctx, r.cfg, media)
+	if err != nil {
+		return err
+	}
+	for _, image := range imageResult.Images {
+		if image.Status == "generated" {
+			if err := r.store.SaveArtifact(ctx, media.ID, task.ID, image.Type, image.Path, "generated"); err != nil {
+				return err
+			}
+		}
+		_ = r.store.AddTaskLog(ctx, task.ID, "info", image.Type+" "+image.Status, image.Path)
 	}
 	return r.store.TouchMediaProcessed(ctx, media.ID)
 }

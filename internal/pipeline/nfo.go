@@ -44,6 +44,15 @@ type NFOResult struct {
 	TMDBEpisode   string
 }
 
+type SeriesResult struct {
+	ShowNFOPath   string
+	SeasonNFOPath string
+}
+
+type ImageResult struct {
+	Images []ImageArtifact
+}
+
 type ImageArtifact struct {
 	Type   string
 	Path   string
@@ -176,7 +185,6 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 	if !cfg.Processing.OverwriteExisting {
 		if _, err := os.Stat(outputPath); err == nil {
 			result := NFOResult{Path: outputPath, TMDBStatus: "skipped", TMDBDetail: "nfo already exists"}
-			applyTMDBShowAndSeasonImages(ctx, cfg, episode, &result)
 			return result, nil
 		}
 	}
@@ -199,13 +207,34 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 
 	result := NFOResult{Path: outputPath}
 	applyTMDBEpisode(ctx, cfg, episode, &doc, &result)
-	applyTMDBShowAndSeason(ctx, cfg, episode, &result)
-	applyTMDBShowAndSeasonImages(ctx, cfg, episode, &result)
 
 	if err := writeXMLFile(outputPath, doc); err != nil {
 		return NFOResult{}, err
 	}
 	return result, nil
+}
+
+func GenerateSeriesNFO(ctx context.Context, cfg config.Config, media store.MediaFile) (SeriesResult, error) {
+	if !cfg.Processing.EnableNFO {
+		return SeriesResult{}, nil
+	}
+	episode, ok := parseEpisodeInfo(media.Path)
+	if !ok {
+		return SeriesResult{}, nil
+	}
+	result := NFOResult{Path: strings.TrimSuffix(media.Path, filepath.Ext(media.Path)) + ".nfo"}
+	applyTMDBShowAndSeason(ctx, cfg, episode, &result)
+	return SeriesResult{ShowNFOPath: result.ShowNFOPath, SeasonNFOPath: result.SeasonNFOPath}, nil
+}
+
+func GenerateSeriesImages(ctx context.Context, cfg config.Config, media store.MediaFile) (ImageResult, error) {
+	episode, ok := parseEpisodeInfo(media.Path)
+	if !ok {
+		return ImageResult{}, nil
+	}
+	result := NFOResult{Path: strings.TrimSuffix(media.Path, filepath.Ext(media.Path)) + ".nfo"}
+	applyTMDBShowAndSeasonImages(ctx, cfg, episode, &result)
+	return ImageResult{Images: result.Images}, nil
 }
 
 func parseEpisodeInfo(path string) (episodeInfo, bool) {

@@ -35,6 +35,10 @@ scraping:
   tmdbToken: ""
   tmdbBaseUrl: https://api.themoviedb.org/3
   language: zh-CN
+  fallbackLanguages:
+    - zh-TW
+    - ja-JP
+    - en-US
   region: CN
   proxy: ""
 

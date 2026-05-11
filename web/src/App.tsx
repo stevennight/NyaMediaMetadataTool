@@ -34,6 +34,7 @@ type AppConfig = {
     tmdbToken: string;
     tmdbBaseUrl: string;
     language: string;
+    fallbackLanguages: string[];
     region: string;
     proxy: string;
   };
@@ -81,6 +82,26 @@ type TaskDetail = {
   logs: TaskLog[];
   artifacts: Artifact[];
 };
+
+type LanguageOption = { code: string; name: string };
+
+const languageOptions: LanguageOption[] = [
+  { code: 'zh-CN', name: '简体中文' },
+  { code: 'zh-TW', name: '繁体中文' },
+  { code: 'ja-JP', name: '日语' },
+  { code: 'en-US', name: '英语（美国）' },
+  { code: 'en-GB', name: '英语（英国）' },
+  { code: 'ko-KR', name: '韩语' },
+  { code: 'fr-FR', name: '法语' },
+  { code: 'de-DE', name: '德语' },
+  { code: 'es-ES', name: '西班牙语' },
+  { code: 'it-IT', name: '意大利语' },
+  { code: 'pt-BR', name: '葡萄牙语（巴西）' },
+  { code: 'ru-RU', name: '俄语' },
+  { code: 'th-TH', name: '泰语' },
+  { code: 'vi-VN', name: '越南语' },
+  { code: 'id-ID', name: '印尼语' }
+];
 
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -138,30 +159,28 @@ export function App() {
   async function addWatchDir() {
     if (!newWatchDir.trim()) return;
     setError('');
-    try {
-      const response = await fetch('/api/watch-dirs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, enabled: true })
-      });
-      if (!response.ok) throw new Error(await response.text());
-      const created = await response.json();
-      setWatchDirs((items) => [...items, created]);
-      setNewWatchDir('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '添加目录失败');
+    const response = await fetch('/api/watch-dirs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, enabled: true })
+    });
+    if (!response.ok) {
+      setError(await response.text());
+      return;
     }
+    const created = await response.json();
+    setWatchDirs((items) => [...items, created]);
+    setNewWatchDir('');
   }
 
   async function deleteWatchDir(id: number) {
     setError('');
-    try {
-      const response = await fetch(`/api/watch-dirs/${id}`, { method: 'DELETE' });
-      if (!response.ok) throw new Error(await response.text());
-      setWatchDirs((items) => items.filter((item) => item.id !== id));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '删除目录失败');
+    const response = await fetch(`/api/watch-dirs/${id}`, { method: 'DELETE' });
+    if (!response.ok) {
+      setError(await response.text());
+      return;
     }
+    setWatchDirs((items) => items.filter((item) => item.id !== id));
   }
 
   async function rescan(watchDirId?: number) {
@@ -173,7 +192,10 @@ export function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ watchDirId: watchDirId ?? 0 })
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
       const tasksResponse = await fetch('/api/tasks?limit=10');
       setTasks(asArray<Task>(await tasksResponse.json()));
     } catch (err) {
@@ -185,18 +207,17 @@ export function App() {
 
   async function loadTaskDetail(id: number) {
     setError('');
-    try {
-      const response = await fetch(`/api/tasks/${id}`);
-      if (!response.ok) throw new Error(await response.text());
-      const detail = await response.json();
-      setSelectedTask({
-        ...detail,
-        logs: asArray<TaskLog>(detail.logs),
-        artifacts: asArray<Artifact>(detail.artifacts)
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '加载任务详情失败');
+    const response = await fetch(`/api/tasks/${id}`);
+    if (!response.ok) {
+      setError(await response.text());
+      return;
     }
+    const detail = await response.json();
+    setSelectedTask({
+      ...detail,
+      logs: asArray<TaskLog>(detail.logs),
+      artifacts: asArray<Artifact>(detail.artifacts)
+    });
   }
 
   async function saveConfig() {
@@ -210,7 +231,10 @@ export function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config)
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
       const result = await response.json();
       setConfig(result.config);
       setNotice(result.restartRequired ? '配置已保存，部分后台任务需要重启服务后生效。' : '配置已保存。');
@@ -282,7 +306,16 @@ export function App() {
               <label>TMDB API Key<input value={config.scraping.tmdbApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbApiKey = event.target.value; })} placeholder="可选，优先使用 Token" /></label>
               <label>TMDB 地址<input value={config.scraping.tmdbBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbBaseUrl = event.target.value; })} placeholder="https://api.themoviedb.org/3" /></label>
               <label>TMDB 代理<input value={config.scraping.proxy} onChange={(event) => updateConfig((draft) => { draft.scraping.proxy = event.target.value; })} placeholder="http://127.0.0.1:7890" /></label>
-              <label>刮削语言<input value={config.scraping.language} onChange={(event) => updateConfig((draft) => { draft.scraping.language = event.target.value; })} /></label>
+              <LanguagePicker
+                label="刮削语言"
+                value={config.scraping.language}
+                onChange={(value) => updateConfig((draft) => { draft.scraping.language = value; })}
+              />
+              <LanguageMultiPicker
+                label="备用语言顺序"
+                values={config.scraping.fallbackLanguages ?? []}
+                onChange={(values) => updateConfig((draft) => { draft.scraping.fallbackLanguages = values; })}
+              />
               <label>刮削地区<input value={config.scraping.region} onChange={(event) => updateConfig((draft) => { draft.scraping.region = event.target.value; })} /></label>
               <Toggle label="覆盖已有文件" checked={config.processing.overwriteExisting} onChange={(value) => updateConfig((draft) => { draft.processing.overwriteExisting = value; })} />
               <Toggle label="字幕提取" checked={config.processing.enableSubtitles} onChange={(value) => updateConfig((draft) => { draft.processing.enableSubtitles = value; })} />
@@ -421,6 +454,81 @@ function Toggle(props: { label: string; checked: boolean; onChange: (value: bool
   );
 }
 
+function LanguagePicker(props: { label: string; value: string; onChange: (value: string) => void }) {
+  const [query, setQuery] = useState('');
+  const options = filterLanguages(query);
+  const current = languageLabel(props.value);
+  return (
+    <label className="language-picker">
+      <span>{props.label}</span>
+      <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`当前：${current}`} />
+      <div className="language-options">
+        {options.map((option) => (
+          <button
+            className={option.code === props.value ? 'language-option selected' : 'language-option'}
+            key={option.code}
+            type="button"
+            onClick={() => {
+              props.onChange(option.code);
+              setQuery('');
+            }}
+          >
+            {option.name} <small>{option.code}</small>
+          </button>
+        ))}
+      </div>
+    </label>
+  );
+}
+
+function LanguageMultiPicker(props: { label: string; values: string[]; onChange: (values: string[]) => void }) {
+  const [query, setQuery] = useState('');
+  const selected = props.values.filter(Boolean);
+  const selectedSet = new Set(selected.map((value) => value.toLowerCase()));
+  const options = filterLanguages(query).filter((option) => !selectedSet.has(option.code.toLowerCase()));
+
+  function remove(code: string) {
+    props.onChange(selected.filter((value) => value !== code));
+  }
+
+  function add(code: string) {
+    props.onChange([...selected, code]);
+    setQuery('');
+  }
+
+  return (
+    <label className="language-picker">
+      <span>{props.label}</span>
+      <div className="selected-languages">
+        {selected.length ? selected.map((code, index) => (
+          <button className="language-chip" key={code} type="button" onClick={() => remove(code)} title="点击移除">
+            {index + 1}. {languageLabel(code)}
+          </button>
+        )) : <small className="muted">未选择备用语言。</small>}
+      </div>
+      <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索并添加备用语言" />
+      <div className="language-options">
+        {options.map((option) => (
+          <button className="language-option" key={option.code} type="button" onClick={() => add(option.code)}>
+            {option.name} <small>{option.code}</small>
+          </button>
+        ))}
+      </div>
+    </label>
+  );
+}
+
 function asArray<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
+}
+
+function filterLanguages(query: string): LanguageOption[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return languageOptions;
+  return languageOptions.filter((option) => `${option.code} ${option.name}`.toLowerCase().includes(normalized));
+}
+
+function languageLabel(code: string): string {
+  const found = languageOptions.find((option) => option.code.toLowerCase() === code.toLowerCase());
+  return found ? `${found.name} (${found.code})` : code;
 }

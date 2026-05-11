@@ -301,6 +301,42 @@ h3 {
   color: #1f2937;
 }
 
+.language-picker {
+  display: grid;
+  gap: 8px;
+}
+
+.language-options,
+.selected-languages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.language-option,
+.language-chip {
+  border: 1px solid rgba(120, 113, 108, 0.22);
+  background: #fff;
+  color: #1f2937;
+  font-size: 13px;
+}
+
+.language-option.selected,
+.language-chip {
+  background: #111827;
+  color: #fff;
+}
+
+.language-option small {
+  color: #78716c;
+  margin-left: 4px;
+}
+
+.language-option.selected small,
+.language-chip small {
+  color: rgba(255, 255, 255, 0.72);
+}
+
 .toggle-row {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;

@@ -50,14 +50,15 @@ type ProcessingConfig struct {
 }
 
 type ScrapingConfig struct {
-	EnableTMDB   bool   `json:"enableTmdb" yaml:"enableTmdb"`
-	EnablePeople bool   `json:"enablePeople" yaml:"enablePeople"`
-	TMDBAPIKey   string `json:"tmdbApiKey" yaml:"tmdbApiKey"`
-	TMDBToken    string `json:"tmdbToken" yaml:"tmdbToken"`
-	TMDBBaseURL  string `json:"tmdbBaseUrl" yaml:"tmdbBaseUrl"`
-	Language     string `json:"language" yaml:"language"`
-	Region       string `json:"region" yaml:"region"`
-	Proxy        string `json:"proxy" yaml:"proxy"`
+	EnableTMDB        bool     `json:"enableTmdb" yaml:"enableTmdb"`
+	EnablePeople      bool     `json:"enablePeople" yaml:"enablePeople"`
+	TMDBAPIKey        string   `json:"tmdbApiKey" yaml:"tmdbApiKey"`
+	TMDBToken         string   `json:"tmdbToken" yaml:"tmdbToken"`
+	TMDBBaseURL       string   `json:"tmdbBaseUrl" yaml:"tmdbBaseUrl"`
+	Language          string   `json:"language" yaml:"language"`
+	FallbackLanguages []string `json:"fallbackLanguages" yaml:"fallbackLanguages"`
+	Region            string   `json:"region" yaml:"region"`
+	Proxy             string   `json:"proxy" yaml:"proxy"`
 }
 
 type WatchDir struct {

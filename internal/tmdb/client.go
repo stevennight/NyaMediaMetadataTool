@@ -20,6 +20,7 @@ type Client struct {
 	token      string
 	apiKey     string
 	language   string
+	languages  []string
 	region     string
 	people     bool
 	httpClient *http.Client
@@ -114,8 +115,12 @@ func NewClient(cfg config.ScrapingConfig) (*Client, error) {
 		token:    strings.TrimSpace(cfg.TMDBToken),
 		apiKey:   strings.TrimSpace(cfg.TMDBAPIKey),
 		language: defaultString(cfg.Language, "zh-CN"),
-		region:   defaultString(cfg.Region, "CN"),
-		people:   cfg.EnablePeople,
+		languages: languageOrder(
+			defaultString(cfg.Language, "zh-CN"),
+			cfg.FallbackLanguages,
+		),
+		region: defaultString(cfg.Region, "CN"),
+		people: cfg.EnablePeople,
 		httpClient: &http.Client{
 			Timeout:   15 * time.Second,
 			Transport: transport,
@@ -137,7 +142,7 @@ func (c *Client) FindEpisode(ctx context.Context, showQuery string, season int, 
 		return Episode{}, fmt.Errorf("tmdb tv show not found: %s", showQuery)
 	}
 
-	episodeDetail, err := c.getEpisode(ctx, show.ID, season, episode)
+	episodeDetail, err := c.getEpisodeWithFallback(ctx, show.ID, season, episode)
 	if err != nil {
 		return Episode{}, err
 	}
@@ -165,7 +170,7 @@ func (c *Client) FindEpisode(ctx context.Context, showQuery string, season int, 
 
 func (c *Client) searchTV(ctx context.Context, query string) (tvSearchResult, error) {
 	var parsed searchTVResponse
-	if err := c.get(ctx, "/search/tv", url.Values{"query": {query}}, &parsed); err != nil {
+	if err := c.get(ctx, c.language, "/search/tv", url.Values{"query": {query}}, &parsed); err != nil {
 		return tvSearchResult{}, err
 	}
 	if len(parsed.Results) == 0 {
@@ -174,10 +179,35 @@ func (c *Client) searchTV(ctx context.Context, query string) (tvSearchResult, er
 	return parsed.Results[0], nil
 }
 
-func (c *Client) getEpisode(ctx context.Context, showID int, season int, episode int) (episodeResponse, error) {
+func (c *Client) getEpisodeWithFallback(ctx context.Context, showID int, season int, episode int) (episodeResponse, error) {
+	var merged episodeResponse
+	var firstErr error
+	for _, language := range c.languages {
+		detail, err := c.getEpisode(ctx, language, showID, season, episode)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		mergeEpisode(&merged, detail)
+		if episodeComplete(merged) {
+			return merged, nil
+		}
+	}
+	if merged.ID != 0 {
+		return merged, nil
+	}
+	if firstErr != nil {
+		return episodeResponse{}, firstErr
+	}
+	return episodeResponse{}, errors.New("tmdb episode not found")
+}
+
+func (c *Client) getEpisode(ctx context.Context, language string, showID int, season int, episode int) (episodeResponse, error) {
 	var parsed episodeResponse
 	path := fmt.Sprintf("/tv/%d/season/%d/episode/%d", showID, season, episode)
-	if err := c.get(ctx, path, nil, &parsed); err != nil {
+	if err := c.get(ctx, language, path, nil, &parsed); err != nil {
 		return episodeResponse{}, err
 	}
 	return parsed, nil
@@ -191,7 +221,7 @@ type episodeCredits struct {
 func (c *Client) getEpisodeCredits(ctx context.Context, showID int, season int, episode int) (episodeCredits, error) {
 	var parsed episodeCreditsResponse
 	path := fmt.Sprintf("/tv/%d/season/%d/episode/%d/credits", showID, season, episode)
-	if err := c.get(ctx, path, nil, &parsed); err != nil {
+	if err := c.get(ctx, c.language, path, nil, &parsed); err != nil {
 		return episodeCredits{}, err
 	}
 
@@ -234,11 +264,11 @@ func (c *Client) getEpisodeCredits(ctx context.Context, showID int, season int, 
 	return episodeCredits{Actors: actors, Crew: crew}, nil
 }
 
-func (c *Client) get(ctx context.Context, path string, query url.Values, target any) error {
+func (c *Client) get(ctx context.Context, language string, path string, query url.Values, target any) error {
 	if query == nil {
 		query = url.Values{}
 	}
-	query.Set("language", c.language)
+	query.Set("language", language)
 	if c.region != "" {
 		query.Set("region", c.region)
 	}
@@ -264,12 +294,59 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, target 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("tmdb request failed: %s", resp.Status)
 	}
 	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+func languageOrder(primary string, fallback []string) []string {
+	result := []string{}
+	seen := map[string]struct{}{}
+	appendLanguage := func(language string) {
+		language = strings.TrimSpace(language)
+		if language == "" {
+			return
+		}
+		key := strings.ToLower(language)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		result = append(result, language)
+	}
+	appendLanguage(primary)
+	for _, language := range fallback {
+		appendLanguage(language)
+	}
+	return result
+}
+
+func mergeEpisode(target *episodeResponse, source episodeResponse) {
+	if target.ID == 0 {
+		target.ID = source.ID
+	}
+	if target.Name == "" {
+		target.Name = strings.TrimSpace(source.Name)
+	}
+	if target.Overview == "" {
+		target.Overview = strings.TrimSpace(source.Overview)
+	}
+	if target.AirDate == "" {
+		target.AirDate = source.AirDate
+	}
+	if target.VoteAverage == 0 {
+		target.VoteAverage = source.VoteAverage
+	}
+	if target.StillPath == "" {
+		target.StillPath = source.StillPath
+	}
+}
+
+func episodeComplete(episode episodeResponse) bool {
+	return episode.ID != 0 && episode.Name != "" && episode.Overview != ""
 }
 
 func defaultString(value string, fallback string) string {

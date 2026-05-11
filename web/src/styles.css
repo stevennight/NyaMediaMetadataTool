@@ -626,6 +626,15 @@ h3 {
   min-width: auto;
 }
 
+.rescan-toggle {
+  margin-bottom: 14px;
+}
+
+.rescan-toggle span {
+  font-size: 14px;
+  color: #44403c;
+}
+
 @media (max-width: 860px) {
   .app-shell {
     grid-template-columns: 1fr;

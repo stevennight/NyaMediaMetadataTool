@@ -10,17 +10,18 @@ import (
 var ErrTaskNotFound = errors.New("task not found")
 
 type Task struct {
-	ID           int64  `json:"id"`
-	MediaFileID  *int64 `json:"mediaFileId"`
-	MediaPath    string `json:"mediaPath"`
-	Type         string `json:"type"`
-	Status       string `json:"status"`
-	Attempts     int    `json:"attempts"`
-	ErrorSummary string `json:"errorSummary"`
-	StartedAt    string `json:"startedAt"`
-	FinishedAt   string `json:"finishedAt"`
-	CreatedAt    string `json:"createdAt"`
-	UpdatedAt    string `json:"updatedAt"`
+	ID                int64  `json:"id"`
+	MediaFileID       *int64 `json:"mediaFileId"`
+	MediaPath         string `json:"mediaPath"`
+	Type              string `json:"type"`
+	Status            string `json:"status"`
+	OverwriteExisting bool   `json:"overwriteExisting"`
+	Attempts          int    `json:"attempts"`
+	ErrorSummary      string `json:"errorSummary"`
+	StartedAt         string `json:"startedAt"`
+	FinishedAt        string `json:"finishedAt"`
+	CreatedAt         string `json:"createdAt"`
+	UpdatedAt         string `json:"updatedAt"`
 }
 
 type TaskLog struct {
@@ -82,7 +83,7 @@ LEFT JOIN media_files ON media_files.id = tasks.media_file_id
 	queryArgs = append(queryArgs, filters.PageSize, (filters.Page-1)*filters.PageSize)
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.attempts, tasks.error_summary,
+SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.overwrite_existing, tasks.attempts, tasks.error_summary,
        COALESCE(tasks.started_at, ''), COALESCE(tasks.finished_at, ''), tasks.created_at, tasks.updated_at
 FROM tasks
 LEFT JOIN media_files ON media_files.id = tasks.media_file_id
@@ -106,6 +107,7 @@ OFFSET ?
 			&task.MediaPath,
 			&task.Type,
 			&task.Status,
+			&task.OverwriteExisting,
 			&task.Attempts,
 			&task.ErrorSummary,
 			&task.StartedAt,
@@ -180,7 +182,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, error) {
 	var task Task
 	var mediaFileID sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
-SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.attempts, tasks.error_summary,
+SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.overwrite_existing, tasks.attempts, tasks.error_summary,
        COALESCE(tasks.started_at, ''), COALESCE(tasks.finished_at, ''), tasks.created_at, tasks.updated_at
 FROM tasks
 LEFT JOIN media_files ON media_files.id = tasks.media_file_id
@@ -191,6 +193,7 @@ WHERE tasks.id = ?
 		&task.MediaPath,
 		&task.Type,
 		&task.Status,
+		&task.OverwriteExisting,
 		&task.Attempts,
 		&task.ErrorSummary,
 		&task.StartedAt,

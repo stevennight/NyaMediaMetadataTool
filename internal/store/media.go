@@ -31,9 +31,13 @@ func formatStoreTime(value time.Time) string {
 }
 
 func (s *Store) EnqueueMediaTask(ctx context.Context, mediaFileID int64) error {
+	return s.EnqueueMediaTaskWithOverwrite(ctx, mediaFileID, false)
+}
+
+func (s *Store) EnqueueMediaTaskWithOverwrite(ctx context.Context, mediaFileID int64, overwriteExisting bool) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO tasks (media_file_id, type, status)
-SELECT ?, 'media_process', 'pending'
+INSERT INTO tasks (media_file_id, type, status, overwrite_existing)
+SELECT ?, 'media_process', 'pending', ?
 WHERE EXISTS (
   SELECT 1
   FROM media_files
@@ -45,6 +49,13 @@ AND NOT EXISTS (
   FROM tasks
   WHERE media_file_id = ? AND type = 'media_process' AND status IN ('pending', 'running')
 )
-`, mediaFileID, mediaFileID, mediaFileID)
+	`, mediaFileID, boolToIntMedia(overwriteExisting), mediaFileID, mediaFileID)
 	return err
+}
+
+func boolToIntMedia(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

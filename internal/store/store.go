@@ -57,6 +57,36 @@ func (s *Store) configure(ctx context.Context) error {
 
 func (s *Store) Migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, schema)
+	if err != nil {
+		return err
+	}
+	return s.ensureTaskOverwriteColumn(ctx)
+}
+
+func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(tasks)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "overwrite_existing" {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN overwrite_existing INTEGER NOT NULL DEFAULT 0`)
 	return err
 }
 
@@ -90,6 +120,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   media_file_id INTEGER,
   type TEXT NOT NULL,
   status TEXT NOT NULL,
+  overwrite_existing INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0,
   error_summary TEXT NOT NULL DEFAULT '',
   started_at TEXT,

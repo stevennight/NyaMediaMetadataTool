@@ -61,6 +61,7 @@ type Task = {
   mediaPath: string;
   type: string;
   status: string;
+  overwriteExisting: boolean;
   attempts: number;
   errorSummary: string;
   createdAt: string;
@@ -173,6 +174,7 @@ export function App() {
   const [watchDirs, setWatchDirs] = useState<WatchDir[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [newWatchDir, setNewWatchDir] = useState('');
+  const [rescanOverwriteExisting, setRescanOverwriteExisting] = useState(false);
   const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null);
   const [checkingTools, setCheckingTools] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
@@ -312,7 +314,7 @@ export function App() {
       const response = await fetch('/api/tasks/rescan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ watchDirId: watchDirId ?? 0 })
+        body: JSON.stringify({ watchDirId: watchDirId ?? 0, overwriteExisting: rescanOverwriteExisting })
       });
       if (!response.ok) {
         setError(await response.text());
@@ -485,6 +487,10 @@ export function App() {
               <input value={newWatchDir} onChange={(event) => setNewWatchDir(event.target.value)} placeholder="D:\\Media\\Anime" />
               <button onClick={addWatchDir}>添加</button>
             </div>
+            <label className="toggle-row rescan-toggle">
+              <span>补扫覆盖已有文件</span>
+              <input type="checkbox" checked={rescanOverwriteExisting} onChange={(event) => setRescanOverwriteExisting(event.target.checked)} />
+            </label>
             {watchDirs.length ? watchDirs.map((dir) => (
               <div className="dir-item" key={dir.id}>
                 <div>
@@ -600,6 +606,7 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
         </div>
         <Row label="任务" value={`${props.detail.task.type} #${props.detail.task.id}`} />
         {props.detail.task.mediaPath && <Row label="文件" value={props.detail.task.mediaPath} />}
+        <Row label="覆盖已有" value={props.detail.task.overwriteExisting ? '是' : '否'} />
         <Row label="状态" value={props.detail.task.status} />
         <Row label="尝试次数" value={String(props.detail.task.attempts)} />
         <Row label="创建时间" value={formatStoredTime(props.detail.task.createdAt, props.timezone)} />

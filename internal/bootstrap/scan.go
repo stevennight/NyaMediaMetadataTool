@@ -18,14 +18,14 @@ func SyncAndScan(ctx context.Context, cfg config.Config, st *store.Store, logger
 	}
 
 	for _, dir := range cfg.WatchDirs {
-		if err := ScanWatchDir(ctx, cfg, st, logger, dir); err != nil {
+		if err := ScanWatchDir(ctx, cfg, st, logger, dir, false); err != nil {
 			logger.Warn("bootstrap scan failed", "path", dir.Path, "error", err)
 		}
 	}
 	return nil
 }
 
-func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, dir config.WatchDir) error {
+func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, dir config.WatchDir, overwriteExisting bool) error {
 	if !dir.Enabled {
 		return nil
 	}
@@ -66,7 +66,7 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 			return nil
 		}
 
-		if err := st.EnqueueMediaTask(ctx, mediaFileID); err != nil {
+		if err := st.EnqueueMediaTaskWithOverwrite(ctx, mediaFileID, overwriteExisting); err != nil {
 			logger.Warn("enqueue media task failed", "path", path, "error", err)
 		}
 		return nil

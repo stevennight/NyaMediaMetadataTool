@@ -254,7 +254,8 @@ func (s *Server) handleDeleteWatchDir(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	cfg := s.snapshotConfig()
 	type request struct {
-		WatchDirID int64 `json:"watchDirId"`
+		WatchDirID        int64 `json:"watchDirId"`
+		OverwriteExisting bool  `json:"overwriteExisting"`
 	}
 	var input request
 	_ = json.NewDecoder(r.Body).Decode(&input)
@@ -283,7 +284,7 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		for _, dir := range dirs {
 			cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: dir.Enabled}
-			if err := bootstrap.ScanWatchDir(context.Background(), cfg, s.store, s.logger, cfgDir); err != nil {
+			if err := bootstrap.ScanWatchDir(context.Background(), cfg, s.store, s.logger, cfgDir, input.OverwriteExisting); err != nil {
 				s.logger.Warn("manual rescan failed", "path", dir.Path, "error", err)
 			}
 		}

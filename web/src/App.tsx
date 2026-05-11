@@ -422,14 +422,14 @@ export function App() {
                 )) : <p className="muted">暂无日志。</p>}
                 <h3>产物</h3>
                 {asArray<Artifact>(selectedTask.artifacts).length ? asArray<Artifact>(selectedTask.artifacts).map((artifact) => (
-                  <Row key={artifact.id} label={artifact.type} value={artifact.path} />
+                  <ArtifactRow key={artifact.id} artifact={artifact} />
                 )) : <p className="muted">暂无产物。</p>}
               </div>
             ) : <p className="muted">点击任务查看详情。</p>}
           </Card>
 
           <Card title="最近产物">
-            {artifacts.length ? artifacts.map((artifact) => <Row key={artifact.id} label={artifact.type} value={artifact.path} />) : <p className="muted">暂无产物。</p>}
+            {artifacts.length ? artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} />) : <p className="muted">暂无产物。</p>}
           </Card>
         </section>
       )}
@@ -461,6 +461,10 @@ function Row(props: { label: string; value: string }) {
       <strong>{props.value}</strong>
     </div>
   );
+}
+
+function ArtifactRow(props: { artifact: Artifact }) {
+  return <Row label={`${props.artifact.type} · ${props.artifact.createdAt}`} value={props.artifact.path} />;
 }
 
 function Flag(props: { label: string; enabled?: boolean }) {

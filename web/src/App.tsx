@@ -261,30 +261,29 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <section className="hero admin-hero">
+      <aside className="sidebar">
         <div>
           <p className="eyebrow">NyaMediaMetadataTool</p>
           <h1>媒体元数据管理后台</h1>
-          <p className="summary">替代神医助手的本地生成职责：NFO、MediaInfo、BIF、字幕提取与 TMDB 增强。</p>
+          <p className="summary">本地媒体伴生文件、NFO、BIF、字幕和刮削任务管理。</p>
         </div>
-        <div className="status-card">
-          <span className="label">服务状态</span>
+        <nav className="module-nav" aria-label="后台模块">
+          <TabButton active={activePage === 'dashboard'} label="Dashboard" onClick={() => setActivePage('dashboard')} />
+          <TabButton active={activePage === 'settings'} label="设置" onClick={() => setActivePage('settings')} />
+          <TabButton active={activePage === 'watchDirs'} label="监听目录" onClick={() => setActivePage('watchDirs')} />
+          <TabButton active={activePage === 'tasks'} label="任务" onClick={() => setActivePage('tasks')} />
+        </nav>
+        <div className="service-mini">
+          <span>服务状态</span>
           <strong>{health?.status ?? 'loading'}</strong>
-          <small>{health?.time ?? ''}</small>
         </div>
-      </section>
+      </aside>
 
-      <nav className="module-nav" aria-label="后台模块">
-        <TabButton active={activePage === 'dashboard'} label="Dashboard" onClick={() => setActivePage('dashboard')} />
-        <TabButton active={activePage === 'settings'} label="设置" onClick={() => setActivePage('settings')} />
-        <TabButton active={activePage === 'watchDirs'} label="监听目录" onClick={() => setActivePage('watchDirs')} />
-        <TabButton active={activePage === 'tasks'} label="任务" onClick={() => setActivePage('tasks')} />
-      </nav>
+      <section className="content-panel">
+        {error && <section className="error-card">{error}</section>}
+        {notice && <section className="notice-card">{notice}</section>}
 
-      {error && <section className="error-card">{error}</section>}
-      {notice && <section className="notice-card">{notice}</section>}
-
-      {activePage === 'dashboard' && (
+        {activePage === 'dashboard' && (
         <section className="page-grid dashboard-grid">
           <Card title="当前配置">
             <Row label="监听地址" value={config?.server.addr ?? '-'} />
@@ -313,7 +312,7 @@ export function App() {
         </section>
       )}
 
-      {activePage === 'settings' && (
+        {activePage === 'settings' && (
         <section className="page-grid settings-grid">
           <Card title="设置" action={<button onClick={saveConfig} disabled={savingConfig || !config}>{savingConfig ? '保存中' : '保存配置'}</button>}>
             {config ? (
@@ -349,7 +348,7 @@ export function App() {
         </section>
       )}
 
-      {activePage === 'watchDirs' && (
+        {activePage === 'watchDirs' && (
         <section className="page-grid">
           <Card title="监听目录" action={<button onClick={() => rescan()} disabled={rescanning}>{rescanning ? '补扫中' : '全部补扫'}</button>}>
             <div className="form-row">
@@ -372,7 +371,7 @@ export function App() {
         </section>
       )}
 
-      {activePage === 'tasks' && (
+        {activePage === 'tasks' && (
         <section className="page-grid task-page-grid">
           <Card title="任务">
             {tasks.length ? tasks.map((task) => (
@@ -414,6 +413,7 @@ export function App() {
           </Card>
         </section>
       )}
+      </section>
     </main>
   );
 }

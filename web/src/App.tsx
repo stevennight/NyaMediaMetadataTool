@@ -91,6 +91,26 @@ type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks';
 
+const pagePaths: Record<PageKey, string> = {
+  dashboard: '/',
+  settings: '/settings',
+  watchDirs: '/watch-dirs',
+  tasks: '/tasks'
+};
+
+function pageFromPath(pathname: string): PageKey {
+  switch (pathname) {
+    case '/settings':
+      return 'settings';
+    case '/watch-dirs':
+      return 'watchDirs';
+    case '/tasks':
+      return 'tasks';
+    default:
+      return 'dashboard';
+  }
+}
+
 const languageOptions: LanguageOption[] = [
   { code: 'zh-CN', name: '简体中文' },
   { code: 'zh-TW', name: '繁体中文' },
@@ -140,7 +160,7 @@ export function App() {
   const [notice, setNotice] = useState('');
   const [rescanning, setRescanning] = useState(false);
   const [error, setError] = useState<string>('');
-  const [activePage, setActivePage] = useState<PageKey>('dashboard');
+  const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
 
   useEffect(() => {
     async function load() {
@@ -166,6 +186,23 @@ export function App() {
 
     void load();
   }, []);
+
+  useEffect(() => {
+    function handlePopState() {
+      setActivePage(pageFromPath(window.location.pathname));
+    }
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  function navigate(page: PageKey) {
+    setActivePage(page);
+    const path = pagePaths[page];
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, '', path);
+    }
+  }
 
   async function checkTools() {
     setCheckingTools(true);
@@ -287,10 +324,10 @@ export function App() {
           <p className="summary">本地媒体伴生文件、NFO、BIF、字幕和刮削任务管理。</p>
         </div>
         <nav className="module-nav" aria-label="后台模块">
-          <TabButton active={activePage === 'dashboard'} label="Dashboard" onClick={() => setActivePage('dashboard')} />
-          <TabButton active={activePage === 'settings'} label="设置" onClick={() => setActivePage('settings')} />
-          <TabButton active={activePage === 'watchDirs'} label="监听目录" onClick={() => setActivePage('watchDirs')} />
-          <TabButton active={activePage === 'tasks'} label="任务" onClick={() => setActivePage('tasks')} />
+          <TabButton active={activePage === 'dashboard'} label="Dashboard" onClick={() => navigate('dashboard')} />
+          <TabButton active={activePage === 'settings'} label="设置" onClick={() => navigate('settings')} />
+          <TabButton active={activePage === 'watchDirs'} label="监听目录" onClick={() => navigate('watchDirs')} />
+          <TabButton active={activePage === 'tasks'} label="任务" onClick={() => navigate('tasks')} />
         </nav>
         <div className="service-mini">
           <span>服务状态</span>

@@ -35,10 +35,17 @@ type NFOResult struct {
 	ThumbPath     string
 	ShowNFOPath   string
 	SeasonNFOPath string
+	Images        []ImageArtifact
 	TMDBStatus    string
 	TMDBDetail    string
 	TMDBShowName  string
 	TMDBEpisode   string
+}
+
+type ImageArtifact struct {
+	Type   string
+	Path   string
+	Status string
 }
 
 type episodeNFO struct {
@@ -166,7 +173,9 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 	outputPath := strings.TrimSuffix(media.Path, filepath.Ext(media.Path)) + ".nfo"
 	if !cfg.Processing.OverwriteExisting {
 		if _, err := os.Stat(outputPath); err == nil {
-			return NFOResult{Path: outputPath, TMDBStatus: "skipped", TMDBDetail: "nfo already exists"}, nil
+			result := NFOResult{Path: outputPath, TMDBStatus: "skipped", TMDBDetail: "nfo already exists"}
+			applyTMDBShowAndSeasonImages(ctx, cfg, episode, &result)
+			return result, nil
 		}
 	}
 
@@ -189,6 +198,7 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 	result := NFOResult{Path: outputPath}
 	applyTMDBEpisode(ctx, cfg, episode, &doc, &result)
 	applyTMDBShowAndSeason(ctx, cfg, episode, &result)
+	applyTMDBShowAndSeasonImages(ctx, cfg, episode, &result)
 
 	if err := writeXMLFile(outputPath, doc); err != nil {
 		return NFOResult{}, err
@@ -327,6 +337,75 @@ func applyTMDBShowAndSeason(ctx context.Context, cfg config.Config, episode epis
 	} else if result.TMDBDetail == "" {
 		result.TMDBDetail = "season nfo failed: " + err.Error()
 	}
+}
+
+func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult) {
+	if !cfg.Processing.EnableImageTakeover || !imageSourceEnabled(cfg, "tmdb") {
+		return
+	}
+	client, err := tmdb.NewClient(cfg.Scraping)
+	if err != nil {
+		return
+	}
+	show, season, err := client.FindShowAndSeasonImages(ctx, episode.Show, episode.Season, cfg.Scraping.PreferOriginalLanguagePoster)
+	if err != nil {
+		if result.TMDBDetail == "" {
+			result.TMDBDetail = "show/season images failed: " + err.Error()
+		}
+		return
+	}
+
+	showDir := showNFOBaseDir(result.Path)
+	seasonDir := filepath.Dir(result.Path)
+	downloads := []ImageArtifact{
+		{Type: "poster", Path: filepath.Join(showDir, "poster.jpg")},
+		{Type: "fanart", Path: filepath.Join(showDir, "fanart.jpg")},
+		{Type: "clearlogo", Path: filepath.Join(showDir, "clearlogo.png")},
+		{Type: "clearart", Path: filepath.Join(showDir, "clearart.png")},
+		{Type: "season-poster", Path: seasonPosterPath(showDir, seasonDir, episode.Season)},
+	}
+	urls := []string{
+		client.ImageURL(show.PosterPath),
+		client.ImageURL(show.BackdropPath),
+		client.ImageURL(show.LogoPath),
+		client.ImageURL(show.LogoPath),
+		client.ImageURL(season.PosterPath),
+	}
+
+	for index, item := range downloads {
+		if strings.TrimSpace(urls[index]) == "" {
+			continue
+		}
+		path, status, err := ensureImageFile(ctx, cfg, item.Path, urls[index])
+		if err != nil {
+			if result.TMDBDetail == "" {
+				result.TMDBDetail = item.Type + " image failed: " + err.Error()
+			}
+			continue
+		}
+		if path != "" {
+			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: path, Status: status})
+		}
+	}
+}
+
+func imageSourceEnabled(cfg config.Config, source string) bool {
+	if len(cfg.Scraping.ImageSources) == 0 {
+		return strings.EqualFold(source, "tmdb")
+	}
+	for _, item := range cfg.Scraping.ImageSources {
+		if strings.EqualFold(strings.TrimSpace(item), source) {
+			return true
+		}
+	}
+	return false
+}
+
+func seasonPosterPath(showDir string, seasonDir string, season int) string {
+	if filepath.Clean(showDir) == filepath.Clean(seasonDir) {
+		return filepath.Join(showDir, fmt.Sprintf("season%02d-poster.jpg", season))
+	}
+	return filepath.Join(seasonDir, "poster.jpg")
 }
 
 func showNFOBaseDir(episodeNFOPath string) string {
@@ -527,38 +606,50 @@ func ensureEpisodeThumb(ctx context.Context, cfg config.Config, nfoPath string, 
 		return "", nil
 	}
 	thumbPath := strings.TrimSuffix(nfoPath, filepath.Ext(nfoPath)) + "-thumb.jpg"
+	path, _, err := ensureImageFile(ctx, cfg, thumbPath, imageURL)
+	return path, err
+}
+
+func ensureImageFile(ctx context.Context, cfg config.Config, outputPath string, imageURL string) (string, string, error) {
+	imageURL = strings.TrimSpace(imageURL)
+	if imageURL == "" {
+		return "", "", nil
+	}
 	if !cfg.Processing.OverwriteExisting {
-		if _, err := os.Stat(thumbPath); err == nil {
-			return thumbPath, nil
+		if _, err := os.Stat(outputPath); err == nil {
+			return outputPath, "skipped", nil
 		}
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return "", "", err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	client, err := httpClientForScraping(cfg)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("thumb request failed: %s", resp.Status)
+		return "", "", fmt.Errorf("image request failed: %s", resp.Status)
 	}
 
-	file, err := os.Create(thumbPath)
+	file, err := os.Create(outputPath)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer func() { _ = file.Close() }()
 	if _, err := io.Copy(file, resp.Body); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return thumbPath, nil
+	return outputPath, "generated", nil
 }
 
 func httpClientForScraping(cfg config.Config) (*http.Client, error) {

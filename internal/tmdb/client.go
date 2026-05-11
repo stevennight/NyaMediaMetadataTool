@@ -42,13 +42,17 @@ type Episode struct {
 }
 
 type Show struct {
-	ID           int
-	Name         string
-	Overview     string
-	FirstAirDate string
-	Status       string
-	VoteAverage  float64
-	Genres       []string
+	ID               int
+	Name             string
+	OriginalLanguage string
+	Overview         string
+	FirstAirDate     string
+	Status           string
+	VoteAverage      float64
+	Genres           []string
+	PosterPath       string
+	BackdropPath     string
+	LogoPath         string
 }
 
 type Season struct {
@@ -58,6 +62,7 @@ type Season struct {
 	AirDate      string
 	SeasonNumber int
 	EpisodeCount int
+	PosterPath   string
 }
 
 type Actor struct {
@@ -95,14 +100,15 @@ type episodeResponse struct {
 }
 
 type showResponse struct {
-	ID           int           `json:"id"`
-	Name         string        `json:"name"`
-	OriginalName string        `json:"original_name"`
-	Overview     string        `json:"overview"`
-	FirstAirDate string        `json:"first_air_date"`
-	Status       string        `json:"status"`
-	VoteAverage  float64       `json:"vote_average"`
-	Genres       []genreResult `json:"genres"`
+	ID               int           `json:"id"`
+	Name             string        `json:"name"`
+	OriginalName     string        `json:"original_name"`
+	OriginalLanguage string        `json:"original_language"`
+	Overview         string        `json:"overview"`
+	FirstAirDate     string        `json:"first_air_date"`
+	Status           string        `json:"status"`
+	VoteAverage      float64       `json:"vote_average"`
+	Genres           []genreResult `json:"genres"`
 }
 
 type genreResult struct {
@@ -116,6 +122,21 @@ type seasonResponse struct {
 	AirDate      string `json:"air_date"`
 	SeasonNumber int    `json:"season_number"`
 	Episodes     []any  `json:"episodes"`
+}
+
+type imageResponse struct {
+	Posters   []imageItem `json:"posters"`
+	Backdrops []imageItem `json:"backdrops"`
+	Logos     []imageItem `json:"logos"`
+}
+
+type imageItem struct {
+	FilePath      string  `json:"file_path"`
+	Iso6391       string  `json:"iso_639_1"`
+	VoteAverage   float64 `json:"vote_average"`
+	Width         int     `json:"width"`
+	Height        int     `json:"height"`
+	LanguageMatch string  `json:"-"`
 }
 
 type episodeCreditsResponse struct {
@@ -255,13 +276,14 @@ func (c *Client) FindShowAndSeason(ctx context.Context, showQuery string, season
 	}
 
 	return Show{
-			ID:           showDetail.ID,
-			Name:         firstNonEmpty(showDetail.Name, showDetail.OriginalName, showMatch.Name, showMatch.OriginalName),
-			Overview:     showDetail.Overview,
-			FirstAirDate: showDetail.FirstAirDate,
-			Status:       showDetail.Status,
-			VoteAverage:  showDetail.VoteAverage,
-			Genres:       genres,
+			ID:               showDetail.ID,
+			Name:             firstNonEmpty(showDetail.Name, showDetail.OriginalName, showMatch.Name, showMatch.OriginalName),
+			OriginalLanguage: showDetail.OriginalLanguage,
+			Overview:         showDetail.Overview,
+			FirstAirDate:     showDetail.FirstAirDate,
+			Status:           showDetail.Status,
+			VoteAverage:      showDetail.VoteAverage,
+			Genres:           genres,
 		}, Season{
 			ID:           seasonDetail.ID,
 			Name:         seasonDetail.Name,
@@ -270,6 +292,29 @@ func (c *Client) FindShowAndSeason(ctx context.Context, showQuery string, season
 			SeasonNumber: seasonDetail.SeasonNumber,
 			EpisodeCount: len(seasonDetail.Episodes),
 		}, nil
+}
+
+func (c *Client) FindShowAndSeasonImages(ctx context.Context, showQuery string, season int, preferOriginalLanguagePoster bool) (Show, Season, error) {
+	show, seasonDetail, err := c.FindShowAndSeason(ctx, showQuery, season)
+	if err != nil {
+		return Show{}, Season{}, err
+	}
+
+	languagePriority := c.imageLanguagePriority(show.OriginalLanguage, preferOriginalLanguagePoster)
+	showImages, err := c.getShowImages(ctx, show.ID, languagePriority)
+	if err != nil {
+		return Show{}, Season{}, err
+	}
+	seasonImages, err := c.getSeasonImages(ctx, show.ID, season, languagePriority)
+	if err != nil {
+		return Show{}, Season{}, err
+	}
+
+	show.PosterPath = chooseImage(showImages.Posters, languagePriority, false)
+	show.BackdropPath = chooseImage(showImages.Backdrops, languagePriority, true)
+	show.LogoPath = chooseImage(filterImageExt(showImages.Logos, ".png"), languagePriority, false)
+	seasonDetail.PosterPath = chooseImage(seasonImages.Posters, languagePriority, false)
+	return show, seasonDetail, nil
 }
 
 func (c *Client) searchTV(ctx context.Context, query string) (tvSearchResult, error) {
@@ -372,6 +417,26 @@ func (c *Client) getSeason(ctx context.Context, language string, showID int, sea
 	path := fmt.Sprintf("/tv/%d/season/%d", showID, season)
 	if err := c.get(ctx, language, path, nil, &parsed); err != nil {
 		return seasonResponse{}, err
+	}
+	return parsed, nil
+}
+
+func (c *Client) getShowImages(ctx context.Context, showID int, languages []string) (imageResponse, error) {
+	var parsed imageResponse
+	path := fmt.Sprintf("/tv/%d/images", showID)
+	query := url.Values{"include_image_language": {imageLanguageQuery(languages)}}
+	if err := c.get(ctx, c.language, path, query, &parsed); err != nil {
+		return imageResponse{}, err
+	}
+	return parsed, nil
+}
+
+func (c *Client) getSeasonImages(ctx context.Context, showID int, season int, languages []string) (imageResponse, error) {
+	var parsed imageResponse
+	path := fmt.Sprintf("/tv/%d/season/%d/images", showID, season)
+	query := url.Values{"include_image_language": {imageLanguageQuery(languages)}}
+	if err := c.get(ctx, c.language, path, query, &parsed); err != nil {
+		return imageResponse{}, err
 	}
 	return parsed, nil
 }
@@ -527,6 +592,9 @@ func mergeShow(target *showResponse, source showResponse) {
 	if target.OriginalName == "" {
 		target.OriginalName = strings.TrimSpace(source.OriginalName)
 	}
+	if target.OriginalLanguage == "" {
+		target.OriginalLanguage = strings.TrimSpace(source.OriginalLanguage)
+	}
 	if target.Overview == "" {
 		target.Overview = strings.TrimSpace(source.Overview)
 	}
@@ -589,6 +657,115 @@ func firstNonEmpty(values ...string) string {
 		if strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
 		}
+	}
+	return ""
+}
+
+func (c *Client) imageLanguagePriority(originalLanguage string, preferOriginal bool) []string {
+	result := []string{}
+	seen := map[string]struct{}{}
+	appendLanguage := func(language string) {
+		language = normalizeImageLanguage(language)
+		if language == "" {
+			return
+		}
+		if _, ok := seen[language]; ok {
+			return
+		}
+		seen[language] = struct{}{}
+		result = append(result, language)
+	}
+	if preferOriginal {
+		appendLanguage(originalLanguage)
+	}
+	for _, language := range c.languages {
+		appendLanguage(language)
+	}
+	if !preferOriginal {
+		appendLanguage(originalLanguage)
+	}
+	result = append(result, "")
+	return result
+}
+
+func imageLanguageQuery(languages []string) string {
+	values := make([]string, 0, len(languages)+1)
+	seen := map[string]struct{}{}
+	for _, language := range languages {
+		language = normalizeImageLanguage(language)
+		if language == "" {
+			continue
+		}
+		if _, ok := seen[language]; ok {
+			continue
+		}
+		seen[language] = struct{}{}
+		values = append(values, language)
+	}
+	values = append(values, "null")
+	return strings.Join(values, ",")
+}
+
+func normalizeImageLanguage(language string) string {
+	language = strings.TrimSpace(strings.ToLower(language))
+	if language == "" || language == "null" {
+		return ""
+	}
+	if index := strings.Index(language, "-"); index > 0 {
+		return language[:index]
+	}
+	return language
+}
+
+func chooseImage(images []imageItem, languagePriority []string, landscape bool) string {
+	bestScore := -1.0
+	bestPath := ""
+	for _, image := range images {
+		if strings.TrimSpace(image.FilePath) == "" {
+			continue
+		}
+		imageLanguage := normalizeImageLanguage(image.Iso6391)
+		languageScore := float64(len(languagePriority) + 1)
+		matched := false
+		for index, language := range languagePriority {
+			if language == imageLanguage {
+				languageScore = float64(len(languagePriority) - index)
+				matched = true
+				break
+			}
+		}
+		if !matched && imageLanguage != "" {
+			languageScore = 0
+		}
+		dimensionScore := 0.0
+		if landscape && image.Width > image.Height {
+			dimensionScore = 0.5
+		}
+		if !landscape && image.Height >= image.Width {
+			dimensionScore = 0.5
+		}
+		score := languageScore*100 + image.VoteAverage + dimensionScore
+		if score > bestScore {
+			bestScore = score
+			bestPath = image.FilePath
+		}
+	}
+	return bestPath
+}
+
+func filterImageExt(images []imageItem, ext string) []imageItem {
+	result := make([]imageItem, 0, len(images))
+	for _, image := range images {
+		if strings.EqualFold(filepathExt(image.FilePath), ext) {
+			result = append(result, image)
+		}
+	}
+	return result
+}
+
+func filepathExt(path string) string {
+	if index := strings.LastIndex(path, "."); index >= 0 {
+		return path[index:]
 	}
 	return ""
 }

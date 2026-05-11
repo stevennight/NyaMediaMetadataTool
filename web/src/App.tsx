@@ -99,6 +99,9 @@ type TaskDetail = {
   artifacts: Artifact[];
 };
 
+type RescanScope = 'all' | 'dir' | 'path';
+type RescanStrategy = 'normal' | 'missing' | 'force';
+
 type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks';
@@ -174,7 +177,10 @@ export function App() {
   const [watchDirs, setWatchDirs] = useState<WatchDir[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [newWatchDir, setNewWatchDir] = useState('');
-  const [rescanOverwriteExisting, setRescanOverwriteExisting] = useState(false);
+  const [rescanOpen, setRescanOpen] = useState(false);
+  const [rescanScope, setRescanScope] = useState<RescanScope>('all');
+  const [rescanTarget, setRescanTarget] = useState('');
+  const [rescanStrategy, setRescanStrategy] = useState<RescanStrategy>('normal');
   const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null);
   const [checkingTools, setCheckingTools] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
@@ -307,14 +313,29 @@ export function App() {
     setWatchDirs((items) => items.filter((item) => item.id !== id));
   }
 
-  async function rescan(watchDirId?: number) {
+  async function rescan() {
     setRescanning(true);
     setError('');
     try {
+      const payload: Record<string, string | number> = { strategy: rescanStrategy };
+      if (rescanScope === 'dir') {
+        const selected = watchDirs.find((dir) => dir.path === rescanTarget);
+        if (!selected) {
+          setError('请选择监听目录');
+          return;
+        }
+        payload.watchDirId = selected.id;
+      } else if (rescanScope === 'path') {
+        if (!rescanTarget.trim()) {
+          setError('请输入目录或文件路径');
+          return;
+        }
+        payload.path = rescanTarget.trim();
+      }
       const response = await fetch('/api/tasks/rescan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ watchDirId: watchDirId ?? 0, overwriteExisting: rescanOverwriteExisting })
+        body: JSON.stringify(payload)
       });
       if (!response.ok) {
         setError(await response.text());
@@ -326,6 +347,13 @@ export function App() {
     } finally {
       setRescanning(false);
     }
+  }
+
+  function openRescanDialog(scope: RescanScope, target = '') {
+    setRescanScope(scope);
+    setRescanTarget(target);
+    setRescanStrategy('normal');
+    setRescanOpen(true);
   }
 
   async function loadTaskDetail(id: number) {
@@ -482,15 +510,11 @@ export function App() {
 
         {activePage === 'watchDirs' && (
         <section className="page-grid">
-          <Card title="监听目录" action={<button onClick={() => rescan()} disabled={rescanning}>{rescanning ? '补扫中' : '全部补扫'}</button>}>
+          <Card title="监听目录" action={<button onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '补扫中' : '补扫'}</button>}>
             <div className="form-row">
               <input value={newWatchDir} onChange={(event) => setNewWatchDir(event.target.value)} placeholder="D:\\Media\\Anime" />
               <button onClick={addWatchDir}>添加</button>
             </div>
-            <label className="toggle-row rescan-toggle">
-              <span>补扫覆盖已有文件</span>
-              <input type="checkbox" checked={rescanOverwriteExisting} onChange={(event) => setRescanOverwriteExisting(event.target.checked)} />
-            </label>
             {watchDirs.length ? watchDirs.map((dir) => (
               <div className="dir-item" key={dir.id}>
                 <div>
@@ -498,7 +522,7 @@ export function App() {
                   <small>{dir.enabled ? '启用' : '停用'} · {dir.recursive ? '递归' : '当前层'}</small>
                 </div>
                 <div className="inline-actions">
-                  <button onClick={() => rescan(dir.id)} disabled={rescanning}>补扫</button>
+                  <button onClick={() => openRescanDialog('dir', dir.path)} disabled={rescanning}>补扫</button>
                   <button className="danger" onClick={() => deleteWatchDir(dir.id)}>删除</button>
                 </div>
               </div>
@@ -562,6 +586,7 @@ export function App() {
           {selectedTask && <TaskDetailModal detail={selectedTask} timezone={displayTimezone} onClose={() => setSelectedTask(null)} />}
         </section>
       )}
+      {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onSubmit={() => void rescan()} />}
       </section>
     </main>
   );
@@ -627,6 +652,67 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
         {asArray<Artifact>(props.detail.artifacts).length ? asArray<Artifact>(props.detail.artifacts).map((artifact) => (
           <ArtifactRow key={artifact.id} artifact={artifact} timezone={props.timezone} />
         )) : <p className="muted">暂无产物。</p>}
+      </section>
+    </div>
+  );
+}
+
+function RescanModal(props: {
+  scope: RescanScope;
+  target: string;
+  strategy: RescanStrategy;
+  directories: WatchDir[];
+  rescanning: boolean;
+  onClose: () => void;
+  onScopeChange: (value: RescanScope) => void;
+  onTargetChange: (value: string) => void;
+  onStrategyChange: (value: RescanStrategy) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <section className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <h2>补扫</h2>
+          <button className="secondary" onClick={props.onClose}>关闭</button>
+        </div>
+        <div className="task-filters rescan-modal-grid">
+          <label>
+            范围
+            <select value={props.scope} onChange={(event) => props.onScopeChange(event.target.value as RescanScope)}>
+              <option value="all">全部监听目录</option>
+              <option value="dir">指定监听目录</option>
+              <option value="path">指定路径</option>
+            </select>
+          </label>
+          {props.scope === 'dir' && (
+            <label>
+              监听目录
+              <select value={props.target} onChange={(event) => props.onTargetChange(event.target.value)}>
+                <option value="">请选择</option>
+                {props.directories.map((dir) => <option key={dir.id} value={dir.path}>{dir.path}</option>)}
+              </select>
+            </label>
+          )}
+          {props.scope === 'path' && (
+            <label>
+              路径
+              <input value={props.target} onChange={(event) => props.onTargetChange(event.target.value)} placeholder="D:\\Media\\Anime\\S01" />
+            </label>
+          )}
+          <label>
+            策略
+            <select value={props.strategy} onChange={(event) => props.onStrategyChange(event.target.value as RescanStrategy)}>
+              <option value="normal">正常补扫</option>
+              <option value="missing">只补缺失</option>
+              <option value="force">强制重建</option>
+            </select>
+          </label>
+        </div>
+        <div className="inline-actions modal-actions">
+          <button className="secondary" onClick={props.onClose}>取消</button>
+          <button onClick={props.onSubmit} disabled={props.rescanning}>{props.rescanning ? '补扫中' : '开始补扫'}</button>
+        </div>
       </section>
     </div>
   );

@@ -67,6 +67,8 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	if task.MediaFileID == nil {
 		return errors.New("task has no media file id")
 	}
+	cfg := r.cfg
+	cfg.Processing.OverwriteExisting = task.OverwriteExisting
 	media, err := r.store.GetMediaFileByID(ctx, *task.MediaFileID)
 	if err != nil {
 		return err
@@ -74,7 +76,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "processing started", media.Path)
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate mediainfo", "")
-	mediaInfoPath, err := pipeline.GenerateMediaInfo(ctx, r.cfg, media)
+	mediaInfoPath, err := pipeline.GenerateMediaInfo(ctx, cfg, media)
 	if err != nil {
 		return err
 	}
@@ -88,7 +90,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	}
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "extract subtitles", "")
-	subtitles, err := pipeline.GenerateSubtitles(ctx, r.cfg, media)
+	subtitles, err := pipeline.GenerateSubtitles(ctx, cfg, media)
 	if err != nil {
 		return err
 	}
@@ -103,7 +105,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	}
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate bif", "")
-	bifPath, err := pipeline.GenerateBIF(ctx, r.cfg, media)
+	bifPath, err := pipeline.GenerateBIF(ctx, cfg, media)
 	if err != nil {
 		return err
 	}
@@ -117,7 +119,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	}
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate nfo", "")
-	nfoResult, err := pipeline.GenerateNFO(ctx, r.cfg, media)
+	nfoResult, err := pipeline.GenerateNFO(ctx, cfg, media)
 	if err != nil {
 		return err
 	}
@@ -140,7 +142,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	}
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate series nfo", "")
-	seriesResult, err := pipeline.GenerateSeriesNFO(ctx, r.cfg, media)
+	seriesResult, err := pipeline.GenerateSeriesNFO(ctx, cfg, media)
 	if err != nil {
 		return err
 	}
@@ -158,7 +160,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	}
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate series images", "")
-	imageResult, err := pipeline.GenerateSeriesImages(ctx, r.cfg, media)
+	imageResult, err := pipeline.GenerateSeriesImages(ctx, cfg, media)
 	if err != nil {
 		return err
 	}

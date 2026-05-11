@@ -254,11 +254,24 @@ func (s *Server) handleDeleteWatchDir(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	cfg := s.snapshotConfig()
 	type request struct {
-		WatchDirID        int64 `json:"watchDirId"`
-		OverwriteExisting bool  `json:"overwriteExisting"`
+		WatchDirID int64  `json:"watchDirId"`
+		Path       string `json:"path"`
+		Strategy   string `json:"strategy"`
 	}
 	var input request
 	_ = json.NewDecoder(r.Body).Decode(&input)
+	input.Path = strings.TrimSpace(input.Path)
+	options := scanOptionsFromStrategy(input.Strategy)
+
+	if input.Path != "" {
+		go func() {
+			if err := bootstrap.ScanPath(context.Background(), cfg, s.store, s.logger, input.Path, options); err != nil {
+				s.logger.Warn("manual path rescan failed", "path", input.Path, "error", err)
+			}
+		}()
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "count": 1})
+		return
+	}
 
 	var dirs []store.WatchDir
 	if input.WatchDirID > 0 {
@@ -284,13 +297,24 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		for _, dir := range dirs {
 			cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: dir.Enabled}
-			if err := bootstrap.ScanWatchDir(context.Background(), cfg, s.store, s.logger, cfgDir, input.OverwriteExisting); err != nil {
+			if err := bootstrap.ScanWatchDir(context.Background(), cfg, s.store, s.logger, cfgDir, options); err != nil {
 				s.logger.Warn("manual rescan failed", "path", dir.Path, "error", err)
 			}
 		}
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "count": len(dirs)})
+}
+
+func scanOptionsFromStrategy(strategy string) bootstrap.ScanOptions {
+	switch strings.TrimSpace(strategy) {
+	case "missing":
+		return bootstrap.ScanOptions{MissingOnly: true}
+	case "force":
+		return bootstrap.ScanOptions{OverwriteExisting: true, Force: true}
+	default:
+		return bootstrap.ScanOptions{}
+	}
 }
 
 func (s *Server) snapshotConfig() config.Config {

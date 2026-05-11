@@ -372,6 +372,15 @@ button:disabled {
   padding: 24px;
 }
 
+.rescan-modal-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.modal-actions {
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
 h3 {
   margin: 18px 0 8px;
   font-size: 15px;
@@ -655,7 +664,8 @@ h3 {
   .dashboard-grid,
   .task-page-grid,
   .settings-form,
-  .task-filters {
+  .task-filters,
+  .rescan-modal-grid {
     grid-template-columns: 1fr;
   }
 

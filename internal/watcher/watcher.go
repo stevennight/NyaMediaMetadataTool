@@ -170,7 +170,7 @@ func (w *Watcher) scheduleFile(ctx context.Context, path string) {
 		w.logger.Warn("watch upsert media file failed", "path", path, "error", err)
 		return
 	}
-	if err := w.store.EnqueueMediaTask(ctx, mediaFileID); err != nil {
+	if err := w.store.EnqueueMediaTaskWithOverwrite(ctx, mediaFileID, w.cfg.Processing.OverwriteExisting); err != nil {
 		w.logger.Warn("watch enqueue media task failed", "path", path, "error", err)
 	}
 }

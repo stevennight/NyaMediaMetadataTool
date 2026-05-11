@@ -43,6 +43,7 @@ type Episode struct {
 
 type Show struct {
 	ID               int
+	TVDBID           int
 	Name             string
 	OriginalLanguage string
 	Overview         string
@@ -137,6 +138,10 @@ type imageItem struct {
 	Width         int     `json:"width"`
 	Height        int     `json:"height"`
 	LanguageMatch string  `json:"-"`
+}
+
+type externalIDsResponse struct {
+	TVDBID int `json:"tvdb_id"`
 }
 
 type episodeCreditsResponse struct {
@@ -313,6 +318,7 @@ func (c *Client) FindShowAndSeasonImages(ctx context.Context, showQuery string, 
 	show.PosterPath = chooseImage(showImages.Posters, languagePriority, false)
 	show.BackdropPath = chooseImage(showImages.Backdrops, languagePriority, true)
 	show.LogoPath = chooseImage(filterImageExt(showImages.Logos, ".png"), languagePriority, false)
+	show.TVDBID = c.getTVDBID(ctx, show.ID)
 	seasonDetail.PosterPath = chooseImage(seasonImages.Posters, languagePriority, false)
 	return show, seasonDetail, nil
 }
@@ -439,6 +445,15 @@ func (c *Client) getSeasonImages(ctx context.Context, showID int, season int, la
 		return imageResponse{}, err
 	}
 	return parsed, nil
+}
+
+func (c *Client) getTVDBID(ctx context.Context, showID int) int {
+	var parsed externalIDsResponse
+	path := fmt.Sprintf("/tv/%d/external_ids", showID)
+	if err := c.get(ctx, c.language, path, nil, &parsed); err != nil {
+		return 0
+	}
+	return parsed.TVDBID
 }
 
 func (c *Client) getEpisode(ctx context.Context, language string, showID int, season int, episode int) (episodeResponse, error) {

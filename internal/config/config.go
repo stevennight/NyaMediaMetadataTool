@@ -54,6 +54,8 @@ type ScrapingConfig struct {
 	EnablePeople                 bool     `json:"enablePeople" yaml:"enablePeople"`
 	PreferOriginalLanguagePoster bool     `json:"preferOriginalLanguagePoster" yaml:"preferOriginalLanguagePoster"`
 	ImageSources                 []string `json:"imageSources" yaml:"imageSources"`
+	FanartAPIKey                 string   `json:"fanartApiKey" yaml:"fanartApiKey"`
+	FanartBaseURL                string   `json:"fanartBaseUrl" yaml:"fanartBaseUrl"`
 	TMDBAPIKey                   string   `json:"tmdbApiKey" yaml:"tmdbApiKey"`
 	TMDBToken                    string   `json:"tmdbToken" yaml:"tmdbToken"`
 	TMDBBaseURL                  string   `json:"tmdbBaseUrl" yaml:"tmdbBaseUrl"`
@@ -147,5 +149,8 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Scraping.ImageSources == nil {
 		c.Scraping.ImageSources = []string{"tmdb", "tvdb", "fanart"}
+	}
+	if c.Scraping.FanartBaseURL == "" {
+		c.Scraping.FanartBaseURL = "https://webservice.fanart.tv/v3"
 	}
 }

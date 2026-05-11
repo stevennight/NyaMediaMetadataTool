@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/fanart"
 	"NyaMediaMetadataTool/internal/store"
 	"NyaMediaMetadataTool/internal/tmdb"
 )
@@ -358,6 +359,12 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 
 	showDir := showNFOBaseDir(result.Path)
 	seasonDir := filepath.Dir(result.Path)
+	fanartImages := fanart.TVImages{}
+	if imageSourceEnabled(cfg, "fanart") && show.TVDBID > 0 {
+		if client, err := fanart.NewClient(cfg.Scraping); err == nil {
+			fanartImages, _ = client.GetTVImages(ctx, show.TVDBID, episode.Season, imageLanguages(cfg))
+		}
+	}
 	downloads := []ImageArtifact{
 		{Type: "poster", Path: filepath.Join(showDir, "poster.jpg")},
 		{Type: "fanart", Path: filepath.Join(showDir, "fanart.jpg")},
@@ -366,11 +373,11 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 		{Type: "season-poster", Path: seasonPosterPath(showDir, seasonDir, episode.Season)},
 	}
 	urls := []string{
-		client.ImageURL(show.PosterPath),
-		client.ImageURL(show.BackdropPath),
-		client.ImageURL(show.LogoPath),
-		"",
-		client.ImageURL(season.PosterPath),
+		chooseImageSource(cfg, map[string]string{"tmdb": client.ImageURL(show.PosterPath), "fanart": fanartImages.Poster}),
+		chooseImageSource(cfg, map[string]string{"tmdb": client.ImageURL(show.BackdropPath), "fanart": fanartImages.Fanart}),
+		chooseImageSource(cfg, map[string]string{"tmdb": client.ImageURL(show.LogoPath), "fanart": fanartImages.ClearLogo}),
+		chooseImageSource(cfg, map[string]string{"fanart": fanartImages.ClearArt}),
+		chooseImageSource(cfg, map[string]string{"tmdb": client.ImageURL(season.PosterPath), "fanart": fanartImages.SeasonPoster}),
 	}
 
 	for index, item := range downloads {
@@ -388,6 +395,28 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: path, Status: status})
 		}
 	}
+}
+
+func chooseImageSource(cfg config.Config, candidates map[string]string) string {
+	for _, source := range imageSourceOrder(cfg) {
+		if value := strings.TrimSpace(candidates[strings.ToLower(source)]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func imageSourceOrder(cfg config.Config) []string {
+	if len(cfg.Scraping.ImageSources) == 0 {
+		return []string{"tmdb", "tvdb", "fanart"}
+	}
+	return cfg.Scraping.ImageSources
+}
+
+func imageLanguages(cfg config.Config) []string {
+	languages := []string{cfg.Scraping.Language}
+	languages = append(languages, cfg.Scraping.FallbackLanguages...)
+	return languages
 }
 
 func imageSourceEnabled(cfg config.Config, source string) bool {

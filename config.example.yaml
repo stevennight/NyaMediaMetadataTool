@@ -36,6 +36,8 @@ scraping:
     - tmdb
     - tvdb
     - fanart
+  fanartApiKey: ""
+  fanartBaseUrl: https://webservice.fanart.tv/v3
   tmdbApiKey: ""
   tmdbToken: ""
   tmdbBaseUrl: https://api.themoviedb.org/3

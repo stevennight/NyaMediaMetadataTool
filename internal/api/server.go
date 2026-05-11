@@ -132,8 +132,19 @@ func (s *Server) handleToolsCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	tasks, err := s.store.ListTasks(r.Context(), limit)
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
+	if pageSize == 0 {
+		pageSize, _ = strconv.Atoi(r.URL.Query().Get("limit"))
+	}
+	filters := store.TaskListFilters{
+		Page:     page,
+		PageSize: pageSize,
+		Path:     r.URL.Query().Get("path"),
+		From:     r.URL.Query().Get("from"),
+		To:       r.URL.Query().Get("to"),
+	}
+	tasks, err := s.store.ListTasksFiltered(r.Context(), filters)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

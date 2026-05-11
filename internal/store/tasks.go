@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 )
 
 var ErrTaskNotFound = errors.New("task not found")
@@ -37,21 +38,61 @@ type TaskDetail struct {
 	Artifacts []Artifact `json:"artifacts"`
 }
 
+type TaskListFilters struct {
+	Page     int
+	PageSize int
+	Path     string
+	From     string
+	To       string
+}
+
+type TaskListResult struct {
+	Items    []Task `json:"items"`
+	Total    int    `json:"total"`
+	Page     int    `json:"page"`
+	PageSize int    `json:"pageSize"`
+}
+
 func (s *Store) ListTasks(ctx context.Context, limit int) ([]Task, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+	result, err := s.ListTasksFiltered(ctx, TaskListFilters{Page: 1, PageSize: limit})
+	return result.Items, err
+}
+
+func (s *Store) ListTasksFiltered(ctx context.Context, filters TaskListFilters) (TaskListResult, error) {
+	if filters.Page <= 0 {
+		filters.Page = 1
 	}
+	if filters.PageSize <= 0 || filters.PageSize > 200 {
+		filters.PageSize = 50
+	}
+
+	where, args := buildTaskWhere(filters)
+
+	var total int
+	err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM tasks
+LEFT JOIN media_files ON media_files.id = tasks.media_file_id
+`+where, args...).Scan(&total)
+	if err != nil {
+		return TaskListResult{}, err
+	}
+
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, filters.PageSize, (filters.Page-1)*filters.PageSize)
 
 	rows, err := s.db.QueryContext(ctx, `
 SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.attempts, tasks.error_summary,
        COALESCE(tasks.started_at, ''), COALESCE(tasks.finished_at, ''), tasks.created_at, tasks.updated_at
 FROM tasks
 LEFT JOIN media_files ON media_files.id = tasks.media_file_id
+`+where+`
 ORDER BY tasks.id DESC
 LIMIT ?
-`, limit)
+OFFSET ?
+`, queryArgs...)
 	if err != nil {
-		return nil, err
+		return TaskListResult{}, err
 	}
 	defer rows.Close()
 
@@ -72,12 +113,51 @@ LIMIT ?
 			&task.CreatedAt,
 			&task.UpdatedAt,
 		); err != nil {
-			return nil, err
+			return TaskListResult{}, err
 		}
 		task.MediaFileID = mediaFileID
 		tasks = append(tasks, task)
 	}
-	return tasks, rows.Err()
+	if err := rows.Err(); err != nil {
+		return TaskListResult{}, err
+	}
+	return TaskListResult{Items: tasks, Total: total, Page: filters.Page, PageSize: filters.PageSize}, nil
+}
+
+func buildTaskWhere(filters TaskListFilters) (string, []any) {
+	clauses := make([]string, 0)
+	args := make([]any, 0)
+
+	if path := strings.TrimSpace(filters.Path); path != "" {
+		clauses = append(clauses, "media_files.path LIKE ?")
+		args = append(args, "%"+path+"%")
+	}
+	if from := strings.TrimSpace(filters.From); from != "" {
+		clauses = append(clauses, "tasks.created_at >= ?")
+		args = append(args, normalizeTaskTime(from, false))
+	}
+	if to := strings.TrimSpace(filters.To); to != "" {
+		clauses = append(clauses, "tasks.created_at <= ?")
+		args = append(args, normalizeTaskTime(to, true))
+	}
+	if len(clauses) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+func normalizeTaskTime(value string, endOfDay bool) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "T", " ")
+	if len(value) == len("2006-01-02") {
+		if endOfDay {
+			return value + " 23:59:59"
+		}
+		return value + " 00:00:00"
+	}
+	if len(value) == len("2006-01-02 15:04") {
+		return value + ":00"
+	}
+	return value
 }
 
 func (s *Store) GetTaskDetail(ctx context.Context, id int64) (TaskDetail, error) {

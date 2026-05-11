@@ -57,12 +57,23 @@ type ToolStatus = {
 
 type Task = {
   id: number;
+  mediaFileId?: number;
   mediaPath: string;
   type: string;
   status: string;
   attempts: number;
   errorSummary: string;
   createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  updatedAt?: string;
+};
+
+type TaskListResponse = {
+  items: Task[];
+  total: number;
+  page: number;
+  pageSize: number;
 };
 
 type Artifact = {
@@ -151,6 +162,12 @@ export function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskTotal, setTaskTotal] = useState(0);
+  const [taskPage, setTaskPage] = useState(1);
+  const [taskPageSize] = useState(20);
+  const [taskPathFilter, setTaskPathFilter] = useState('');
+  const [taskFromFilter, setTaskFromFilter] = useState('');
+  const [taskToFilter, setTaskToFilter] = useState('');
   const [watchDirs, setWatchDirs] = useState<WatchDir[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [newWatchDir, setNewWatchDir] = useState('');
@@ -169,14 +186,14 @@ export function App() {
           fetch('/api/health'),
           fetch('/api/config'),
           fetch('/api/tools/status'),
-          fetch('/api/tasks?limit=10'),
+          fetch(`/api/tasks?page=1&pageSize=${taskPageSize}`),
           fetch('/api/watch-dirs'),
           fetch('/api/artifacts?limit=10')
         ]);
         setHealth(await healthResponse.json());
         setConfig(await configResponse.json());
         setTools(asArray<ToolStatus>(await toolsResponse.json()));
-        setTasks(asArray<Task>(await tasksResponse.json()));
+        applyTaskList(await tasksResponse.json());
         setWatchDirs(asArray<WatchDir>(await dirsResponse.json()));
         setArtifacts(asArray<Artifact>(await artifactsResponse.json()));
       } catch (err) {
@@ -185,7 +202,7 @@ export function App() {
     }
 
     void load();
-  }, []);
+  }, [taskPageSize]);
 
   useEffect(() => {
     function handlePopState() {
@@ -202,6 +219,47 @@ export function App() {
     if (window.location.pathname !== path) {
       window.history.pushState(null, '', path);
     }
+  }
+
+  function applyTaskList(value: TaskListResponse | Task[] | null | undefined) {
+    if (Array.isArray(value)) {
+      setTasks(value);
+      setTaskTotal(value.length);
+      setTaskPage(1);
+      return;
+    }
+    setTasks(asArray<Task>(value?.items));
+    setTaskTotal(value?.total ?? 0);
+    setTaskPage(value?.page ?? 1);
+  }
+
+  async function loadTasks(page = taskPage) {
+    const params = new URLSearchParams({ page: String(page), pageSize: String(taskPageSize) });
+    if (taskPathFilter.trim()) params.set('path', taskPathFilter.trim());
+    if (taskFromFilter) params.set('from', taskFromFilter);
+    if (taskToFilter) params.set('to', taskToFilter);
+    const response = await fetch(`/api/tasks?${params.toString()}`);
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+    applyTaskList(await response.json());
+  }
+
+  function resetTaskFilters() {
+    setTaskPathFilter('');
+    setTaskFromFilter('');
+    setTaskToFilter('');
+    void loadTasksWithoutFilters();
+  }
+
+  async function loadTasksWithoutFilters() {
+    const response = await fetch(`/api/tasks?page=1&pageSize=${taskPageSize}`);
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+    applyTaskList(await response.json());
   }
 
   async function checkTools() {
@@ -257,8 +315,7 @@ export function App() {
         setError(await response.text());
         return;
       }
-      const tasksResponse = await fetch('/api/tasks?limit=10');
-      setTasks(asArray<Task>(await tasksResponse.json()));
+      await loadTasks(1);
     } catch (err) {
       setError(err instanceof Error ? err.message : '补扫失败');
     } finally {
@@ -429,45 +486,57 @@ export function App() {
 
         {activePage === 'tasks' && (
         <section className="page-grid task-page-grid">
-          <Card title="任务">
-            {tasks.length ? tasks.map((task) => (
-              <button className="task-row" key={task.id} onClick={() => loadTaskDetail(task.id)}>
-                <span className={`pill ${task.status === 'completed' ? 'ok' : task.status === 'failed' ? 'bad' : ''}`}>{task.status}</span>
-                <strong>{task.type} #{task.id}</strong>
-                <small>{task.errorSummary || task.mediaPath || task.createdAt}</small>
-              </button>
-            )) : <p className="muted">暂无任务。</p>}
-          </Card>
-
-          <Card title="任务详情">
-            {selectedTask ? (
-              <div>
-                <Row label="任务" value={`${selectedTask.task.type} #${selectedTask.task.id}`} />
-                {selectedTask.task.mediaPath && <Row label="文件" value={selectedTask.task.mediaPath} />}
-                <Row label="状态" value={selectedTask.task.status} />
-                <Row label="尝试次数" value={String(selectedTask.task.attempts)} />
-                {selectedTask.task.errorSummary && <Row label="错误" value={selectedTask.task.errorSummary} />}
-                <h3>日志</h3>
-                {asArray<TaskLog>(selectedTask.logs).length ? asArray<TaskLog>(selectedTask.logs).map((log) => (
-                  <div className="log-line" key={log.id}>
-                    <span className={`pill ${log.level === 'error' ? 'bad' : 'ok'}`}>{log.level}</span>
-                    <div>
-                      <strong>{log.message}</strong>
-                      <small>{log.detail || log.createdAt}</small>
-                    </div>
-                  </div>
-                )) : <p className="muted">暂无日志。</p>}
-                <h3>产物</h3>
-                {asArray<Artifact>(selectedTask.artifacts).length ? asArray<Artifact>(selectedTask.artifacts).map((artifact) => (
-                  <ArtifactRow key={artifact.id} artifact={artifact} />
-                )) : <p className="muted">暂无产物。</p>}
+          <Card title="任务列表">
+            <div className="task-filters">
+              <label>路径<input value={taskPathFilter} onChange={(event) => setTaskPathFilter(event.target.value)} placeholder="输入路径关键字" /></label>
+              <label>开始时间<input type="datetime-local" value={taskFromFilter} onChange={(event) => setTaskFromFilter(event.target.value)} /></label>
+              <label>结束时间<input type="datetime-local" value={taskToFilter} onChange={(event) => setTaskToFilter(event.target.value)} /></label>
+              <div className="filter-actions">
+                <button onClick={() => loadTasks(1)}>过滤</button>
+                <button className="secondary" onClick={resetTaskFilters}>重置</button>
               </div>
-            ) : <p className="muted">点击任务查看详情。</p>}
+            </div>
+            <div className="task-table-wrap">
+              <table className="task-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>状态</th>
+                    <th>类型</th>
+                    <th>路径</th>
+                    <th>创建时间</th>
+                    <th>错误</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tasks.length ? tasks.map((task) => (
+                    <tr key={task.id} onClick={() => loadTaskDetail(task.id)}>
+                      <td>#{task.id}</td>
+                      <td><span className={`pill ${task.status === 'completed' ? 'ok' : task.status === 'failed' ? 'bad' : ''}`}>{task.status}</span></td>
+                      <td>{task.type}</td>
+                      <td className="path-cell">{task.mediaPath || '-'}</td>
+                      <td>{task.createdAt}</td>
+                      <td className="path-cell">{task.errorSummary || '-'}</td>
+                    </tr>
+                  )) : (
+                    <tr><td colSpan={6} className="empty-cell">暂无任务。</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="pagination-bar">
+              <span>共 {taskTotal} 条，第 {taskPage} / {Math.max(1, Math.ceil(taskTotal / taskPageSize))} 页</span>
+              <div className="inline-actions">
+                <button className="secondary" disabled={taskPage <= 1} onClick={() => loadTasks(taskPage - 1)}>上一页</button>
+                <button className="secondary" disabled={taskPage >= Math.ceil(taskTotal / taskPageSize)} onClick={() => loadTasks(taskPage + 1)}>下一页</button>
+              </div>
+            </div>
           </Card>
 
           <Card title="最近产物">
             {artifacts.length ? artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} />) : <p className="muted">暂无产物。</p>}
           </Card>
+          {selectedTask && <TaskDetailModal detail={selectedTask} onClose={() => setSelectedTask(null)} />}
         </section>
       )}
       </section>
@@ -502,6 +571,41 @@ function Row(props: { label: string; value: string }) {
 
 function ArtifactRow(props: { artifact: Artifact }) {
   return <Row label={`${props.artifact.type} · ${props.artifact.createdAt}`} value={props.artifact.path} />;
+}
+
+function TaskDetailModal(props: { detail: TaskDetail; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <section className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <h2>任务详情</h2>
+          <button className="secondary" onClick={props.onClose}>关闭</button>
+        </div>
+        <Row label="任务" value={`${props.detail.task.type} #${props.detail.task.id}`} />
+        {props.detail.task.mediaPath && <Row label="文件" value={props.detail.task.mediaPath} />}
+        <Row label="状态" value={props.detail.task.status} />
+        <Row label="尝试次数" value={String(props.detail.task.attempts)} />
+        <Row label="创建时间" value={props.detail.task.createdAt} />
+        {props.detail.task.startedAt && <Row label="开始时间" value={props.detail.task.startedAt} />}
+        {props.detail.task.finishedAt && <Row label="结束时间" value={props.detail.task.finishedAt} />}
+        {props.detail.task.errorSummary && <Row label="错误" value={props.detail.task.errorSummary} />}
+        <h3>日志</h3>
+        {asArray<TaskLog>(props.detail.logs).length ? asArray<TaskLog>(props.detail.logs).map((log) => (
+          <div className="log-line" key={log.id}>
+            <span className={`pill ${log.level === 'error' ? 'bad' : 'ok'}`}>{log.level}</span>
+            <div>
+              <strong>{log.message}</strong>
+              <small>{log.detail || log.createdAt}</small>
+            </div>
+          </div>
+        )) : <p className="muted">暂无日志。</p>}
+        <h3>产物</h3>
+        {asArray<Artifact>(props.detail.artifacts).length ? asArray<Artifact>(props.detail.artifacts).map((artifact) => (
+          <ArtifactRow key={artifact.id} artifact={artifact} />
+        )) : <p className="muted">暂无产物。</p>}
+      </section>
+    </div>
+  );
 }
 
 function Flag(props: { label: string; enabled?: boolean }) {

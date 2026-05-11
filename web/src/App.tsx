@@ -25,7 +25,6 @@ type AppConfig = {
     enableNfo: boolean;
     enableBif: boolean;
     enableImageTakeover: boolean;
-    enableThumbFallback: boolean;
   };
   scraping: {
     enableTmdb: boolean;
@@ -291,7 +290,6 @@ export function App() {
           <Flag label="NFO" enabled={config?.processing.enableNfo} />
           <Flag label="BIF" enabled={config?.processing.enableBif} />
           <Flag label="接管图片" enabled={config?.processing.enableImageTakeover} />
-          <Flag label="单集图兜底" enabled={config?.processing.enableThumbFallback} />
         </Card>
 
         <Card title="配置编辑" action={<button onClick={saveConfig} disabled={savingConfig || !config}>{savingConfig ? '保存中' : '保存配置'}</button>}>

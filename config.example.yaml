@@ -26,7 +26,6 @@ processing:
   enableNfo: true
   enableBif: true
   enableImageTakeover: false
-  enableThumbFallback: false
 
 scraping:
   enableTmdb: true

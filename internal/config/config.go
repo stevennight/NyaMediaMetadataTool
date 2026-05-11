@@ -46,7 +46,6 @@ type ProcessingConfig struct {
 	EnableNFO           bool          `json:"enableNfo" yaml:"enableNfo"`
 	EnableBIF           bool          `json:"enableBif" yaml:"enableBif"`
 	EnableImageTakeover bool          `json:"enableImageTakeover" yaml:"enableImageTakeover"`
-	EnableThumbFallback bool          `json:"enableThumbFallback" yaml:"enableThumbFallback"`
 }
 
 type ScrapingConfig struct {

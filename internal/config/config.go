@@ -19,7 +19,8 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Addr string `json:"addr" yaml:"addr"`
+	Addr     string `json:"addr" yaml:"addr"`
+	Timezone string `json:"timezone" yaml:"timezone"`
 }
 
 type DatabaseConfig struct {
@@ -112,6 +113,9 @@ func Default() Config {
 func (c *Config) applyDefaults() {
 	if c.Server.Addr == "" {
 		c.Server.Addr = "127.0.0.1:18880"
+	}
+	if c.Server.Timezone == "" {
+		c.Server.Timezone = "Asia/Shanghai"
 	}
 	if c.Database.Path == "" {
 		c.Database.Path = "data/nyamedia.db"

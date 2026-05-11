@@ -1,5 +1,6 @@
 server:
   addr: 127.0.0.1:18880
+  timezone: Asia/Shanghai
 
 database:
   path: data/nyamedia.db

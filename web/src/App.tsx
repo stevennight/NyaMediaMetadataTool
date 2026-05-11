@@ -6,7 +6,7 @@ type Health = {
 };
 
 type AppConfig = {
-  server: { addr: string };
+  server: { addr: string; timezone: string };
   database: { path: string };
   tools: {
     ffmpeg: string;
@@ -157,6 +157,8 @@ const regionOptions: RegionOption[] = [
   { code: 'TH', name: '泰国' }
 ];
 
+const timeZoneOptions = ['Asia/Shanghai', 'Asia/Tokyo', 'UTC', 'America/Los_Angeles', 'America/New_York', 'Europe/London'];
+
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -178,6 +180,7 @@ export function App() {
   const [rescanning, setRescanning] = useState(false);
   const [error, setError] = useState<string>('');
   const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
+  const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
 
   useEffect(() => {
     async function load() {
@@ -236,8 +239,8 @@ export function App() {
   async function loadTasks(page = taskPage) {
     const params = new URLSearchParams({ page: String(page), pageSize: String(taskPageSize) });
     if (taskPathFilter.trim()) params.set('path', taskPathFilter.trim());
-    if (taskFromFilter) params.set('from', taskFromFilter);
-    if (taskToFilter) params.set('to', taskToFilter);
+    if (taskFromFilter) params.set('from', zonedInputToUTC(taskFromFilter, displayTimezone, false));
+    if (taskToFilter) params.set('to', zonedInputToUTC(taskToFilter, displayTimezone, true));
     const response = await fetch(`/api/tasks?${params.toString()}`);
     if (!response.ok) {
       setError(await response.text());
@@ -400,6 +403,7 @@ export function App() {
         <section className="page-grid dashboard-grid">
           <Card title="当前配置">
             <Row label="监听地址" value={config?.server.addr ?? '-'} />
+            <Row label="显示时区" value={displayTimezone} />
             <Row label="数据库" value={config?.database.path ?? '-'} />
             <Row label="并发数" value={String(config?.processing.concurrency ?? '-')} />
             <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
@@ -431,6 +435,10 @@ export function App() {
             {config ? (
               <div className="config-form settings-form">
                 <label>ffmpeg<input value={config.tools.ffmpeg} onChange={(event) => updateConfig((draft) => { draft.tools.ffmpeg = event.target.value; })} /></label>
+                <label>显示时区<input list="timezone-options" value={config.server.timezone} onChange={(event) => updateConfig((draft) => { draft.server.timezone = event.target.value; })} placeholder="Asia/Shanghai" /></label>
+                <datalist id="timezone-options">
+                  {timeZoneOptions.map((timezone) => <option key={timezone} value={timezone} />)}
+                </datalist>
                 <label>ffprobe<input value={config.tools.ffprobe} onChange={(event) => updateConfig((draft) => { draft.tools.ffprobe = event.target.value; })} /></label>
                 <label>mkvextract<input value={config.tools.mkvextract} onChange={(event) => updateConfig((draft) => { draft.tools.mkvextract = event.target.value; })} /></label>
                 <label>mediainfo<input value={config.tools.mediainfo} onChange={(event) => updateConfig((draft) => { draft.tools.mediainfo = event.target.value; })} /></label>
@@ -489,8 +497,8 @@ export function App() {
           <Card title="任务列表">
             <div className="task-filters">
               <label>路径<input value={taskPathFilter} onChange={(event) => setTaskPathFilter(event.target.value)} placeholder="输入路径关键字" /></label>
-              <label>开始时间<input type="datetime-local" value={taskFromFilter} onChange={(event) => setTaskFromFilter(event.target.value)} /></label>
-              <label>结束时间<input type="datetime-local" value={taskToFilter} onChange={(event) => setTaskToFilter(event.target.value)} /></label>
+              <label>开始时间（{displayTimezone}）<input type="datetime-local" value={taskFromFilter} onChange={(event) => setTaskFromFilter(event.target.value)} /></label>
+              <label>结束时间（{displayTimezone}）<input type="datetime-local" value={taskToFilter} onChange={(event) => setTaskToFilter(event.target.value)} /></label>
               <div className="filter-actions">
                 <button onClick={() => loadTasks(1)}>过滤</button>
                 <button className="secondary" onClick={resetTaskFilters}>重置</button>
@@ -515,7 +523,7 @@ export function App() {
                       <td><span className={`pill ${task.status === 'completed' ? 'ok' : task.status === 'failed' ? 'bad' : ''}`}>{task.status}</span></td>
                       <td>{task.type}</td>
                       <td className="path-cell">{task.mediaPath || '-'}</td>
-                      <td>{task.createdAt}</td>
+                      <td>{formatStoredTime(task.createdAt, displayTimezone)}</td>
                       <td className="path-cell">{task.errorSummary || '-'}</td>
                     </tr>
                   )) : (
@@ -534,9 +542,9 @@ export function App() {
           </Card>
 
           <Card title="最近产物">
-            {artifacts.length ? artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} />) : <p className="muted">暂无产物。</p>}
+            {artifacts.length ? artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} timezone={displayTimezone} />) : <p className="muted">暂无产物。</p>}
           </Card>
-          {selectedTask && <TaskDetailModal detail={selectedTask} onClose={() => setSelectedTask(null)} />}
+          {selectedTask && <TaskDetailModal detail={selectedTask} timezone={displayTimezone} onClose={() => setSelectedTask(null)} />}
         </section>
       )}
       </section>
@@ -569,11 +577,11 @@ function Row(props: { label: string; value: string }) {
   );
 }
 
-function ArtifactRow(props: { artifact: Artifact }) {
-  return <Row label={`${props.artifact.type} · ${props.artifact.createdAt}`} value={props.artifact.path} />;
+function ArtifactRow(props: { artifact: Artifact; timezone: string }) {
+  return <Row label={`${props.artifact.type} · ${formatStoredTime(props.artifact.createdAt, props.timezone)}`} value={props.artifact.path} />;
 }
 
-function TaskDetailModal(props: { detail: TaskDetail; onClose: () => void }) {
+function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose: () => void }) {
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
       <section className="modal-card" onClick={(event) => event.stopPropagation()}>
@@ -585,9 +593,9 @@ function TaskDetailModal(props: { detail: TaskDetail; onClose: () => void }) {
         {props.detail.task.mediaPath && <Row label="文件" value={props.detail.task.mediaPath} />}
         <Row label="状态" value={props.detail.task.status} />
         <Row label="尝试次数" value={String(props.detail.task.attempts)} />
-        <Row label="创建时间" value={props.detail.task.createdAt} />
-        {props.detail.task.startedAt && <Row label="开始时间" value={props.detail.task.startedAt} />}
-        {props.detail.task.finishedAt && <Row label="结束时间" value={props.detail.task.finishedAt} />}
+        <Row label="创建时间" value={formatStoredTime(props.detail.task.createdAt, props.timezone)} />
+        {props.detail.task.startedAt && <Row label="开始时间" value={formatStoredTime(props.detail.task.startedAt, props.timezone)} />}
+        {props.detail.task.finishedAt && <Row label="结束时间" value={formatStoredTime(props.detail.task.finishedAt, props.timezone)} />}
         {props.detail.task.errorSummary && <Row label="错误" value={props.detail.task.errorSummary} />}
         <h3>日志</h3>
         {asArray<TaskLog>(props.detail.logs).length ? asArray<TaskLog>(props.detail.logs).map((log) => (
@@ -595,13 +603,13 @@ function TaskDetailModal(props: { detail: TaskDetail; onClose: () => void }) {
             <span className={`pill ${log.level === 'error' ? 'bad' : 'ok'}`}>{log.level}</span>
             <div>
               <strong>{log.message}</strong>
-              <small>{log.detail || log.createdAt}</small>
+              <small>{log.detail || formatStoredTime(log.createdAt, props.timezone)}</small>
             </div>
           </div>
         )) : <p className="muted">暂无日志。</p>}
         <h3>产物</h3>
         {asArray<Artifact>(props.detail.artifacts).length ? asArray<Artifact>(props.detail.artifacts).map((artifact) => (
-          <ArtifactRow key={artifact.id} artifact={artifact} />
+          <ArtifactRow key={artifact.id} artifact={artifact} timezone={props.timezone} />
         )) : <p className="muted">暂无产物。</p>}
       </section>
     </div>
@@ -743,6 +751,83 @@ function filterLanguages(query: string): LanguageOption[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return languageOptions;
   return languageOptions.filter((option) => `${option.code} ${option.name}`.toLowerCase().includes(normalized));
+}
+
+function formatStoredTime(value: string, timezone: string): string {
+  const date = parseStoredTime(value);
+  if (!date) return value || '-';
+  try {
+    return formatDateInTimeZone(date, timezone);
+  } catch {
+    return value;
+  }
+}
+
+function zonedInputToUTC(value: string, timezone: string, endOfMinute: boolean): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value);
+  if (!match) return value;
+  const parts = {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4]),
+    minute: Number(match[5]),
+    second: endOfMinute ? 59 : 0
+  };
+  let utcMillis = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  utcMillis -= getTimeZoneOffset(new Date(utcMillis), timezone);
+  utcMillis = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - getTimeZoneOffset(new Date(utcMillis), timezone);
+  return formatUTCForStore(new Date(utcMillis));
+}
+
+function parseStoredTime(value: string): Date | null {
+  if (!value) return null;
+  const normalized = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+  const date = new Date(normalized.endsWith('Z') || /[+-]\d{2}:?\d{2}$/.test(normalized) ? normalized : `${normalized}Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatDateInTimeZone(date: Date, timezone: string): string {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+function getTimeZoneOffset(date: Date, timezone: string): number {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  const zonedMillis = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second)
+  );
+  return zonedMillis - date.getTime();
+}
+
+function formatUTCForStore(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
 }
 
 function languageLabel(code: string): string {

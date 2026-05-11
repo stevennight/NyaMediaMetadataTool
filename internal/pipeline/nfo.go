@@ -21,6 +21,7 @@ import (
 )
 
 var episodePattern = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})`)
+var seasonDirPattern = regexp.MustCompile(`(?i)^(season\s*\d{1,2}|s\d{1,2}|第\s*\d{1,2}\s*季)$`)
 
 type episodeInfo struct {
 	Season  int
@@ -30,12 +31,14 @@ type episodeInfo struct {
 }
 
 type NFOResult struct {
-	Path         string
-	ThumbPath    string
-	TMDBStatus   string
-	TMDBDetail   string
-	TMDBShowName string
-	TMDBEpisode  string
+	Path          string
+	ThumbPath     string
+	ShowNFOPath   string
+	SeasonNFOPath string
+	TMDBStatus    string
+	TMDBDetail    string
+	TMDBShowName  string
+	TMDBEpisode   string
 }
 
 type episodeNFO struct {
@@ -72,6 +75,31 @@ type nfoActor struct {
 	Order     int    `xml:"order,omitempty"`
 	Thumb     string `xml:"thumb,omitempty"`
 	ProfileID string `xml:"profileid,omitempty"`
+}
+
+type tvshowNFO struct {
+	XMLName       xml.Name      `xml:"tvshow"`
+	Title         string        `xml:"title,omitempty"`
+	OriginalTitle string        `xml:"originaltitle,omitempty"`
+	Plot          string        `xml:"plot,omitempty"`
+	Outline       string        `xml:"outline,omitempty"`
+	Premiered     string        `xml:"premiered,omitempty"`
+	Status        string        `xml:"status,omitempty"`
+	Rating        string        `xml:"rating,omitempty"`
+	Genre         []string      `xml:"genre,omitempty"`
+	UniqueID      []nfoUniqueID `xml:"uniqueid,omitempty"`
+}
+
+type seasonNFO struct {
+	XMLName      xml.Name      `xml:"season"`
+	Title        string        `xml:"title,omitempty"`
+	Season       int           `xml:"seasonnumber,omitempty"`
+	EpisodeCount int           `xml:"episodeguide>episodecount,omitempty"`
+	Plot         string        `xml:"plot,omitempty"`
+	Outline      string        `xml:"outline,omitempty"`
+	Premiered    string        `xml:"premiered,omitempty"`
+	Aired        string        `xml:"aired,omitempty"`
+	UniqueID     []nfoUniqueID `xml:"uniqueid,omitempty"`
 }
 
 type nfoFileInfo struct {
@@ -160,14 +188,9 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 
 	result := NFOResult{Path: outputPath}
 	applyTMDBEpisode(ctx, cfg, episode, &doc, &result)
+	applyTMDBShowAndSeason(ctx, cfg, episode, &result)
 
-	data, err := xml.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return NFOResult{}, err
-	}
-	content := append([]byte(xml.Header), data...)
-	content = append(content, '\n')
-	if err := os.WriteFile(outputPath, content, 0o644); err != nil {
+	if err := writeXMLFile(outputPath, doc); err != nil {
 		return NFOResult{}, err
 	}
 	return result, nil
@@ -277,6 +300,151 @@ func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInf
 			doc.Writer = appendUniqueString(doc.Writer, crew.Name)
 		}
 	}
+}
+
+func applyTMDBShowAndSeason(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult) {
+	client, err := tmdb.NewClient(cfg.Scraping)
+	if err != nil {
+		return
+	}
+	show, season, err := client.FindShowAndSeason(ctx, episode.Show, episode.Season)
+	if err != nil {
+		if result.TMDBDetail == "" {
+			result.TMDBDetail = "show/season failed: " + err.Error()
+		}
+		return
+	}
+
+	showPath := filepath.Join(showNFOBaseDir(result.Path), "tvshow.nfo")
+	seasonPath := filepath.Join(filepath.Dir(result.Path), "season.nfo")
+	if err := upsertTVShowNFO(showPath, cfg, show); err == nil {
+		result.ShowNFOPath = showPath
+	} else if result.TMDBDetail == "" {
+		result.TMDBDetail = "tvshow nfo failed: " + err.Error()
+	}
+	if err := upsertSeasonNFO(seasonPath, cfg, season); err == nil {
+		result.SeasonNFOPath = seasonPath
+	} else if result.TMDBDetail == "" {
+		result.TMDBDetail = "season nfo failed: " + err.Error()
+	}
+}
+
+func showNFOBaseDir(episodeNFOPath string) string {
+	dir := filepath.Dir(episodeNFOPath)
+	if seasonDirPattern.MatchString(filepath.Base(dir)) {
+		return filepath.Dir(dir)
+	}
+	return dir
+}
+
+func upsertTVShowNFO(path string, cfg config.Config, show tmdb.Show) error {
+	doc := tvshowNFO{}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = xml.Unmarshal(data, &doc)
+	}
+	incoming := tvshowNFO{
+		Title:         show.Name,
+		OriginalTitle: show.Name,
+		Plot:          show.Overview,
+		Outline:       show.Overview,
+		Premiered:     show.FirstAirDate,
+		Status:        show.Status,
+		Genre:         show.Genres,
+	}
+	if show.VoteAverage > 0 {
+		incoming.Rating = fmt.Sprintf("%.1f", show.VoteAverage)
+	}
+	if show.ID > 0 {
+		incoming.UniqueID = []nfoUniqueID{{Type: "tmdb", Default: true, Value: strconv.Itoa(show.ID)}}
+	}
+
+	doc.XMLName = xml.Name{Local: "tvshow"}
+	mergeText(&doc.Title, incoming.Title, cfg.Processing.OverwriteExisting)
+	mergeText(&doc.OriginalTitle, incoming.OriginalTitle, cfg.Processing.OverwriteExisting)
+	mergeText(&doc.Plot, incoming.Plot, cfg.Processing.OverwriteExisting)
+	mergeText(&doc.Outline, incoming.Outline, cfg.Processing.OverwriteExisting)
+	mergeText(&doc.Premiered, incoming.Premiered, cfg.Processing.OverwriteExisting)
+	mergeText(&doc.Status, incoming.Status, cfg.Processing.OverwriteExisting)
+	mergeText(&doc.Rating, incoming.Rating, cfg.Processing.OverwriteExisting)
+	if cfg.Processing.OverwriteExisting || len(doc.Genre) == 0 {
+		doc.Genre = incoming.Genre
+	}
+	doc.UniqueID = mergeUniqueIDs(doc.UniqueID, incoming.UniqueID, cfg.Processing.OverwriteExisting)
+	return writeXMLFile(path, doc)
+}
+
+func upsertSeasonNFO(path string, cfg config.Config, season tmdb.Season) error {
+	doc := seasonNFO{}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = xml.Unmarshal(data, &doc)
+	}
+	incoming := seasonNFO{
+		Title:        season.Name,
+		Season:       season.SeasonNumber,
+		EpisodeCount: season.EpisodeCount,
+		Plot:         season.Overview,
+		Outline:      season.Overview,
+		Premiered:    season.AirDate,
+		Aired:        season.AirDate,
+	}
+	if season.ID > 0 {
+		incoming.UniqueID = []nfoUniqueID{{Type: "tmdb", Default: true, Value: strconv.Itoa(season.ID)}}
+	}
+
+	doc.XMLName = xml.Name{Local: "season"}
+	mergeText(&doc.Title, incoming.Title, cfg.Processing.OverwriteExisting)
+	mergeText(&doc.Plot, incoming.Plot, cfg.Processing.OverwriteExisting)
+	mergeText(&doc.Outline, incoming.Outline, cfg.Processing.OverwriteExisting)
+	mergeText(&doc.Premiered, incoming.Premiered, cfg.Processing.OverwriteExisting)
+	mergeText(&doc.Aired, incoming.Aired, cfg.Processing.OverwriteExisting)
+	if cfg.Processing.OverwriteExisting || doc.Season == 0 {
+		doc.Season = incoming.Season
+	}
+	if cfg.Processing.OverwriteExisting || doc.EpisodeCount == 0 {
+		doc.EpisodeCount = incoming.EpisodeCount
+	}
+	doc.UniqueID = mergeUniqueIDs(doc.UniqueID, incoming.UniqueID, cfg.Processing.OverwriteExisting)
+	return writeXMLFile(path, doc)
+}
+
+func mergeText(target *string, value string, overwrite bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	if overwrite || strings.TrimSpace(*target) == "" {
+		*target = value
+	}
+}
+
+func mergeUniqueIDs(existing []nfoUniqueID, incoming []nfoUniqueID, overwrite bool) []nfoUniqueID {
+	if overwrite || len(existing) == 0 {
+		return incoming
+	}
+	result := existing
+	for _, next := range incoming {
+		found := false
+		for _, current := range result {
+			if strings.EqualFold(current.Type, next.Type) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, next)
+		}
+	}
+	return result
+}
+
+func writeXMLFile(path string, doc any) error {
+	data, err := xml.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	content := append([]byte(xml.Header), data...)
+	content = append(content, '\n')
+	return os.WriteFile(path, content, 0o644)
 }
 
 func appendUniqueString(values []string, value string) []string {

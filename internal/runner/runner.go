@@ -126,6 +126,18 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 			return err
 		}
 		_ = r.store.AddTaskLog(ctx, task.ID, "info", "nfo generated", nfoResult.Path)
+		if nfoResult.ShowNFOPath != "" {
+			if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "tvshow-nfo", nfoResult.ShowNFOPath, "generated"); err != nil {
+				return err
+			}
+			_ = r.store.AddTaskLog(ctx, task.ID, "info", "tvshow nfo generated", nfoResult.ShowNFOPath)
+		}
+		if nfoResult.SeasonNFOPath != "" {
+			if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "season-nfo", nfoResult.SeasonNFOPath, "generated"); err != nil {
+				return err
+			}
+			_ = r.store.AddTaskLog(ctx, task.ID, "info", "season nfo generated", nfoResult.SeasonNFOPath)
+		}
 		if nfoResult.ThumbPath != "" {
 			if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "thumb", nfoResult.ThumbPath, "generated"); err != nil {
 				return err

@@ -41,6 +41,25 @@ type Episode struct {
 	Crew         []CrewMember
 }
 
+type Show struct {
+	ID           int
+	Name         string
+	Overview     string
+	FirstAirDate string
+	Status       string
+	VoteAverage  float64
+	Genres       []string
+}
+
+type Season struct {
+	ID           int
+	Name         string
+	Overview     string
+	AirDate      string
+	SeasonNumber int
+	EpisodeCount int
+}
+
 type Actor struct {
 	Name        string
 	Role        string
@@ -73,6 +92,30 @@ type episodeResponse struct {
 	AirDate     string  `json:"air_date"`
 	VoteAverage float64 `json:"vote_average"`
 	StillPath   string  `json:"still_path"`
+}
+
+type showResponse struct {
+	ID           int           `json:"id"`
+	Name         string        `json:"name"`
+	OriginalName string        `json:"original_name"`
+	Overview     string        `json:"overview"`
+	FirstAirDate string        `json:"first_air_date"`
+	Status       string        `json:"status"`
+	VoteAverage  float64       `json:"vote_average"`
+	Genres       []genreResult `json:"genres"`
+}
+
+type genreResult struct {
+	Name string `json:"name"`
+}
+
+type seasonResponse struct {
+	ID           int    `json:"id"`
+	Name         string `json:"name"`
+	Overview     string `json:"overview"`
+	AirDate      string `json:"air_date"`
+	SeasonNumber int    `json:"season_number"`
+	Episodes     []any  `json:"episodes"`
 }
 
 type episodeCreditsResponse struct {
@@ -181,6 +224,54 @@ func (c *Client) FindEpisode(ctx context.Context, showQuery string, season int, 
 	}, nil
 }
 
+func (c *Client) FindShowAndSeason(ctx context.Context, showQuery string, season int) (Show, Season, error) {
+	showQuery = strings.TrimSpace(showQuery)
+	if showQuery == "" {
+		return Show{}, Season{}, errors.New("tmdb show query is empty")
+	}
+
+	showMatch, err := c.searchTV(ctx, showQuery)
+	if err != nil {
+		return Show{}, Season{}, err
+	}
+	if showMatch.ID == 0 {
+		return Show{}, Season{}, fmt.Errorf("tmdb tv show not found: %s", showQuery)
+	}
+
+	showDetail, err := c.getShowWithFallback(ctx, showMatch.ID)
+	if err != nil {
+		return Show{}, Season{}, err
+	}
+	seasonDetail, err := c.getSeasonWithFallback(ctx, showMatch.ID, season)
+	if err != nil {
+		return Show{}, Season{}, err
+	}
+
+	genres := make([]string, 0, len(showDetail.Genres))
+	for _, genre := range showDetail.Genres {
+		if strings.TrimSpace(genre.Name) != "" {
+			genres = append(genres, strings.TrimSpace(genre.Name))
+		}
+	}
+
+	return Show{
+			ID:           showDetail.ID,
+			Name:         firstNonEmpty(showDetail.Name, showDetail.OriginalName, showMatch.Name, showMatch.OriginalName),
+			Overview:     showDetail.Overview,
+			FirstAirDate: showDetail.FirstAirDate,
+			Status:       showDetail.Status,
+			VoteAverage:  showDetail.VoteAverage,
+			Genres:       genres,
+		}, Season{
+			ID:           seasonDetail.ID,
+			Name:         seasonDetail.Name,
+			Overview:     seasonDetail.Overview,
+			AirDate:      seasonDetail.AirDate,
+			SeasonNumber: seasonDetail.SeasonNumber,
+			EpisodeCount: len(seasonDetail.Episodes),
+		}, nil
+}
+
 func (c *Client) searchTV(ctx context.Context, query string) (tvSearchResult, error) {
 	var parsed searchTVResponse
 	if err := c.get(ctx, c.language, "/search/tv", url.Values{"query": {query}}, &parsed); err != nil {
@@ -215,6 +306,74 @@ func (c *Client) getEpisodeWithFallback(ctx context.Context, showID int, season 
 		return episodeResponse{}, firstErr
 	}
 	return episodeResponse{}, errors.New("tmdb episode not found")
+}
+
+func (c *Client) getShowWithFallback(ctx context.Context, showID int) (showResponse, error) {
+	var merged showResponse
+	var firstErr error
+	for _, language := range c.languages {
+		detail, err := c.getShow(ctx, language, showID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		mergeShow(&merged, detail)
+		if showComplete(merged) {
+			return merged, nil
+		}
+	}
+	if merged.ID != 0 {
+		return merged, nil
+	}
+	if firstErr != nil {
+		return showResponse{}, firstErr
+	}
+	return showResponse{}, errors.New("tmdb show not found")
+}
+
+func (c *Client) getSeasonWithFallback(ctx context.Context, showID int, season int) (seasonResponse, error) {
+	var merged seasonResponse
+	var firstErr error
+	for _, language := range c.languages {
+		detail, err := c.getSeason(ctx, language, showID, season)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		mergeSeason(&merged, detail)
+		if seasonComplete(merged) {
+			return merged, nil
+		}
+	}
+	if merged.ID != 0 {
+		return merged, nil
+	}
+	if firstErr != nil {
+		return seasonResponse{}, firstErr
+	}
+	return seasonResponse{}, errors.New("tmdb season not found")
+}
+
+func (c *Client) getShow(ctx context.Context, language string, showID int) (showResponse, error) {
+	var parsed showResponse
+	path := fmt.Sprintf("/tv/%d", showID)
+	if err := c.get(ctx, language, path, nil, &parsed); err != nil {
+		return showResponse{}, err
+	}
+	return parsed, nil
+}
+
+func (c *Client) getSeason(ctx context.Context, language string, showID int, season int) (seasonResponse, error) {
+	var parsed seasonResponse
+	path := fmt.Sprintf("/tv/%d/season/%d", showID, season)
+	if err := c.get(ctx, language, path, nil, &parsed); err != nil {
+		return seasonResponse{}, err
+	}
+	return parsed, nil
 }
 
 func (c *Client) getEpisode(ctx context.Context, language string, showID int, season int, episode int) (episodeResponse, error) {
@@ -358,8 +517,64 @@ func mergeEpisode(target *episodeResponse, source episodeResponse) {
 	}
 }
 
+func mergeShow(target *showResponse, source showResponse) {
+	if target.ID == 0 {
+		target.ID = source.ID
+	}
+	if target.Name == "" {
+		target.Name = strings.TrimSpace(source.Name)
+	}
+	if target.OriginalName == "" {
+		target.OriginalName = strings.TrimSpace(source.OriginalName)
+	}
+	if target.Overview == "" {
+		target.Overview = strings.TrimSpace(source.Overview)
+	}
+	if target.FirstAirDate == "" {
+		target.FirstAirDate = source.FirstAirDate
+	}
+	if target.Status == "" {
+		target.Status = source.Status
+	}
+	if target.VoteAverage == 0 {
+		target.VoteAverage = source.VoteAverage
+	}
+	if len(target.Genres) == 0 {
+		target.Genres = source.Genres
+	}
+}
+
+func mergeSeason(target *seasonResponse, source seasonResponse) {
+	if target.ID == 0 {
+		target.ID = source.ID
+	}
+	if target.Name == "" {
+		target.Name = strings.TrimSpace(source.Name)
+	}
+	if target.Overview == "" {
+		target.Overview = strings.TrimSpace(source.Overview)
+	}
+	if target.AirDate == "" {
+		target.AirDate = source.AirDate
+	}
+	if target.SeasonNumber == 0 {
+		target.SeasonNumber = source.SeasonNumber
+	}
+	if len(target.Episodes) == 0 {
+		target.Episodes = source.Episodes
+	}
+}
+
 func episodeComplete(episode episodeResponse) bool {
 	return episode.ID != 0 && episode.Name != "" && episode.Overview != ""
+}
+
+func showComplete(show showResponse) bool {
+	return show.ID != 0 && show.Name != "" && show.Overview != ""
+}
+
+func seasonComplete(season seasonResponse) bool {
+	return season.ID != 0 && season.Name != "" && season.Overview != ""
 }
 
 func defaultString(value string, fallback string) string {

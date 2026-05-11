@@ -485,6 +485,8 @@ function LanguagePicker(props: { label: string; value: string; onChange: (value:
 
 function LanguageMultiPicker(props: { label: string; values: string[]; onChange: (values: string[]) => void }) {
   const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const [dragging, setDragging] = useState<string | null>(null);
   const selected = props.values.filter(Boolean);
   const selectedSet = new Set(selected.map((value) => value.toLowerCase()));
   const options = filterLanguages(query).filter((option) => !selectedSet.has(option.code.toLowerCase()));
@@ -498,25 +500,60 @@ function LanguageMultiPicker(props: { label: string; values: string[]; onChange:
     setQuery('');
   }
 
+  function move(dragCode: string, targetCode: string) {
+    if (dragCode === targetCode) return;
+    const next = selected.filter((code) => code !== dragCode);
+    const targetIndex = next.indexOf(targetCode);
+    if (targetIndex < 0) return;
+    next.splice(targetIndex, 0, dragCode);
+    props.onChange(next);
+  }
+
   return (
-    <label className="language-picker">
+    <div className="language-picker">
       <span>{props.label}</span>
-      <div className="selected-languages">
+      <div className="selected-languages sortable-languages">
         {selected.length ? selected.map((code, index) => (
-          <button className="language-chip" key={code} type="button" onClick={() => remove(code)} title="点击移除">
-            {index + 1}. {languageLabel(code)}
+          <button
+            className={dragging === code ? 'language-chip dragging' : 'language-chip'}
+            draggable
+            key={code}
+            type="button"
+            onClick={() => remove(code)}
+            onDragStart={(event) => {
+              setDragging(code);
+              event.dataTransfer.effectAllowed = 'move';
+              event.dataTransfer.setData('text/plain', code);
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              move(event.dataTransfer.getData('text/plain') || dragging || '', code);
+              setDragging(null);
+            }}
+            onDragEnd={() => setDragging(null)}
+            title="拖拽排序，点击移除"
+          >
+            <span className="drag-handle">::</span>{index + 1}. {languageLabel(code)}
           </button>
         )) : <small className="muted">未选择备用语言。</small>}
       </div>
-      <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索并添加备用语言" />
-      <div className="language-options">
-        {options.map((option) => (
-          <button className="language-option" key={option.code} type="button" onClick={() => add(option.code)}>
-            {option.name} <small>{option.code}</small>
-          </button>
-        ))}
-      </div>
-    </label>
+      <button className="language-dropdown-trigger" type="button" onClick={() => setOpen((value) => !value)}>
+        {open ? '收起语言列表' : '选择备用语言'}
+      </button>
+      {open && (
+        <div className="language-dropdown">
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索语言" />
+          <div className="language-options dropdown-options">
+            {options.length ? options.map((option) => (
+              <button className="language-option" key={option.code} type="button" onClick={() => add(option.code)}>
+                {option.name} <small>{option.code}</small>
+              </button>
+            )) : <small className="muted">没有可添加的语言。</small>}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

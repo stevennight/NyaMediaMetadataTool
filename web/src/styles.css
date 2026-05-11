@@ -416,6 +416,53 @@ h3 {
   font-size: 13px;
 }
 
+.language-dropdown-trigger {
+  justify-self: start;
+  border: 1px solid rgba(120, 113, 108, 0.22);
+  background: #fff;
+  color: #1f2937;
+}
+
+.language-dropdown {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(120, 113, 108, 0.18);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.76);
+  padding: 12px;
+}
+
+.language-dropdown input {
+  width: 100%;
+}
+
+.dropdown-options {
+  max-height: 180px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.sortable-languages {
+  min-height: 38px;
+}
+
+.language-chip {
+  cursor: grab;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.language-chip.dragging {
+  opacity: 0.45;
+}
+
+.drag-handle {
+  color: rgba(255, 255, 255, 0.48);
+  font-weight: 800;
+  letter-spacing: -0.18em;
+}
+
 .language-option.selected,
 .language-chip {
   background: #111827;

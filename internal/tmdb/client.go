@@ -17,6 +17,7 @@ var ErrDisabled = errors.New("tmdb scraping is disabled")
 
 type Client struct {
 	baseURL    string
+	imageURL   string
 	token      string
 	apiKey     string
 	language   string
@@ -112,6 +113,7 @@ func NewClient(cfg config.ScrapingConfig) (*Client, error) {
 
 	return &Client{
 		baseURL:  baseURL,
+		imageURL: "https://image.tmdb.org/t/p/original",
 		token:    strings.TrimSpace(cfg.TMDBToken),
 		apiKey:   strings.TrimSpace(cfg.TMDBAPIKey),
 		language: defaultString(cfg.Language, "zh-CN"),
@@ -126,6 +128,17 @@ func NewClient(cfg config.ScrapingConfig) (*Client, error) {
 			Transport: transport,
 		},
 	}, nil
+}
+
+func (c *Client) ImageURL(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
+	}
+	return c.imageURL + path
 }
 
 func (c *Client) FindEpisode(ctx context.Context, showQuery string, season int, episode int) (Episode, error) {

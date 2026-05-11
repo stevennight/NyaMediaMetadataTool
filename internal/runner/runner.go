@@ -126,6 +126,12 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 			return err
 		}
 		_ = r.store.AddTaskLog(ctx, task.ID, "info", "nfo generated", nfoResult.Path)
+		if nfoResult.ThumbPath != "" {
+			if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "thumb", nfoResult.ThumbPath, "generated"); err != nil {
+				return err
+			}
+			_ = r.store.AddTaskLog(ctx, task.ID, "info", "thumb generated", nfoResult.ThumbPath)
+		}
 		if nfoResult.TMDBStatus != "" {
 			_ = r.store.AddTaskLog(ctx, task.ID, "info", "tmdb "+nfoResult.TMDBStatus, tmdbLogDetail(nfoResult))
 		}

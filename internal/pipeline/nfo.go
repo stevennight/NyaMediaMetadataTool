@@ -6,6 +6,9 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,6 +31,7 @@ type episodeInfo struct {
 
 type NFOResult struct {
 	Path         string
+	ThumbPath    string
 	TMDBStatus   string
 	TMDBDetail   string
 	TMDBShowName string
@@ -47,6 +51,7 @@ type episodeNFO struct {
 	Premiered string        `xml:"premiered,omitempty"`
 	Aired     string        `xml:"aired,omitempty"`
 	Rating    string        `xml:"rating,omitempty"`
+	Thumb     string        `xml:"thumb,omitempty"`
 	UniqueID  []nfoUniqueID `xml:"uniqueid,omitempty"`
 	Actor     []nfoActor    `xml:"actor,omitempty"`
 	Director  []string      `xml:"director,omitempty"`
@@ -247,12 +252,21 @@ func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInf
 	if detail.EpisodeID > 0 {
 		doc.UniqueID = append(doc.UniqueID, nfoUniqueID{Type: "tmdb_episode", Value: strconv.Itoa(detail.EpisodeID)})
 	}
+	if detail.StillPath != "" {
+		thumbPath, err := ensureEpisodeThumb(ctx, cfg, result.Path, client.ImageURL(detail.StillPath))
+		if err == nil && thumbPath != "" {
+			result.ThumbPath = thumbPath
+			doc.Thumb = filepath.Base(thumbPath)
+		} else if err != nil && result.TMDBDetail == "" {
+			result.TMDBDetail = "thumb download failed: " + err.Error()
+		}
+	}
 	for _, actor := range detail.Actors {
 		doc.Actor = append(doc.Actor, nfoActor{
 			Name:  actor.Name,
 			Role:  actor.Role,
 			Order: actor.Order,
-			Thumb: tmdbImageURL(actor.ProfilePath),
+			Thumb: client.ImageURL(actor.ProfilePath),
 		})
 	}
 	for _, crew := range detail.Crew {
@@ -276,17 +290,6 @@ func appendUniqueString(values []string, value string) []string {
 		}
 	}
 	return append(values, value)
-}
-
-func tmdbImageURL(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		return path
-	}
-	return "https://image.tmdb.org/t/p/original" + path
 }
 
 func buildStreamDetails(ctx context.Context, cfg config.Config, mediaPath string) (streamDetails, int, error) {
@@ -348,6 +351,58 @@ func buildStreamDetails(ctx context.Context, cfg config.Config, mediaPath string
 	}
 
 	return result, runtime, nil
+}
+
+func ensureEpisodeThumb(ctx context.Context, cfg config.Config, nfoPath string, imageURL string) (string, error) {
+	imageURL = strings.TrimSpace(imageURL)
+	if imageURL == "" {
+		return "", nil
+	}
+	thumbPath := strings.TrimSuffix(nfoPath, filepath.Ext(nfoPath)) + "-thumb.jpg"
+	if !cfg.Processing.OverwriteExisting {
+		if _, err := os.Stat(thumbPath); err == nil {
+			return thumbPath, nil
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
+	if err != nil {
+		return "", err
+	}
+	client, err := httpClientForScraping(cfg)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("thumb request failed: %s", resp.Status)
+	}
+
+	file, err := os.Create(thumbPath)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+	if _, err := io.Copy(file, resp.Body); err != nil {
+		return "", err
+	}
+	return thumbPath, nil
+}
+
+func httpClientForScraping(cfg config.Config) (*http.Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if strings.TrimSpace(cfg.Scraping.Proxy) != "" {
+		proxyURL, err := url.Parse(cfg.Scraping.Proxy)
+		if err != nil {
+			return nil, err
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+	return &http.Client{Transport: transport}, nil
 }
 
 func parseRuntimeMinutes(value string) int {

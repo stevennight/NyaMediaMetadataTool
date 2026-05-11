@@ -168,7 +168,11 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 				return err
 			}
 		}
-		_ = r.store.AddTaskLog(ctx, task.ID, "info", image.Type+" "+image.Status, image.Path)
+		detail := image.Path
+		if image.Detail != "" {
+			detail = image.Detail
+		}
+		_ = r.store.AddTaskLog(ctx, task.ID, "info", image.Type+" "+image.Status, detail)
 	}
 	return r.store.TouchMediaProcessed(ctx, media.ID)
 }

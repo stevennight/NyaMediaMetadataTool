@@ -57,6 +57,7 @@ type ImageArtifact struct {
 	Type   string
 	Path   string
 	Status string
+	Detail string
 }
 
 type episodeNFO struct {
@@ -389,10 +390,20 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 	showDir := showNFOBaseDir(result.Path)
 	seasonDir := filepath.Dir(result.Path)
 	fanartImages := fanart.TVImages{}
+	fanartDetail := "fanart not enabled"
 	if imageSourceEnabled(cfg, "fanart") && show.TVDBID > 0 {
 		if client, err := fanart.NewClient(cfg.Scraping); err == nil {
-			fanartImages, _ = client.GetTVImages(ctx, show.TVDBID, episode.Season, imageLanguages(cfg))
+			if images, err := client.GetTVImages(ctx, show.TVDBID, episode.Season, imageLanguages(cfg)); err == nil {
+				fanartImages = images
+				fanartDetail = "fanart returned no matching image"
+			} else {
+				fanartDetail = "fanart request failed: " + err.Error()
+			}
+		} else {
+			fanartDetail = "fanart disabled: " + err.Error()
 		}
+	} else if imageSourceEnabled(cfg, "fanart") && show.TVDBID <= 0 {
+		fanartDetail = "fanart requires tvdb id"
 	}
 	downloads := []ImageArtifact{
 		{Type: "poster", Path: filepath.Join(showDir, "poster.jpg")},
@@ -411,6 +422,7 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 
 	for index, item := range downloads {
 		if strings.TrimSpace(urls[index]) == "" {
+			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: item.Path, Status: "unavailable", Detail: imageUnavailableDetail(item.Type, fanartDetail)})
 			continue
 		}
 		path, status, err := ensureImageFile(ctx, cfg, item.Path, urls[index])
@@ -424,6 +436,13 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: path, Status: status})
 		}
 	}
+}
+
+func imageUnavailableDetail(imageType string, fanartDetail string) string {
+	if imageType == "clearart" {
+		return fanartDetail
+	}
+	return "no image candidate from configured sources"
 }
 
 func chooseImageSource(cfg config.Config, candidates map[string]string) string {

@@ -20,7 +20,7 @@ import (
 	"NyaMediaMetadataTool/internal/tmdb"
 )
 
-var episodePattern = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})`)
+var episodePattern = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,4})\b`)
 var seasonDirPattern = regexp.MustCompile(`(?i)^(season\s*\d{1,2}|s\d{1,2}|第\s*\d{1,2}\s*季)$`)
 
 type episodeInfo struct {

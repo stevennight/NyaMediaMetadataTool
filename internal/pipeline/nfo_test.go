@@ -20,6 +20,26 @@ func TestParseEpisodeInfo(t *testing.T) {
 	}
 }
 
+func TestParseEpisodeInfoSupportsFourDigitEpisodes(t *testing.T) {
+	t.Parallel()
+
+	info, ok := parseEpisodeInfo(`D:\Media\名探偵コナン - S01E1201 - 第1201話.mkv`)
+	if !ok {
+		t.Fatal("expected episode info to parse")
+	}
+	if info.Season != 1 || info.Episode != 1201 {
+		t.Fatalf("unexpected season/episode: %+v", info)
+	}
+}
+
+func TestParseEpisodeInfoRejectsPartialFourDigitEpisode(t *testing.T) {
+	t.Parallel()
+
+	if _, ok := parseEpisodeInfo(`D:\Media\名探偵コナン - S01E1201Extra.mkv`); ok {
+		t.Fatal("expected episode token without boundary to be ignored")
+	}
+}
+
 func TestParseEpisodeInfoRejectsNonEpisode(t *testing.T) {
 	t.Parallel()
 

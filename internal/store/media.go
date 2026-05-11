@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"os"
 	"time"
 )
@@ -28,24 +27,14 @@ ON CONFLICT(path) DO UPDATE SET
 }
 
 func (s *Store) EnqueueMediaTask(ctx context.Context, mediaFileID int64) error {
-	var existingID int64
-	err := s.db.QueryRowContext(ctx, `
-SELECT id
-FROM tasks
-WHERE media_file_id = ? AND type = 'media_process' AND status IN ('pending', 'running')
-ORDER BY id DESC
-LIMIT 1
-`, mediaFileID).Scan(&existingID)
-	if err == nil {
-		return nil
-	}
-	if err != nil && err != sql.ErrNoRows {
-		return err
-	}
-
-	_, err = s.db.ExecContext(ctx, `
+	_, err := s.db.ExecContext(ctx, `
 INSERT INTO tasks (media_file_id, type, status)
-VALUES (?, 'media_process', 'pending')
-`, mediaFileID)
+SELECT ?, 'media_process', 'pending'
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM tasks
+  WHERE media_file_id = ? AND type = 'media_process' AND status IN ('pending', 'running')
+)
+`, mediaFileID, mediaFileID)
 	return err
 }

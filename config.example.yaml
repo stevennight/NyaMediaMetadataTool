@@ -1,0 +1,41 @@
+server:
+  addr: 127.0.0.1:8080
+
+database:
+  path: data/nyamedia.db
+
+tools:
+  ffmpeg: ffmpeg
+  ffprobe: ffprobe
+  mkvextract: mkvextract
+  mediainfo: mediainfo
+
+processing:
+  extensions:
+    - .mkv
+    - .mp4
+    - .ts
+  concurrency: 2
+  stableDelay: 30s
+  stableChecks: 2
+  bifWidth: 320
+  bifInterval: 10
+  overwriteExisting: false
+  enableSubtitles: true
+  enableMediaInfo: true
+  enableNfo: true
+  enableBif: true
+  enableImageTakeover: false
+  enableThumbFallback: false
+
+scraping:
+  enableTmdb: true
+  enablePeople: true
+  tmdbApiKey: ""
+  tmdbToken: ""
+  tmdbBaseUrl: https://api.themoviedb.org/3
+  language: zh-CN
+  region: CN
+  proxy: ""
+
+watchDirs: []

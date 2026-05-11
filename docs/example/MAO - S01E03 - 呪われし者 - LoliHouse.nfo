@@ -1,0 +1,58 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<episodedetails>
+  <plot />
+  <outline />
+  <lockdata>false</lockdata>
+  <dateadded>2026-04-25 19:09:32</dateadded>
+  <title>MAO - S01E03 - 呪われし者 - LoliHouse</title>
+  <sorttitle>MAO - S01E03 - 呪われし者 - LoliHouse</sorttitle>
+  <runtime>25</runtime>
+  <episode>3</episode>
+  <season>1</season>
+  <fileinfo>
+    <streamdetails>
+      <video>
+        <codec>hevc</codec>
+        <micodec>hevc</micodec>
+        <bitrate>2983561</bitrate>
+        <width>1920</width>
+        <height>1080</height>
+        <aspect>16:9</aspect>
+        <aspectratio>16:9</aspectratio>
+        <framerate>23.976025</framerate>
+        <scantype>progressive</scantype>
+        <default>True</default>
+        <forced>False</forced>
+        <duration>25</duration>
+        <durationinseconds>1519</durationinseconds>
+      </video>
+      <audio>
+        <codec>aac</codec>
+        <micodec>aac</micodec>
+        <bitrate>192000</bitrate>
+        <language>jpn</language>
+        <scantype>progressive</scantype>
+        <channels>2</channels>
+        <samplingrate>48000</samplingrate>
+        <default>True</default>
+        <forced>False</forced>
+      </audio>
+      <subtitle>
+        <codec>subrip</codec>
+        <micodec>subrip</micodec>
+        <language>chi</language>
+        <scantype>progressive</scantype>
+        <default>True</default>
+        <forced>False</forced>
+      </subtitle>
+      <subtitle>
+        <codec>subrip</codec>
+        <micodec>subrip</micodec>
+        <language>chi</language>
+        <scantype>progressive</scantype>
+        <default>False</default>
+        <forced>False</forced>
+      </subtitle>
+    </streamdetails>
+  </fileinfo>
+</episodedetails>

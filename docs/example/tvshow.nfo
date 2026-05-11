@@ -1,0 +1,92 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<tvshow>
+  <plot><![CDATA[大正时代的阴阳师「摩绪」，因诅咒而活了超过900年。令和时代的少女「菜花」，意外穿越到妖怪横行的大正时代，并在摩绪指出她身上的异变后，得知两人竟被施下同样的诅咒！跨越时代的邂逅、交错的命运。摩绪与菜花携手对抗连锁蔓延的诅咒，揭开背后的真相！]]></plot>
+  <outline><![CDATA[大正时代的阴阳师「摩绪」，因诅咒而活了超过900年。令和时代的少女「菜花」，意外穿越到妖怪横行的大正时代，并在摩绪指出她身上的异变后，得知两人竟被施下同样的诅咒！跨越时代的邂逅、交错的命运。摩绪与菜花携手对抗连锁蔓延的诅咒，揭开背后的真相！]]></outline>
+  <lockdata>false</lockdata>
+  <dateadded>2026-04-25 19:09:32</dateadded>
+  <title>摩绪</title>
+  <originaltitle>MAO</originaltitle>
+  <actor>
+    <name>梶裕贵</name>
+    <role>Mao (voice)</role>
+    <type>Actor</type>
+    <tmdbid>149894</tmdbid>
+  </actor>
+  <actor>
+    <name>川井田夏海</name>
+    <role>Nanoka Kiba (voice)</role>
+    <type>Actor</type>
+    <tmdbid>2492164</tmdbid>
+  </actor>
+  <actor>
+    <name>下野纮</name>
+    <role>Hyakka (voice)</role>
+    <type>Actor</type>
+    <tmdbid>119145</tmdbid>
+  </actor>
+  <actor>
+    <name>丰永利行</name>
+    <role>Kamon (voice)</role>
+    <type>Actor</type>
+    <tmdbid>1014991</tmdbid>
+  </actor>
+  <actor>
+    <name>寺泽百花</name>
+    <type>Actor</type>
+    <tmdbid>4206137</tmdbid>
+  </actor>
+  <actor>
+    <name>兴津和幸</name>
+    <type>Actor</type>
+    <tmdbid>1254260</tmdbid>
+  </actor>
+  <actor>
+    <name>熊井统子</name>
+    <type>Actor</type>
+    <tmdbid>1221438</tmdbid>
+  </actor>
+  <actor>
+    <name>日笠阳子</name>
+    <type>Actor</type>
+    <tmdbid>1072774</tmdbid>
+  </actor>
+  <actor>
+    <name>清水理沙</name>
+    <type>Actor</type>
+    <tmdbid>1255760</tmdbid>
+  </actor>
+  <actor>
+    <name>上田丽奈</name>
+    <type>Actor</type>
+    <tmdbid>1452028</tmdbid>
+  </actor>
+  <actor>
+    <name>松山鹰志</name>
+    <type>Actor</type>
+    <tmdbid>216330</tmdbid>
+  </actor>
+  <trailer>http://www.youtube.com/watch?v=ez71LgemwIA</trailer>
+  <rating>7.3</rating>
+  <year>2026</year>
+  <sorttitle>MX</sorttitle>
+  <mpaa>TV-14</mpaa>
+  <imdb_id>tt37577523</imdb_id>
+  <tmdbid>295999</tmdbid>
+  <premiered>2026-04-04</premiered>
+  <releasedate>2026-04-04</releasedate>
+  <runtime>25</runtime>
+  <genre>动画</genre>
+  <genre>动作冒险</genre>
+  <genre>Sci-Fi &amp; Fantasy</genre>
+  <studio>NHK G</studio>
+  <uniqueid type="tmdb">295999</uniqueid>
+  <uniqueid type="imdb">tt37577523</uniqueid>
+  <uniqueid type="tvdb">465787</uniqueid>
+  <tvdbid>465787</tvdbid>
+  <episodeguide>{"tmdb":"295999","imdb":"tt37577523","tvdb":"465787"}</episodeguide>
+  <id>465787</id>
+  <season>-1</season>
+  <episode>-1</episode>
+  <displayorder>aired</displayorder>
+  <status>Continuing</status>
+</tvshow>

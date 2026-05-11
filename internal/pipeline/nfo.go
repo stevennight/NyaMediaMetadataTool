@@ -1,0 +1,411 @@
+package pipeline
+
+import (
+	"context"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/store"
+	"NyaMediaMetadataTool/internal/tmdb"
+)
+
+var episodePattern = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})`)
+
+type episodeInfo struct {
+	Season  int
+	Episode int
+	Title   string
+	Show    string
+}
+
+type NFOResult struct {
+	Path         string
+	TMDBStatus   string
+	TMDBDetail   string
+	TMDBShowName string
+	TMDBEpisode  string
+}
+
+type episodeNFO struct {
+	XMLName   xml.Name      `xml:"episodedetails"`
+	Title     string        `xml:"title"`
+	ShowTitle string        `xml:"showtitle,omitempty"`
+	SortTitle string        `xml:"sorttitle"`
+	Runtime   int           `xml:"runtime,omitempty"`
+	Season    int           `xml:"season"`
+	Episode   int           `xml:"episode"`
+	Plot      string        `xml:"plot,omitempty"`
+	Outline   string        `xml:"outline,omitempty"`
+	Premiered string        `xml:"premiered,omitempty"`
+	Aired     string        `xml:"aired,omitempty"`
+	Rating    string        `xml:"rating,omitempty"`
+	UniqueID  []nfoUniqueID `xml:"uniqueid,omitempty"`
+	Actor     []nfoActor    `xml:"actor,omitempty"`
+	Director  []string      `xml:"director,omitempty"`
+	Writer    []string      `xml:"credits,omitempty"`
+	LockData  bool          `xml:"lockdata"`
+	FileInfo  *nfoFileInfo  `xml:"fileinfo,omitempty"`
+}
+
+type nfoUniqueID struct {
+	Type    string `xml:"type,attr"`
+	Default bool   `xml:"default,attr,omitempty"`
+	Value   string `xml:",chardata"`
+}
+
+type nfoActor struct {
+	Name      string `xml:"name"`
+	Role      string `xml:"role,omitempty"`
+	Order     int    `xml:"order,omitempty"`
+	Thumb     string `xml:"thumb,omitempty"`
+	ProfileID string `xml:"profileid,omitempty"`
+}
+
+type nfoFileInfo struct {
+	StreamDetails streamDetails `xml:"streamdetails"`
+}
+
+type streamDetails struct {
+	Video    *videoDetails     `xml:"video,omitempty"`
+	Audio    []audioDetails    `xml:"audio,omitempty"`
+	Subtitle []subtitleDetails `xml:"subtitle,omitempty"`
+}
+
+type videoDetails struct {
+	Codec             string `xml:"codec,omitempty"`
+	Bitrate           int64  `xml:"bitrate,omitempty"`
+	Width             int    `xml:"width,omitempty"`
+	Height            int    `xml:"height,omitempty"`
+	Aspect            string `xml:"aspect,omitempty"`
+	AspectRatio       string `xml:"aspectratio,omitempty"`
+	FrameRate         string `xml:"framerate,omitempty"`
+	ScanType          string `xml:"scantype,omitempty"`
+	Default           bool   `xml:"default,omitempty"`
+	Forced            bool   `xml:"forced,omitempty"`
+	DurationInSeconds int    `xml:"durationinseconds,omitempty"`
+	Duration          int    `xml:"duration,omitempty"`
+}
+
+type audioDetails struct {
+	Codec        string `xml:"codec,omitempty"`
+	Bitrate      int64  `xml:"bitrate,omitempty"`
+	Language     string `xml:"language,omitempty"`
+	Channels     int    `xml:"channels,omitempty"`
+	SamplingRate int    `xml:"samplingrate,omitempty"`
+	Default      bool   `xml:"default,omitempty"`
+	Forced       bool   `xml:"forced,omitempty"`
+}
+
+type subtitleDetails struct {
+	Codec    string `xml:"codec,omitempty"`
+	Language string `xml:"language,omitempty"`
+	Default  bool   `xml:"default,omitempty"`
+	Forced   bool   `xml:"forced,omitempty"`
+}
+
+type ffprobeFormat struct {
+	Duration string `json:"duration"`
+}
+
+type ffprobeNFOData struct {
+	Streams []ffprobeStream `json:"streams"`
+	Format  ffprobeFormat   `json:"format"`
+}
+
+func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) (NFOResult, error) {
+	if !cfg.Processing.EnableNFO {
+		return NFOResult{}, nil
+	}
+
+	episode, ok := parseEpisodeInfo(media.Path)
+	if !ok {
+		return NFOResult{}, nil
+	}
+
+	outputPath := strings.TrimSuffix(media.Path, filepath.Ext(media.Path)) + ".nfo"
+	if !cfg.Processing.OverwriteExisting {
+		if _, err := os.Stat(outputPath); err == nil {
+			return NFOResult{Path: outputPath, TMDBStatus: "skipped", TMDBDetail: "nfo already exists"}, nil
+		}
+	}
+
+	streamInfo, runtime, err := buildStreamDetails(ctx, cfg, media.Path)
+	if err != nil {
+		return NFOResult{}, err
+	}
+
+	doc := episodeNFO{
+		ShowTitle: episode.Show,
+		Title:     episode.Title,
+		SortTitle: episode.Title,
+		Runtime:   runtime,
+		Season:    episode.Season,
+		Episode:   episode.Episode,
+		LockData:  false,
+		FileInfo:  &nfoFileInfo{StreamDetails: streamInfo},
+	}
+
+	result := NFOResult{Path: outputPath}
+	applyTMDBEpisode(ctx, cfg, episode, &doc, &result)
+
+	data, err := xml.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return NFOResult{}, err
+	}
+	content := append([]byte(xml.Header), data...)
+	content = append(content, '\n')
+	if err := os.WriteFile(outputPath, content, 0o644); err != nil {
+		return NFOResult{}, err
+	}
+	return result, nil
+}
+
+func parseEpisodeInfo(path string) (episodeInfo, bool) {
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	match := episodePattern.FindStringSubmatch(name)
+	if len(match) != 3 {
+		return episodeInfo{}, false
+	}
+	season, err := strconv.Atoi(match[1])
+	if err != nil {
+		return episodeInfo{}, false
+	}
+	episode, err := strconv.Atoi(match[2])
+	if err != nil {
+		return episodeInfo{}, false
+	}
+	return episodeInfo{Season: season, Episode: episode, Title: name, Show: parseShowName(path, name, match[0])}, true
+}
+
+func parseShowName(path string, fileTitle string, episodeToken string) string {
+	show := strings.TrimSpace(fileTitle)
+	if episodeToken != "" {
+		index := strings.Index(strings.ToLower(show), strings.ToLower(episodeToken))
+		if index > 0 {
+			show = show[:index]
+		}
+	}
+	show = cleanTMDBQuery(show)
+	if show != "" {
+		return show
+	}
+	return cleanTMDBQuery(filepath.Base(filepath.Dir(path)))
+}
+
+func cleanTMDBQuery(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, " .-_[]()")
+	value = strings.ReplaceAll(value, ".", " ")
+	value = strings.ReplaceAll(value, "_", " ")
+	value = strings.ReplaceAll(value, "-", " ")
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInfo, doc *episodeNFO, result *NFOResult) {
+	client, err := tmdb.NewClient(cfg.Scraping)
+	if err != nil {
+		result.TMDBStatus = "disabled"
+		result.TMDBDetail = err.Error()
+		return
+	}
+	detail, err := client.FindEpisode(ctx, episode.Show, episode.Season, episode.Episode)
+	if err != nil {
+		result.TMDBStatus = "failed"
+		result.TMDBDetail = err.Error()
+		return
+	}
+
+	result.TMDBStatus = "matched"
+	result.TMDBShowName = detail.ShowName
+	result.TMDBEpisode = detail.Title
+
+	if detail.Title != "" {
+		doc.Title = detail.Title
+		doc.SortTitle = detail.Title
+	}
+	if detail.ShowName != "" {
+		doc.ShowTitle = detail.ShowName
+	}
+	doc.Plot = detail.Overview
+	doc.Outline = detail.Overview
+	doc.Premiered = detail.AirDate
+	doc.Aired = detail.AirDate
+	if detail.VoteAverage > 0 {
+		doc.Rating = fmt.Sprintf("%.1f", detail.VoteAverage)
+	}
+	if detail.ShowID > 0 {
+		doc.UniqueID = append(doc.UniqueID, nfoUniqueID{Type: "tmdb", Default: true, Value: strconv.Itoa(detail.ShowID)})
+	}
+	if detail.EpisodeID > 0 {
+		doc.UniqueID = append(doc.UniqueID, nfoUniqueID{Type: "tmdb_episode", Value: strconv.Itoa(detail.EpisodeID)})
+	}
+	for _, actor := range detail.Actors {
+		doc.Actor = append(doc.Actor, nfoActor{
+			Name:  actor.Name,
+			Role:  actor.Role,
+			Order: actor.Order,
+			Thumb: tmdbImageURL(actor.ProfilePath),
+		})
+	}
+	for _, crew := range detail.Crew {
+		switch strings.ToLower(crew.Job) {
+		case "director":
+			doc.Director = appendUniqueString(doc.Director, crew.Name)
+		case "writer", "screenplay", "teleplay", "story":
+			doc.Writer = appendUniqueString(doc.Writer, crew.Name)
+		}
+	}
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if strings.EqualFold(existing, value) {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func tmdbImageURL(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
+	}
+	return "https://image.tmdb.org/t/p/original" + path
+}
+
+func buildStreamDetails(ctx context.Context, cfg config.Config, mediaPath string) (streamDetails, int, error) {
+	if strings.TrimSpace(cfg.Tools.FFprobe) == "" {
+		return streamDetails{}, 0, errors.New("ffprobe is not configured")
+	}
+	output, err := runCommand(ctx, cfg.Tools.FFprobe, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", mediaPath)
+	if err != nil {
+		return streamDetails{}, 0, err
+	}
+
+	var parsed ffprobeNFOData
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		return streamDetails{}, 0, err
+	}
+
+	result := streamDetails{}
+	runtime := parseRuntimeMinutes(parsed.Format.Duration)
+	durationSeconds := parseDurationSeconds(parsed.Format.Duration)
+
+	for _, stream := range parsed.Streams {
+		switch stream.CodecType {
+		case "video":
+			if result.Video == nil {
+				aspect := defaultAspect(stream.DisplayAspectRatio, stream.SampleAspectRatio)
+				result.Video = &videoDetails{
+					Codec:             stream.CodecName,
+					Bitrate:           parseInt64(stream.BitRate),
+					Width:             stream.Width,
+					Height:            stream.Height,
+					Aspect:            aspect,
+					AspectRatio:       aspect,
+					FrameRate:         chooseFrameRate(stream.AvgFrameRate, stream.RFrameRate),
+					ScanType:          "progressive",
+					Default:           stream.Disposition.Default == 1,
+					Forced:            stream.Disposition.Forced == 1,
+					DurationInSeconds: durationSeconds,
+					Duration:          runtime,
+				}
+			}
+		case "audio":
+			result.Audio = append(result.Audio, audioDetails{
+				Codec:        stream.CodecName,
+				Bitrate:      parseInt64(stream.BitRate),
+				Language:     normalizeLanguage(stream.Tags["language"]),
+				Channels:     stream.Channels,
+				SamplingRate: stream.SampleRate,
+				Default:      stream.Disposition.Default == 1,
+				Forced:       stream.Disposition.Forced == 1,
+			})
+		case "subtitle":
+			result.Subtitle = append(result.Subtitle, subtitleDetails{
+				Codec:    stream.CodecName,
+				Language: normalizeLanguage(stream.Tags["language"]),
+				Default:  stream.Disposition.Default == 1,
+				Forced:   stream.Disposition.Forced == 1,
+			})
+		}
+	}
+
+	return result, runtime, nil
+}
+
+func parseRuntimeMinutes(value string) int {
+	seconds := parseDurationSeconds(value)
+	if seconds <= 0 {
+		return 0
+	}
+	return seconds / 60
+}
+
+func parseDurationSeconds(value string) int {
+	if strings.TrimSpace(value) == "" {
+		return 0
+	}
+	floatValue, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0
+	}
+	return int(floatValue)
+}
+
+func parseInt64(value string) int64 {
+	if strings.TrimSpace(value) == "" {
+		return 0
+	}
+	parsed, _ := strconv.ParseInt(value, 10, 64)
+	return parsed
+}
+
+func chooseFrameRate(avg string, real string) string {
+	if avg != "" && avg != "0/0" {
+		return simplifyRate(avg)
+	}
+	return simplifyRate(real)
+}
+
+func simplifyRate(value string) string {
+	if !strings.Contains(value, "/") {
+		return value
+	}
+	parts := strings.SplitN(value, "/", 2)
+	if len(parts) != 2 {
+		return value
+	}
+	numerator, err1 := strconv.ParseFloat(parts[0], 64)
+	denominator, err2 := strconv.ParseFloat(parts[1], 64)
+	if err1 != nil || err2 != nil || denominator == 0 {
+		return value
+	}
+	return fmt.Sprintf("%.3f", numerator/denominator)
+}
+
+func defaultAspect(primary string, fallback string) string {
+	if strings.TrimSpace(primary) != "" {
+		return primary
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+	return ""
+}

@@ -53,4 +53,12 @@ func TestWriteBIF(t *testing.T) {
 	if interval != 10000 {
 		t.Fatalf("unexpected interval: %d", interval)
 	}
+	firstTimestamp := binary.LittleEndian.Uint32(content[64:68])
+	if firstTimestamp != 0 {
+		t.Fatalf("unexpected first timestamp: %d", firstTimestamp)
+	}
+	secondTimestamp := binary.LittleEndian.Uint32(content[72:76])
+	if secondTimestamp != 1 {
+		t.Fatalf("unexpected second timestamp: %d", secondTimestamp)
+	}
 }

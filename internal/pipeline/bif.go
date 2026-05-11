@@ -109,7 +109,7 @@ func writeBIF(outputPath string, intervalSeconds int, frames []string) error {
 	currentOffset := uint32(indexStart + indexSize)
 
 	for idx, image := range images {
-		if err := binary.Write(&header, binary.LittleEndian, uint32(idx*intervalSeconds*1000)); err != nil {
+		if err := binary.Write(&header, binary.LittleEndian, uint32(idx)); err != nil {
 			return err
 		}
 		if err := binary.Write(&header, binary.LittleEndian, currentOffset); err != nil {

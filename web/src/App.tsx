@@ -57,6 +57,7 @@ type ToolStatus = {
 
 type Task = {
   id: number;
+  mediaPath: string;
   type: string;
   status: string;
   attempts: number;
@@ -87,6 +88,7 @@ type TaskDetail = {
 };
 
 type LanguageOption = { code: string; name: string };
+type RegionOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks';
 
 const languageOptions: LanguageOption[] = [
@@ -105,6 +107,23 @@ const languageOptions: LanguageOption[] = [
   { code: 'th-TH', name: '泰语' },
   { code: 'vi-VN', name: '越南语' },
   { code: 'id-ID', name: '印尼语' }
+];
+
+const regionOptions: RegionOption[] = [
+  { code: 'CN', name: '中国大陆' },
+  { code: 'TW', name: '中国台湾' },
+  { code: 'HK', name: '中国香港' },
+  { code: 'JP', name: '日本' },
+  { code: 'US', name: '美国' },
+  { code: 'GB', name: '英国' },
+  { code: 'KR', name: '韩国' },
+  { code: 'FR', name: '法国' },
+  { code: 'DE', name: '德国' },
+  { code: 'ES', name: '西班牙' },
+  { code: 'IT', name: '意大利' },
+  { code: 'BR', name: '巴西' },
+  { code: 'RU', name: '俄罗斯' },
+  { code: 'TH', name: '泰国' }
 ];
 
 export function App() {
@@ -339,9 +358,9 @@ export function App() {
                 <label>TMDB API Key<input value={config.scraping.tmdbApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbApiKey = event.target.value; })} placeholder="可选，优先使用 Token" /></label>
                 <label>TMDB 地址<input value={config.scraping.tmdbBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbBaseUrl = event.target.value; })} placeholder="https://api.themoviedb.org/3" /></label>
                 <label>TMDB 代理<input value={config.scraping.proxy} onChange={(event) => updateConfig((draft) => { draft.scraping.proxy = event.target.value; })} placeholder="http://127.0.0.1:7890" /></label>
-                <LanguagePicker label="刮削语言" value={config.scraping.language} onChange={(value) => updateConfig((draft) => { draft.scraping.language = value; })} />
+                <SelectField label="刮削语言" value={config.scraping.language} options={languageOptions} onChange={(value) => updateConfig((draft) => { draft.scraping.language = value; })} />
                 <LanguageMultiPicker label="备用语言顺序" values={config.scraping.fallbackLanguages ?? []} onChange={(values) => updateConfig((draft) => { draft.scraping.fallbackLanguages = values; })} />
-                <label>刮削地区<input value={config.scraping.region} onChange={(event) => updateConfig((draft) => { draft.scraping.region = event.target.value; })} /></label>
+                <SelectField label="刮削地区" value={config.scraping.region} options={regionOptions} onChange={(value) => updateConfig((draft) => { draft.scraping.region = value; })} />
               </div>
             ) : <p className="muted">配置加载中。</p>}
           </Card>
@@ -378,7 +397,7 @@ export function App() {
               <button className="task-row" key={task.id} onClick={() => loadTaskDetail(task.id)}>
                 <span className={`pill ${task.status === 'completed' ? 'ok' : task.status === 'failed' ? 'bad' : ''}`}>{task.status}</span>
                 <strong>{task.type} #{task.id}</strong>
-                <small>{task.errorSummary || task.createdAt}</small>
+                <small>{task.errorSummary || task.mediaPath || task.createdAt}</small>
               </button>
             )) : <p className="muted">暂无任务。</p>}
           </Card>
@@ -387,6 +406,7 @@ export function App() {
             {selectedTask ? (
               <div>
                 <Row label="任务" value={`${selectedTask.task.type} #${selectedTask.task.id}`} />
+                {selectedTask.task.mediaPath && <Row label="文件" value={selectedTask.task.mediaPath} />}
                 <Row label="状态" value={selectedTask.task.status} />
                 <Row label="尝试次数" value={String(selectedTask.task.attempts)} />
                 {selectedTask.task.errorSummary && <Row label="错误" value={selectedTask.task.errorSummary} />}
@@ -452,6 +472,19 @@ function Toggle(props: { label: string; checked: boolean; onChange: (value: bool
     <label className="toggle-row">
       <span>{props.label}</span>
       <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} />
+    </label>
+  );
+}
+
+function SelectField(props: { label: string; value: string; options: Array<{ code: string; name: string }>; onChange: (value: string) => void }) {
+  return (
+    <label>
+      {props.label}
+      <select value={props.value} onChange={(event) => props.onChange(event.target.value)}>
+        {props.options.map((option) => (
+          <option key={option.code} value={option.code}>{option.name} ({option.code})</option>
+        ))}
+      </select>
     </label>
   );
 }

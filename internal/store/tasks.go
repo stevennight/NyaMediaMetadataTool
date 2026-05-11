@@ -11,6 +11,7 @@ var ErrTaskNotFound = errors.New("task not found")
 type Task struct {
 	ID           int64  `json:"id"`
 	MediaFileID  *int64 `json:"mediaFileId"`
+	MediaPath    string `json:"mediaPath"`
 	Type         string `json:"type"`
 	Status       string `json:"status"`
 	Attempts     int    `json:"attempts"`
@@ -42,10 +43,11 @@ func (s *Store) ListTasks(ctx context.Context, limit int) ([]Task, error) {
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, media_file_id, type, status, attempts, error_summary,
-       COALESCE(started_at, ''), COALESCE(finished_at, ''), created_at, updated_at
+SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.attempts, tasks.error_summary,
+       COALESCE(tasks.started_at, ''), COALESCE(tasks.finished_at, ''), tasks.created_at, tasks.updated_at
 FROM tasks
-ORDER BY id DESC
+LEFT JOIN media_files ON media_files.id = tasks.media_file_id
+ORDER BY tasks.id DESC
 LIMIT ?
 `, limit)
 	if err != nil {
@@ -60,6 +62,7 @@ LIMIT ?
 		if err := rows.Scan(
 			&task.ID,
 			&mediaFileID,
+			&task.MediaPath,
 			&task.Type,
 			&task.Status,
 			&task.Attempts,
@@ -97,13 +100,15 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, error) {
 	var task Task
 	var mediaFileID sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, media_file_id, type, status, attempts, error_summary,
-       COALESCE(started_at, ''), COALESCE(finished_at, ''), created_at, updated_at
+SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.attempts, tasks.error_summary,
+       COALESCE(tasks.started_at, ''), COALESCE(tasks.finished_at, ''), tasks.created_at, tasks.updated_at
 FROM tasks
-WHERE id = ?
+LEFT JOIN media_files ON media_files.id = tasks.media_file_id
+WHERE tasks.id = ?
 `, id).Scan(
 		&task.ID,
 		&mediaFileID,
+		&task.MediaPath,
 		&task.Type,
 		&task.Status,
 		&task.Attempts,

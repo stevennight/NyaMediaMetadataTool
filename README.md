@@ -426,7 +426,7 @@ go run ./cmd/nyammd -config config.example.yaml
 访问：
 
 ```text
-http://127.0.0.1:8080
+http://127.0.0.1:18880
 ```
 
 前端已通过 Go `embed` 嵌入服务。更新前端代码后，需要先重新构建前端：

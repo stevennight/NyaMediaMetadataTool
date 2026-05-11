@@ -30,11 +30,17 @@ func (s *Store) EnqueueMediaTask(ctx context.Context, mediaFileID int64) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO tasks (media_file_id, type, status)
 SELECT ?, 'media_process', 'pending'
-WHERE NOT EXISTS (
+WHERE EXISTS (
+  SELECT 1
+  FROM media_files
+  WHERE id = ?
+    AND (last_processed_at IS NULL OR modified_at > last_processed_at)
+)
+AND NOT EXISTS (
   SELECT 1
   FROM tasks
   WHERE media_file_id = ? AND type = 'media_process' AND status IN ('pending', 'running')
 )
-`, mediaFileID, mediaFileID)
+`, mediaFileID, mediaFileID, mediaFileID)
 	return err
 }

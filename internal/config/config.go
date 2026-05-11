@@ -111,7 +111,7 @@ func Default() Config {
 
 func (c *Config) applyDefaults() {
 	if c.Server.Addr == "" {
-		c.Server.Addr = "127.0.0.1:8080"
+		c.Server.Addr = "127.0.0.1:18880"
 	}
 	if c.Database.Path == "" {
 		c.Database.Path = "data/nyamedia.db"

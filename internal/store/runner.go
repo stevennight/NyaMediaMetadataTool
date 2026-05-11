@@ -109,11 +109,19 @@ WHERE id = ?
 	if err != nil {
 		return MediaFile{}, err
 	}
-	media.ModifiedAt, err = time.Parse(time.RFC3339, modifiedAt)
+	media.ModifiedAt, err = parseStoreTime(modifiedAt)
 	if err != nil {
 		return MediaFile{}, err
 	}
 	return media, nil
+}
+
+func parseStoreTime(value string) (time.Time, error) {
+	parsed, err := time.ParseInLocation("2006-01-02 15:04:05", value, time.UTC)
+	if err == nil {
+		return parsed, nil
+	}
+	return time.Parse(time.RFC3339, value)
 }
 
 func (s *Store) SaveArtifact(ctx context.Context, mediaFileID int64, taskID int64, artifactType string, path string, source string) error {

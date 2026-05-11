@@ -7,7 +7,7 @@ import (
 )
 
 func (s *Store) UpsertMediaFile(ctx context.Context, path string, info os.FileInfo) (int64, error) {
-	modifiedAt := info.ModTime().UTC().Format(time.RFC3339)
+	modifiedAt := formatStoreTime(info.ModTime())
 
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO media_files (path, size, modified_at, updated_at)
@@ -24,6 +24,10 @@ ON CONFLICT(path) DO UPDATE SET
 	var id int64
 	err = s.db.QueryRowContext(ctx, `SELECT id FROM media_files WHERE path = ?`, path).Scan(&id)
 	return id, err
+}
+
+func formatStoreTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02 15:04:05")
 }
 
 func (s *Store) EnqueueMediaTask(ctx context.Context, mediaFileID int64) error {

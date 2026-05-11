@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/store"
@@ -368,7 +369,7 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 		client.ImageURL(show.PosterPath),
 		client.ImageURL(show.BackdropPath),
 		client.ImageURL(show.LogoPath),
-		client.ImageURL(show.LogoPath),
+		"",
 		client.ImageURL(season.PosterPath),
 	}
 
@@ -661,7 +662,7 @@ func httpClientForScraping(cfg config.Config) (*http.Client, error) {
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
-	return &http.Client{Transport: transport}, nil
+	return &http.Client{Transport: transport, Timeout: 30 * time.Second}, nil
 }
 
 func parseRuntimeMinutes(value string) int {

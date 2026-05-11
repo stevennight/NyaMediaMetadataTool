@@ -71,6 +71,15 @@ WHERE id = ?
 	return task, nil
 }
 
+func (s *Store) ResetRunningTasks(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET status = 'pending', started_at = NULL, updated_at = CURRENT_TIMESTAMP
+WHERE status = 'running'
+`)
+	return err
+}
+
 func (s *Store) CompleteTask(ctx context.Context, taskID int64) error {
 	_, err := s.db.ExecContext(ctx, `
 UPDATE tasks

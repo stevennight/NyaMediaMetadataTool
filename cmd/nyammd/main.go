@@ -42,6 +42,10 @@ func main() {
 		logger.Error("migrate database", "error", err)
 		os.Exit(1)
 	}
+	if err := db.ResetRunningTasks(context.Background()); err != nil {
+		logger.Error("reset running tasks", "error", err)
+		os.Exit(1)
+	}
 
 	if err := bootstrap.SyncAndScan(context.Background(), cfg, db, logger); err != nil {
 		logger.Error("bootstrap sync and scan", "error", err)

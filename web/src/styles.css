@@ -155,7 +155,7 @@ h1 {
 }
 
 .settings-grid {
-  max-width: 1180px;
+  max-width: none;
 }
 
 .task-page-grid {
@@ -485,11 +485,32 @@ h3 {
 
 .settings-form {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
+  align-items: stretch;
 }
 
 .settings-form .language-picker {
   grid-column: 1 / -1;
+}
+
+.settings-section {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  height: 100%;
+  padding: 18px;
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.settings-section-wide {
+  grid-column: 1 / -1;
+}
+
+.settings-section h3 {
+  margin: 0;
+  font-size: 14px;
+  color: #44403c;
 }
 
 .config-form label,
@@ -498,6 +519,18 @@ h3 {
   gap: 6px;
   color: #78716c;
   font-size: 13px;
+}
+
+.toggle-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid rgba(120, 113, 108, 0.12);
+}
+
+.toggle-row:first-of-type {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .config-form label input,
@@ -589,11 +622,6 @@ h3 {
   color: rgba(255, 255, 255, 0.72);
 }
 
-.toggle-row {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-}
-
 .toggle-row input {
   min-width: auto;
 }
@@ -620,6 +648,10 @@ h3 {
   .settings-form,
   .task-filters {
     grid-template-columns: 1fr;
+  }
+
+  .settings-section-wide {
+    grid-column: auto;
   }
 
   .pagination-bar,

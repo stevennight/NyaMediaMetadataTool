@@ -25,6 +25,10 @@ body {
   margin-bottom: 24px;
 }
 
+.admin-hero {
+  margin-bottom: 18px;
+}
+
 .eyebrow {
   color: #b45309;
   font-size: 13px;
@@ -79,6 +83,47 @@ h1 {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 20px;
+}
+
+.module-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.tab-button {
+  border: 1px solid rgba(120, 113, 108, 0.22);
+  background: rgba(255, 255, 255, 0.66);
+  color: #44403c;
+}
+
+.tab-button.active {
+  background: #111827;
+  color: #fff;
+}
+
+.page-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+}
+
+.dashboard-grid {
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+}
+
+.settings-grid {
+  max-width: 1180px;
+}
+
+.task-page-grid {
+  grid-template-columns: minmax(300px, 0.8fr) minmax(0, 1.2fr);
+  align-items: start;
+}
+
+.task-page-grid .card:last-child {
+  grid-column: 1 / -1;
 }
 
 .card {
@@ -288,6 +333,15 @@ h3 {
   gap: 12px;
 }
 
+.settings-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.settings-form .language-picker {
+  grid-column: 1 / -1;
+}
+
 .config-form label,
 .toggle-row {
   display: grid;
@@ -352,7 +406,14 @@ h3 {
   }
 
   .hero,
-  .grid {
+  .grid,
+  .dashboard-grid,
+  .task-page-grid,
+  .settings-form {
     grid-template-columns: 1fr;
+  }
+
+  .task-page-grid .card:last-child {
+    grid-column: auto;
   }
 }

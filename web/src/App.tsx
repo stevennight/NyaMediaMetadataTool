@@ -87,6 +87,7 @@ type TaskDetail = {
 };
 
 type LanguageOption = { code: string; name: string };
+type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks';
 
 const languageOptions: LanguageOption[] = [
   { code: 'zh-CN', name: '简体中文' },
@@ -120,6 +121,7 @@ export function App() {
   const [notice, setNotice] = useState('');
   const [rescanning, setRescanning] = useState(false);
   const [error, setError] = useState<string>('');
+  const [activePage, setActivePage] = useState<PageKey>('dashboard');
 
   useEffect(() => {
     async function load() {
@@ -259,10 +261,10 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <section className="hero">
+      <section className="hero admin-hero">
         <div>
           <p className="eyebrow">NyaMediaMetadataTool</p>
-          <h1>本地媒体伴生文件生成器</h1>
+          <h1>媒体元数据管理后台</h1>
           <p className="summary">替代神医助手的本地生成职责：NFO、MediaInfo、BIF、字幕提取与 TMDB 增强。</p>
         </div>
         <div className="status-card">
@@ -272,75 +274,89 @@ export function App() {
         </div>
       </section>
 
+      <nav className="module-nav" aria-label="后台模块">
+        <TabButton active={activePage === 'dashboard'} label="Dashboard" onClick={() => setActivePage('dashboard')} />
+        <TabButton active={activePage === 'settings'} label="设置" onClick={() => setActivePage('settings')} />
+        <TabButton active={activePage === 'watchDirs'} label="监听目录" onClick={() => setActivePage('watchDirs')} />
+        <TabButton active={activePage === 'tasks'} label="任务" onClick={() => setActivePage('tasks')} />
+      </nav>
+
       {error && <section className="error-card">{error}</section>}
       {notice && <section className="notice-card">{notice}</section>}
 
-      <section className="grid">
-        <Card title="当前配置">
-          <Row label="监听地址" value={config?.server.addr ?? '-'} />
-          <Row label="数据库" value={config?.database.path ?? '-'} />
-          <Row label="并发数" value={String(config?.processing.concurrency ?? '-')} />
-          <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
-          <Row label="TMDB 地址" value={config?.scraping.tmdbBaseUrl ?? '-'} />
-        </Card>
+      {activePage === 'dashboard' && (
+        <section className="page-grid dashboard-grid">
+          <Card title="当前配置">
+            <Row label="监听地址" value={config?.server.addr ?? '-'} />
+            <Row label="数据库" value={config?.database.path ?? '-'} />
+            <Row label="并发数" value={String(config?.processing.concurrency ?? '-')} />
+            <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
+            <Row label="TMDB 地址" value={config?.scraping.tmdbBaseUrl ?? '-'} />
+            <Row label="字幕提取" value={config?.processing.enableSubtitles ? '开启' : '关闭'} />
+            <Row label="MediaInfo" value={config?.processing.enableMediaInfo ? '开启' : '关闭'} />
+            <Row label="NFO" value={config?.processing.enableNfo ? '开启' : '关闭'} />
+            <Row label="BIF" value={config?.processing.enableBif ? '开启' : '关闭'} />
+            <Row label="接管图片" value={config?.processing.enableImageTakeover ? '开启' : '关闭'} />
+          </Card>
 
-        <Card title="任务开关">
-          <Flag label="字幕提取" enabled={config?.processing.enableSubtitles} />
-          <Flag label="MediaInfo" enabled={config?.processing.enableMediaInfo} />
-          <Flag label="NFO" enabled={config?.processing.enableNfo} />
-          <Flag label="BIF" enabled={config?.processing.enableBif} />
-          <Flag label="接管图片" enabled={config?.processing.enableImageTakeover} />
-        </Card>
+          <Card title="工具状态" action={<button onClick={checkTools} disabled={checkingTools}>{checkingTools ? '检测中' : '一键检测'}</button>}>
+            {tools.length ? tools.map((tool) => (
+              <div className="tool" key={tool.name}>
+                <div>
+                  <strong>{tool.name}</strong>
+                  <small>{tool.version || tool.error || '未检测'}</small>
+                </div>
+                <span className={tool.available ? 'pill ok' : 'pill bad'}>{tool.available ? '可用' : '不可用'}</span>
+              </div>
+            )) : <p className="muted">尚未检测工具状态。</p>}
+          </Card>
+        </section>
+      )}
 
-        <Card title="配置编辑" action={<button onClick={saveConfig} disabled={savingConfig || !config}>{savingConfig ? '保存中' : '保存配置'}</button>}>
-          {config ? (
-            <div className="config-form">
-              <label>ffmpeg<input value={config.tools.ffmpeg} onChange={(event) => updateConfig((draft) => { draft.tools.ffmpeg = event.target.value; })} /></label>
-              <label>ffprobe<input value={config.tools.ffprobe} onChange={(event) => updateConfig((draft) => { draft.tools.ffprobe = event.target.value; })} /></label>
-              <label>mkvextract<input value={config.tools.mkvextract} onChange={(event) => updateConfig((draft) => { draft.tools.mkvextract = event.target.value; })} /></label>
-              <label>mediainfo<input value={config.tools.mediainfo} onChange={(event) => updateConfig((draft) => { draft.tools.mediainfo = event.target.value; })} /></label>
-              <label>并发数<input type="number" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
-              <label>BIF 宽度<input type="number" value={config.processing.bifWidth} onChange={(event) => updateConfig((draft) => { draft.processing.bifWidth = Number(event.target.value); })} /></label>
-              <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
-              <Toggle label="TMDB 刮削" checked={config.scraping.enableTmdb} onChange={(value) => updateConfig((draft) => { draft.scraping.enableTmdb = value; })} />
-              <Toggle label="刮削演员/职员" checked={config.scraping.enablePeople} onChange={(value) => updateConfig((draft) => { draft.scraping.enablePeople = value; })} />
-              <Toggle label="接管剧集/季度图片" checked={config.processing.enableImageTakeover} onChange={(value) => updateConfig((draft) => { draft.processing.enableImageTakeover = value; })} />
-              <Toggle label="优先原语言海报" checked={config.scraping.preferOriginalLanguagePoster} onChange={(value) => updateConfig((draft) => { draft.scraping.preferOriginalLanguagePoster = value; })} />
-              <label>Fanart API Key<input type="password" value={config.scraping.fanartApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartApiKey = event.target.value; })} placeholder="用于 clearart/clearlogo" /></label>
-              <label>Fanart 地址<input value={config.scraping.fanartBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartBaseUrl = event.target.value; })} placeholder="https://webservice.fanart.tv/v3" /></label>
-              <label>TMDB Token<input type="password" value={config.scraping.tmdbToken} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbToken = event.target.value; })} placeholder="Bearer token" /></label>
-              <label>TMDB API Key<input value={config.scraping.tmdbApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbApiKey = event.target.value; })} placeholder="可选，优先使用 Token" /></label>
-              <label>TMDB 地址<input value={config.scraping.tmdbBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbBaseUrl = event.target.value; })} placeholder="https://api.themoviedb.org/3" /></label>
-              <label>TMDB 代理<input value={config.scraping.proxy} onChange={(event) => updateConfig((draft) => { draft.scraping.proxy = event.target.value; })} placeholder="http://127.0.0.1:7890" /></label>
-              <LanguagePicker
-                label="刮削语言"
-                value={config.scraping.language}
-                onChange={(value) => updateConfig((draft) => { draft.scraping.language = value; })}
-              />
-              <LanguageMultiPicker
-                label="备用语言顺序"
-                values={config.scraping.fallbackLanguages ?? []}
-                onChange={(values) => updateConfig((draft) => { draft.scraping.fallbackLanguages = values; })}
-              />
-              <label>刮削地区<input value={config.scraping.region} onChange={(event) => updateConfig((draft) => { draft.scraping.region = event.target.value; })} /></label>
-              <Toggle label="覆盖已有文件" checked={config.processing.overwriteExisting} onChange={(value) => updateConfig((draft) => { draft.processing.overwriteExisting = value; })} />
-              <Toggle label="字幕提取" checked={config.processing.enableSubtitles} onChange={(value) => updateConfig((draft) => { draft.processing.enableSubtitles = value; })} />
-              <Toggle label="MediaInfo" checked={config.processing.enableMediaInfo} onChange={(value) => updateConfig((draft) => { draft.processing.enableMediaInfo = value; })} />
-              <Toggle label="NFO" checked={config.processing.enableNfo} onChange={(value) => updateConfig((draft) => { draft.processing.enableNfo = value; })} />
-              <Toggle label="BIF" checked={config.processing.enableBif} onChange={(value) => updateConfig((draft) => { draft.processing.enableBif = value; })} />
+      {activePage === 'settings' && (
+        <section className="page-grid settings-grid">
+          <Card title="设置" action={<button onClick={saveConfig} disabled={savingConfig || !config}>{savingConfig ? '保存中' : '保存配置'}</button>}>
+            {config ? (
+              <div className="config-form settings-form">
+                <label>ffmpeg<input value={config.tools.ffmpeg} onChange={(event) => updateConfig((draft) => { draft.tools.ffmpeg = event.target.value; })} /></label>
+                <label>ffprobe<input value={config.tools.ffprobe} onChange={(event) => updateConfig((draft) => { draft.tools.ffprobe = event.target.value; })} /></label>
+                <label>mkvextract<input value={config.tools.mkvextract} onChange={(event) => updateConfig((draft) => { draft.tools.mkvextract = event.target.value; })} /></label>
+                <label>mediainfo<input value={config.tools.mediainfo} onChange={(event) => updateConfig((draft) => { draft.tools.mediainfo = event.target.value; })} /></label>
+                <label>并发数<input type="number" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
+                <label>BIF 宽度<input type="number" value={config.processing.bifWidth} onChange={(event) => updateConfig((draft) => { draft.processing.bifWidth = Number(event.target.value); })} /></label>
+                <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
+                <Toggle label="覆盖已有文件" checked={config.processing.overwriteExisting} onChange={(value) => updateConfig((draft) => { draft.processing.overwriteExisting = value; })} />
+                <Toggle label="字幕提取" checked={config.processing.enableSubtitles} onChange={(value) => updateConfig((draft) => { draft.processing.enableSubtitles = value; })} />
+                <Toggle label="MediaInfo" checked={config.processing.enableMediaInfo} onChange={(value) => updateConfig((draft) => { draft.processing.enableMediaInfo = value; })} />
+                <Toggle label="NFO" checked={config.processing.enableNfo} onChange={(value) => updateConfig((draft) => { draft.processing.enableNfo = value; })} />
+                <Toggle label="BIF" checked={config.processing.enableBif} onChange={(value) => updateConfig((draft) => { draft.processing.enableBif = value; })} />
+                <Toggle label="TMDB 刮削" checked={config.scraping.enableTmdb} onChange={(value) => updateConfig((draft) => { draft.scraping.enableTmdb = value; })} />
+                <Toggle label="刮削演员/职员" checked={config.scraping.enablePeople} onChange={(value) => updateConfig((draft) => { draft.scraping.enablePeople = value; })} />
+                <Toggle label="接管剧集/季度图片" checked={config.processing.enableImageTakeover} onChange={(value) => updateConfig((draft) => { draft.processing.enableImageTakeover = value; })} />
+                <Toggle label="优先原语言海报" checked={config.scraping.preferOriginalLanguagePoster} onChange={(value) => updateConfig((draft) => { draft.scraping.preferOriginalLanguagePoster = value; })} />
+                <label>Fanart API Key<input type="password" value={config.scraping.fanartApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartApiKey = event.target.value; })} placeholder="用于 clearart/clearlogo" /></label>
+                <label>Fanart 地址<input value={config.scraping.fanartBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartBaseUrl = event.target.value; })} placeholder="https://webservice.fanart.tv/v3" /></label>
+                <label>TMDB Token<input type="password" value={config.scraping.tmdbToken} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbToken = event.target.value; })} placeholder="Bearer token" /></label>
+                <label>TMDB API Key<input value={config.scraping.tmdbApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbApiKey = event.target.value; })} placeholder="可选，优先使用 Token" /></label>
+                <label>TMDB 地址<input value={config.scraping.tmdbBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbBaseUrl = event.target.value; })} placeholder="https://api.themoviedb.org/3" /></label>
+                <label>TMDB 代理<input value={config.scraping.proxy} onChange={(event) => updateConfig((draft) => { draft.scraping.proxy = event.target.value; })} placeholder="http://127.0.0.1:7890" /></label>
+                <LanguagePicker label="刮削语言" value={config.scraping.language} onChange={(value) => updateConfig((draft) => { draft.scraping.language = value; })} />
+                <LanguageMultiPicker label="备用语言顺序" values={config.scraping.fallbackLanguages ?? []} onChange={(values) => updateConfig((draft) => { draft.scraping.fallbackLanguages = values; })} />
+                <label>刮削地区<input value={config.scraping.region} onChange={(event) => updateConfig((draft) => { draft.scraping.region = event.target.value; })} /></label>
+              </div>
+            ) : <p className="muted">配置加载中。</p>}
+          </Card>
+        </section>
+      )}
+
+      {activePage === 'watchDirs' && (
+        <section className="page-grid">
+          <Card title="监听目录" action={<button onClick={() => rescan()} disabled={rescanning}>{rescanning ? '补扫中' : '全部补扫'}</button>}>
+            <div className="form-row">
+              <input value={newWatchDir} onChange={(event) => setNewWatchDir(event.target.value)} placeholder="D:\\Media\\Anime" />
+              <button onClick={addWatchDir}>添加</button>
             </div>
-          ) : (
-            <p className="muted">配置加载中。</p>
-          )}
-        </Card>
-
-        <Card title="监听目录" action={<button onClick={() => rescan()} disabled={rescanning}>{rescanning ? '补扫中' : '全部补扫'}</button>}>
-          <div className="form-row">
-            <input value={newWatchDir} onChange={(event) => setNewWatchDir(event.target.value)} placeholder="D:\\Media\\Anime" />
-            <button onClick={addWatchDir}>添加</button>
-          </div>
-          {watchDirs.length ? (
-            watchDirs.map((dir) => (
+            {watchDirs.length ? watchDirs.map((dir) => (
               <div className="dir-item" key={dir.id}>
                 <div>
                   <strong>{dir.path}</strong>
@@ -351,79 +367,59 @@ export function App() {
                   <button className="danger" onClick={() => deleteWatchDir(dir.id)}>删除</button>
                 </div>
               </div>
-            ))
-          ) : (
-            <p className="muted">尚未配置监听目录。</p>
-          )}
-        </Card>
+            )) : <p className="muted">尚未配置监听目录。</p>}
+          </Card>
+        </section>
+      )}
 
-        <Card title="工具状态" action={<button onClick={checkTools} disabled={checkingTools}>{checkingTools ? '检测中' : '一键检测'}</button>}>
-          {tools.length ? (
-            tools.map((tool) => (
-              <div className="tool" key={tool.name}>
-                <div>
-                  <strong>{tool.name}</strong>
-                  <small>{tool.version || tool.error || '未检测'}</small>
-                </div>
-                <span className={tool.available ? 'pill ok' : 'pill bad'}>{tool.available ? '可用' : '不可用'}</span>
-              </div>
-            ))
-          ) : (
-            <p className="muted">尚未检测工具状态。</p>
-          )}
-        </Card>
-
-        <Card title="最近任务">
-          {tasks.length ? (
-            tasks.map((task) => (
+      {activePage === 'tasks' && (
+        <section className="page-grid task-page-grid">
+          <Card title="任务">
+            {tasks.length ? tasks.map((task) => (
               <button className="task-row" key={task.id} onClick={() => loadTaskDetail(task.id)}>
                 <span className={`pill ${task.status === 'completed' ? 'ok' : task.status === 'failed' ? 'bad' : ''}`}>{task.status}</span>
                 <strong>{task.type} #{task.id}</strong>
                 <small>{task.errorSummary || task.createdAt}</small>
               </button>
-            ))
-          ) : (
-            <p className="muted">暂无任务。</p>
-          )}
-        </Card>
+            )) : <p className="muted">暂无任务。</p>}
+          </Card>
 
-        <Card title="最近产物">
-          {artifacts.length ? (
-            artifacts.map((artifact) => <Row key={artifact.id} label={artifact.type} value={artifact.path} />)
-          ) : (
-            <p className="muted">暂无产物。</p>
-          )}
-        </Card>
-
-        <Card title="任务详情">
-          {selectedTask ? (
-            <div>
-              <Row label="任务" value={`${selectedTask.task.type} #${selectedTask.task.id}`} />
-              <Row label="状态" value={selectedTask.task.status} />
-              <Row label="尝试次数" value={String(selectedTask.task.attempts)} />
-              {selectedTask.task.errorSummary && <Row label="错误" value={selectedTask.task.errorSummary} />}
-              <h3>日志</h3>
-              {asArray<TaskLog>(selectedTask.logs).length ? asArray<TaskLog>(selectedTask.logs).map((log) => (
-                <div className="log-line" key={log.id}>
-                  <span className={`pill ${log.level === 'error' ? 'bad' : 'ok'}`}>{log.level}</span>
-                  <div>
-                    <strong>{log.message}</strong>
-                    <small>{log.detail || log.createdAt}</small>
+          <Card title="任务详情">
+            {selectedTask ? (
+              <div>
+                <Row label="任务" value={`${selectedTask.task.type} #${selectedTask.task.id}`} />
+                <Row label="状态" value={selectedTask.task.status} />
+                <Row label="尝试次数" value={String(selectedTask.task.attempts)} />
+                {selectedTask.task.errorSummary && <Row label="错误" value={selectedTask.task.errorSummary} />}
+                <h3>日志</h3>
+                {asArray<TaskLog>(selectedTask.logs).length ? asArray<TaskLog>(selectedTask.logs).map((log) => (
+                  <div className="log-line" key={log.id}>
+                    <span className={`pill ${log.level === 'error' ? 'bad' : 'ok'}`}>{log.level}</span>
+                    <div>
+                      <strong>{log.message}</strong>
+                      <small>{log.detail || log.createdAt}</small>
+                    </div>
                   </div>
-                </div>
-              )) : <p className="muted">暂无日志。</p>}
-              <h3>产物</h3>
-              {asArray<Artifact>(selectedTask.artifacts).length ? asArray<Artifact>(selectedTask.artifacts).map((artifact) => (
-                <Row key={artifact.id} label={artifact.type} value={artifact.path} />
-              )) : <p className="muted">暂无产物。</p>}
-            </div>
-          ) : (
-            <p className="muted">点击最近任务查看详情。</p>
-          )}
-        </Card>
-      </section>
+                )) : <p className="muted">暂无日志。</p>}
+                <h3>产物</h3>
+                {asArray<Artifact>(selectedTask.artifacts).length ? asArray<Artifact>(selectedTask.artifacts).map((artifact) => (
+                  <Row key={artifact.id} label={artifact.type} value={artifact.path} />
+                )) : <p className="muted">暂无产物。</p>}
+              </div>
+            ) : <p className="muted">点击任务查看详情。</p>}
+          </Card>
+
+          <Card title="最近产物">
+            {artifacts.length ? artifacts.map((artifact) => <Row key={artifact.id} label={artifact.type} value={artifact.path} />) : <p className="muted">暂无产物。</p>}
+          </Card>
+        </section>
+      )}
     </main>
   );
+}
+
+function TabButton(props: { active: boolean; label: string; onClick: () => void }) {
+  return <button className={props.active ? 'tab-button active' : 'tab-button'} onClick={props.onClick}>{props.label}</button>;
 }
 
 function Card(props: { title: string; action?: React.ReactNode; children: React.ReactNode }) {

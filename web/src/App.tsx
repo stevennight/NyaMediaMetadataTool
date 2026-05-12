@@ -524,7 +524,7 @@ export function App() {
       const response = await fetch('/api/rename/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: targets.map((item) => ({ path: item.path, newName: item.newName })) })
+        body: JSON.stringify({ items: targets.map((item) => ({ path: item.path, newName: item.newPath || item.newName })) })
       });
       if (!response.ok) {
         setError(await response.text());
@@ -802,7 +802,7 @@ export function App() {
               <span>点击插入占位符：</span>
               {renamePlaceholders.map((placeholder) => <button className="secondary" type="button" key={placeholder} onClick={() => insertRenamePlaceholder(placeholder)}>{placeholder}</button>)}
             </div>
-            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。占位符支持点击插入；{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
+            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。模板可填写文件名或完整路径；占位符支持点击插入；{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
           </Card>
 
           <Card title="重命名预览">
@@ -856,7 +856,7 @@ export function App() {
                         {item.tmdbShowId ? <small>TMDB #{item.tmdbShowId}</small> : null}
                       </td>
                       <td className="path-cell">{item.currentName}</td>
-                      <td className="rename-edit-cell"><input value={item.newName || ''} onChange={(event) => updateRenameItem(item.path, { newName: event.target.value, manualName: true })} placeholder="新文件名" /></td>
+                      <td className="rename-edit-cell"><input value={item.newPath || item.newName || ''} onChange={(event) => updateRenameItem(item.path, { newName: event.target.value, newPath: event.target.value, manualName: true })} placeholder="新文件名或完整路径" /></td>
                       <td className="path-cell">{item.conflict ? '目标文件已存在' : item.message || '-'}</td>
                       <td>
                         <div className="inline-actions rename-row-actions">

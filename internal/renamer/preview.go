@@ -322,8 +322,8 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 
 	finalizeItem(path, template, &item)
 	if strings.TrimSpace(input.NewName) != "" {
-		item.NewName = sanitizeFilenamePart(strings.TrimSuffix(input.NewName, filepath.Ext(input.NewName))) + filepath.Ext(path)
-		item.NewPath = filepath.Join(filepath.Dir(path), item.NewName)
+		item.NewPath = targetPathFromTemplate(path, input.NewName)
+		item.NewName = filepath.Base(item.NewPath)
 		item.ManualName = true
 		applyConflict(path, &item)
 	}
@@ -364,14 +364,13 @@ func applyRename(input ApplyItem) PreviewItem {
 		item.Message = "不支持重命名目录"
 		return item
 	}
-	baseName := strings.TrimSuffix(strings.TrimSpace(input.NewName), filepath.Ext(input.NewName))
-	if strings.TrimSpace(baseName) == "" {
+	target := targetPathFromTemplate(path, input.NewName)
+	if strings.TrimSpace(target) == "" {
 		item.Message = "newName is required"
 		return item
 	}
-	name := sanitizeFilenamePart(baseName) + filepath.Ext(path)
-	item.NewName = name
-	item.NewPath = filepath.Join(filepath.Dir(path), name)
+	item.NewPath = target
+	item.NewName = filepath.Base(target)
 	sidecars, err := sidecarRenames(path, item.NewPath)
 	if err != nil {
 		item.Message = err.Error()
@@ -391,6 +390,16 @@ func applyRename(input ApplyItem) PreviewItem {
 		if _, err := os.Stat(sidecar.To); err == nil && !samePath(sidecar.From, sidecar.To) {
 			item.Conflict = true
 			item.Message = "附属文件目标已存在: " + filepath.Base(sidecar.To)
+			return item
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(item.NewPath), 0o755); err != nil {
+		item.Message = err.Error()
+		return item
+	}
+	for _, sidecar := range sidecars {
+		if err := os.MkdirAll(filepath.Dir(sidecar.To), 0o755); err != nil {
+			item.Message = err.Error()
 			return item
 		}
 	}
@@ -526,14 +535,49 @@ func finalizeItem(path string, template string, item *PreviewItem) {
 		item.Title = titleFromName(path)
 	}
 	item.SanitizedTitle = sanitizeFilenamePart(item.Title)
-	name := applyTemplate(template, *item)
-	if strings.TrimSpace(name) == "" {
-		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	rendered := applyTemplate(template, *item)
+	if strings.TrimSpace(rendered) == "" {
+		rendered = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	}
-	name = sanitizeFilenamePart(name) + filepath.Ext(path)
-	item.NewName = name
-	item.NewPath = filepath.Join(filepath.Dir(path), name)
+	item.NewPath = targetPathFromTemplate(path, rendered)
+	item.NewName = filepath.Base(item.NewPath)
 	applyConflict(path, item)
+}
+
+func targetPathFromTemplate(sourcePath string, rendered string) string {
+	rendered = strings.TrimSpace(rendered)
+	if rendered == "" {
+		return ""
+	}
+	rendered = strings.TrimSuffix(rendered, filepath.Ext(rendered))
+	rendered = sanitizePath(rendered) + filepath.Ext(sourcePath)
+	if filepath.IsAbs(rendered) {
+		return filepath.Clean(rendered)
+	}
+	return filepath.Join(filepath.Dir(sourcePath), rendered)
+}
+
+func sanitizePath(value string) string {
+	volume := filepath.VolumeName(value)
+	rest := strings.TrimPrefix(value, volume)
+	separatorPrefix := ""
+	for strings.HasPrefix(rest, `\`) || strings.HasPrefix(rest, `/`) {
+		separatorPrefix += string(os.PathSeparator)
+		rest = rest[1:]
+	}
+	parts := strings.FieldsFunc(rest, func(r rune) bool { return r == '/' || r == '\\' })
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = sanitizeFilenamePart(part)
+		if part != "" {
+			cleaned = append(cleaned, part)
+		}
+	}
+	joined := filepath.Join(cleaned...)
+	if joined == "." {
+		joined = ""
+	}
+	return volume + separatorPrefix + joined
 }
 
 func applyConflict(path string, item *PreviewItem) {

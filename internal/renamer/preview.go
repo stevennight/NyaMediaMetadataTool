@@ -67,6 +67,19 @@ type PreviewItemRequest struct {
 	NewName    string `json:"newName"`
 }
 
+type ApplyRequest struct {
+	Items []ApplyItem `json:"items"`
+}
+
+type ApplyItem struct {
+	Path    string `json:"path"`
+	NewName string `json:"newName"`
+}
+
+type ApplyResult struct {
+	Items []PreviewItem `json:"items"`
+}
+
 type episodeNFO struct {
 	Title     string `xml:"title"`
 	ShowTitle string `xml:"showtitle"`
@@ -262,6 +275,14 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 	return item, nil
 }
 
+func Apply(input ApplyRequest) ApplyResult {
+	result := ApplyResult{Items: make([]PreviewItem, 0, len(input.Items))}
+	for _, entry := range input.Items {
+		result.Items = append(result.Items, applyRename(entry))
+	}
+	return result
+}
+
 func previewWorkerCount(configured int) int {
 	if configured < 4 {
 		return 4
@@ -270,6 +291,51 @@ func previewWorkerCount(configured int) int {
 		return 8
 	}
 	return configured
+}
+
+func applyRename(input ApplyItem) PreviewItem {
+	path := strings.TrimSpace(input.Path)
+	item := PreviewItem{Path: path, CurrentName: filepath.Base(path), Status: "error"}
+	if path == "" {
+		item.Message = "path is required"
+		return item
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		item.Message = err.Error()
+		return item
+	}
+	if info.IsDir() {
+		item.Message = "不支持重命名目录"
+		return item
+	}
+	baseName := strings.TrimSuffix(strings.TrimSpace(input.NewName), filepath.Ext(input.NewName))
+	if strings.TrimSpace(baseName) == "" {
+		item.Message = "newName is required"
+		return item
+	}
+	name := sanitizeFilenamePart(baseName) + filepath.Ext(path)
+	item.NewName = name
+	item.NewPath = filepath.Join(filepath.Dir(path), name)
+	if samePath(path, item.NewPath) {
+		item.Status = "skipped"
+		item.Message = "文件名未变化"
+		return item
+	}
+	if _, err := os.Stat(item.NewPath); err == nil {
+		item.Conflict = true
+		item.Message = "目标文件已存在"
+		return item
+	}
+	if err := os.Rename(path, item.NewPath); err != nil {
+		item.Message = err.Error()
+		return item
+	}
+	item.Status = "renamed"
+	item.Message = "已重命名"
+	item.Path = item.NewPath
+	item.CurrentName = item.NewName
+	return item
 }
 
 func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path string, template string) PreviewItem {

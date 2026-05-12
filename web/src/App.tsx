@@ -229,6 +229,7 @@ export function App() {
   const [tmdbQuery, setTmdbQuery] = useState('');
   const [tmdbResults, setTmdbResults] = useState<TMDBSearchResult[]>([]);
   const [searchingTmdb, setSearchingTmdb] = useState(false);
+  const [applyingRename, setApplyingRename] = useState(false);
   const [previewingRename, setPreviewingRename] = useState(false);
   const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; onSelect: (path: string) => void } | null>(null);
   const [newWatchDir, setNewWatchDir] = useState('');
@@ -477,6 +478,49 @@ export function App() {
     setError('');
     for (const item of targets) {
       await recalculateRenameItem(item, { tmdbShowId: show.id, show: show.name || show.originalName, forceTmdb: true });
+    }
+  }
+
+  function selectAllRenameItems() {
+    setSelectedRenamePaths(renamePreview.map((item) => item.path));
+  }
+
+  function clearRenameSelection() {
+    setSelectedRenamePaths([]);
+  }
+
+  async function applySelectedRenames() {
+    const targets = renamePreview.filter((item) => selectedRenamePaths.includes(item.path));
+    if (!targets.length) {
+      setError('请先勾选要重命名的文件');
+      return;
+    }
+    if (!window.confirm(`确认重命名选中的 ${targets.length} 个文件？不会覆盖已存在的目标文件。`)) {
+      return;
+    }
+    setApplyingRename(true);
+    setError('');
+    setNotice('');
+    try {
+      const response = await fetch('/api/rename/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: targets.map((item) => ({ path: item.path, newName: item.newName })) })
+      });
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const result = await response.json();
+      const updates = asArray<RenamePreviewItem>(result.items);
+      const updateByOriginalPath = new Map(targets.map((item, index) => [item.path, updates[index]]));
+      setRenamePreview((items) => items.map((item) => updateByOriginalPath.get(item.path) ?? item));
+      setSelectedRenamePaths([]);
+      setNotice(`重命名完成：${updates.filter((item) => item.status === 'renamed').length} 成功，${updates.filter((item) => item.status === 'error').length} 失败。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '执行重命名失败');
+    } finally {
+      setApplyingRename(false);
     }
   }
 
@@ -740,6 +784,11 @@ export function App() {
 
           <Card title="重命名预览">
             <div className="rename-match-bar">
+              <div className="inline-actions rename-bulk-actions">
+                <button className="secondary" type="button" onClick={selectAllRenameItems} disabled={!renamePreview.length}>全选</button>
+                <button className="secondary" type="button" onClick={clearRenameSelection} disabled={!selectedRenamePaths.length}>取消选择</button>
+                <button type="button" onClick={applySelectedRenames} disabled={applyingRename || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
+              </div>
               <div className="path-input">
                 <input value={tmdbQuery} onChange={(event) => setTmdbQuery(event.target.value)} placeholder="搜索 TMDB 剧集，例如 Frieren" />
                 <button type="button" onClick={searchTmdbShows} disabled={searchingTmdb}>{searchingTmdb ? '搜索中' : '搜索剧集'}</button>

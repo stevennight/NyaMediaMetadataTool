@@ -366,6 +366,10 @@ button:disabled {
   margin-bottom: 14px;
 }
 
+.rename-bulk-actions {
+  justify-content: flex-start;
+}
+
 .tmdb-results {
   display: flex;
   flex-wrap: wrap;

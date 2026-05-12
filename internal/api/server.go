@@ -58,6 +58,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/rename/preview", s.handleRenamePreview)
 	s.mux.HandleFunc("POST /api/rename/preview/stream", s.handleRenamePreviewStream)
 	s.mux.HandleFunc("POST /api/rename/preview/item", s.handleRenamePreviewItem)
+	s.mux.HandleFunc("POST /api/rename/apply", s.handleRenameApply)
 	s.mux.HandleFunc("GET /api/tmdb/search-tv", s.handleTMDBSearchTV)
 	s.mux.HandleFunc("GET /api/watch-dirs", s.handleListWatchDirs)
 	s.mux.HandleFunc("POST /api/watch-dirs", s.handleCreateWatchDir)
@@ -245,6 +246,15 @@ func (s *Server) handleRenamePreviewItem(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) handleRenameApply(w http.ResponseWriter, r *http.Request) {
+	var input renamer.ApplyRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, renamer.Apply(input))
 }
 
 func (s *Server) handleTMDBSearchTV(w http.ResponseWriter, r *http.Request) {

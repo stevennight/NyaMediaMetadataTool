@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -166,10 +167,28 @@ func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, e
 		}
 	}
 
+	sort.SliceStable(files, func(i int, j int) bool {
+		left := strings.ToLower(filepath.Base(files[i]))
+		right := strings.ToLower(filepath.Base(files[j]))
+		if left == right {
+			return strings.ToLower(files[i]) < strings.ToLower(files[j])
+		}
+		return left < right
+	})
+
+	type previewJob struct {
+		index int
+		path  string
+	}
+	type previewResult struct {
+		index int
+		item  PreviewItem
+	}
+
 	workers := previewWorkerCount(cfg.Processing.Concurrency)
-	jobs := make(chan string)
+	jobs := make(chan previewJob)
+	results := make(chan previewResult)
 	var wg sync.WaitGroup
-	var emitMu sync.Mutex
 	var firstErr error
 	var firstErrMu sync.Mutex
 
@@ -188,7 +207,7 @@ func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, e
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for path := range jobs {
+			for job := range jobs {
 				select {
 				case <-ctx.Done():
 					setErr(ctx.Err())
@@ -196,33 +215,56 @@ func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, e
 				default:
 				}
 
-				item := buildItem(ctx, cfg, client, path, template)
-				emitMu.Lock()
-				err := emit(item)
-				emitMu.Unlock()
-				if err != nil {
-					setErr(err)
+				item := buildItem(ctx, cfg, client, job.path, template)
+				select {
+				case <-ctx.Done():
+					setErr(ctx.Err())
 					return
+				case results <- previewResult{index: job.index, item: item}:
 				}
 			}
 		}()
 	}
 
-	for _, path := range files {
-		firstErrMu.Lock()
-		err := firstErr
-		firstErrMu.Unlock()
-		if err != nil {
-			break
+	go func() {
+		defer close(jobs)
+		for index, path := range files {
+			firstErrMu.Lock()
+			err := firstErr
+			firstErrMu.Unlock()
+			if err != nil {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				setErr(ctx.Err())
+				return
+			case jobs <- previewJob{index: index, path: path}:
+			}
 		}
-		select {
-		case <-ctx.Done():
-			setErr(ctx.Err())
-		case jobs <- path:
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	next := 0
+	pending := make(map[int]PreviewItem)
+	for result := range results {
+		pending[result.index] = result.item
+		for {
+			item, ok := pending[next]
+			if !ok {
+				break
+			}
+			if err := emit(item); err != nil {
+				setErr(err)
+			}
+			delete(pending, next)
+			next++
 		}
 	}
-	close(jobs)
-	wg.Wait()
 	return firstErr
 }
 

@@ -137,6 +137,8 @@ type RenamePreviewStreamMessage = {
 type RenameHistoryMove = { from: string; to: string };
 type RenameHistoryItem = { path: string; newPath: string; status: string; message: string; moves: RenameHistoryMove[] };
 type RenameHistoryBatch = { id: string; createdAt: string; undone: boolean; undoneAt?: string; items: RenameHistoryItem[] };
+type RenameUndoCheckItem = { from: string; to: string; ok: boolean; reason: string };
+type RenameUndoCheckResult = { canUndo: boolean; batch: RenameHistoryBatch; items: RenameUndoCheckItem[] };
 
 type DirectoryEntry = { name: string; path: string };
 type DirectoryList = { path: string; parent: string; entries: DirectoryEntry[] };
@@ -262,6 +264,8 @@ export function App() {
   const [renamePreview, setRenamePreview] = useState<RenamePreviewItem[]>([]);
   const [renamePreviewCount, setRenamePreviewCount] = useState(0);
   const [renameHistory, setRenameHistory] = useState<RenameHistoryBatch[]>([]);
+  const [expandedHistoryIds, setExpandedHistoryIds] = useState<string[]>([]);
+  const [undoCheckResult, setUndoCheckResult] = useState<RenameUndoCheckResult | null>(null);
   const [loadingRenameHistory, setLoadingRenameHistory] = useState(false);
   const [undoingHistoryId, setUndoingHistoryId] = useState('');
   const [selectedRenamePaths, setSelectedRenamePaths] = useState<string[]>([]);
@@ -659,6 +663,21 @@ export function App() {
   }
 
   async function undoRenameBatch(id: string) {
+    const checkResponse = await fetch(`/api/rename/history/${id}/undo-check`);
+    if (!checkResponse.ok) {
+      setError(await checkResponse.text());
+      return;
+    }
+    const check = await checkResponse.json() as RenameUndoCheckResult;
+    setUndoCheckResult(check);
+    if (!check.canUndo) {
+      setError('该批次存在不可撤销项，已停止撤销。请展开历史查看详情。');
+      setExpandedHistoryIds((ids) => [...new Set([...ids, id])]);
+      return;
+    }
+    if (!window.confirm(`确认撤销该批次的 ${check.items.length} 个文件移动？`)) {
+      return;
+    }
     setUndoingHistoryId(id);
     setError('');
     try {
@@ -668,12 +687,17 @@ export function App() {
         return;
       }
       setNotice('已撤销最近一次重命名。');
+      setUndoCheckResult(null);
       await loadRenameHistory();
     } catch (err) {
       setError(err instanceof Error ? err.message : '撤销失败');
     } finally {
       setUndoingHistoryId('');
     }
+  }
+
+  function toggleHistoryDetails(id: string) {
+    setExpandedHistoryIds((ids) => ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]);
   }
 
   async function addWatchDir() {
@@ -1018,13 +1042,17 @@ export function App() {
           <Card title="重命名历史" action={<button className="secondary" onClick={() => void loadRenameHistory()} disabled={loadingRenameHistory}>{loadingRenameHistory ? '刷新中' : '刷新历史'}</button>}>
             {renameHistory.length ? renameHistory.map((batch) => (
               <div className="history-item" key={batch.id}>
-                <div>
-                  <strong>{formatStoredTime(batch.createdAt, displayTimezone)}</strong>
-                  <small>{batch.items.length} 项 · {batch.id}{batch.undone ? ` · 已撤销 ${batch.undoneAt ? formatStoredTime(batch.undoneAt, displayTimezone) : ''}` : ''}</small>
+                <div className="history-summary">
+                  <button className="secondary" type="button" onClick={() => toggleHistoryDetails(batch.id)}>{expandedHistoryIds.includes(batch.id) ? '收起' : '详情'}</button>
+                  <div>
+                    <strong>{formatStoredTime(batch.createdAt, displayTimezone)}</strong>
+                    <small>{batch.items.length} 项 · {batch.id}{batch.undone ? ` · 已撤销 ${batch.undoneAt ? formatStoredTime(batch.undoneAt, displayTimezone) : ''}` : ''}</small>
+                  </div>
+                  <div className="inline-actions">
+                    <button className="secondary" onClick={() => void undoRenameBatch(batch.id)} disabled={batch.undone || undoingHistoryId === batch.id}>{batch.undone ? '已撤销' : undoingHistoryId === batch.id ? '撤销中' : '撤销'}</button>
+                  </div>
                 </div>
-                <div className="inline-actions">
-                  <button className="secondary" onClick={() => void undoRenameBatch(batch.id)} disabled={batch.undone || undoingHistoryId === batch.id}>{batch.undone ? '已撤销' : undoingHistoryId === batch.id ? '撤销中' : '撤销'}</button>
-                </div>
+                {expandedHistoryIds.includes(batch.id) && <HistoryDetails batch={batch} undoCheck={undoCheckResult?.batch?.id === batch.id ? undoCheckResult : null} />}
               </div>
             )) : <p className="muted">暂无重命名历史。</p>}
           </Card>
@@ -1257,6 +1285,32 @@ function BatchEpisodeModal(props: {
           <button onClick={props.onSubmit} disabled={props.applying}>{props.applying ? '应用中' : '应用并查 TMDB'}</button>
         </div>
       </section>
+    </div>
+  );
+}
+
+function HistoryDetails(props: { batch: RenameHistoryBatch; undoCheck: RenameUndoCheckResult | null }) {
+  const failedChecks = new Map((props.undoCheck?.items ?? []).filter((item) => !item.ok).map((item) => [`${item.from}\n${item.to}`, item.reason]));
+  return (
+    <div className="history-details">
+      {props.batch.items.map((item, itemIndex) => (
+        <div className="history-detail-item" key={`${item.path}-${itemIndex}`}>
+          <strong>{item.status}</strong>
+          <small>{item.message || '-'}</small>
+          <div className="history-moves">
+            {item.moves.map((move, moveIndex) => {
+              const reason = failedChecks.get(`${move.from}\n${move.to}`);
+              return (
+                <div className={reason ? 'history-move bad' : 'history-move'} key={`${move.from}-${moveIndex}`}>
+                  <span>{move.from}</span>
+                  <span>{move.to}</span>
+                  {reason && <em>{reason}</em>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

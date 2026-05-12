@@ -432,12 +432,17 @@ button:disabled {
 }
 
 .history-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  display: grid;
+  gap: 10px;
   padding: 12px 0;
   border-top: 1px solid rgba(120, 113, 108, 0.12);
+}
+
+.history-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
 }
 
 .history-item:first-of-type {
@@ -450,6 +455,51 @@ button:disabled {
   color: #78716c;
   margin-top: 4px;
   overflow-wrap: anywhere;
+}
+
+.history-details {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(120, 113, 108, 0.14);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.history-detail-item {
+  display: grid;
+  gap: 6px;
+}
+
+.history-moves {
+  display: grid;
+  gap: 6px;
+}
+
+.history-move {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.68);
+  font-size: 12px;
+}
+
+.history-move span,
+.history-move em {
+  overflow-wrap: anywhere;
+}
+
+.history-move em {
+  grid-column: 1 / -1;
+  color: #b91c1c;
+  font-style: normal;
+}
+
+.history-move.bad {
+  border: 1px solid rgba(185, 28, 28, 0.28);
+  background: rgba(254, 226, 226, 0.58);
 }
 
 .path-cell {

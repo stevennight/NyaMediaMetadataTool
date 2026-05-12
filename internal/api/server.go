@@ -60,6 +60,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/rename/preview/item", s.handleRenamePreviewItem)
 	s.mux.HandleFunc("POST /api/rename/apply", s.handleRenameApply)
 	s.mux.HandleFunc("GET /api/rename/history", s.handleRenameHistory)
+	s.mux.HandleFunc("GET /api/rename/history/{id}/undo-check", s.handleRenameHistoryUndoCheck)
 	s.mux.HandleFunc("POST /api/rename/history/{id}/undo", s.handleRenameHistoryUndo)
 	s.mux.HandleFunc("GET /api/tmdb/search-tv", s.handleTMDBSearchTV)
 	s.mux.HandleFunc("GET /api/watch-dirs", s.handleListWatchDirs)
@@ -271,6 +272,21 @@ func (s *Server) handleRenameHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleRenameHistoryUndoCheck(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/rename/history/")
+	id = strings.TrimSuffix(id, "/undo-check")
+	if strings.TrimSpace(id) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("history id is required"))
+		return
+	}
+	result, err := renamer.CheckHistoryBatchUndo(renamer.HistoryPath(s.snapshotConfig()), id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleRenameHistoryUndo(w http.ResponseWriter, r *http.Request) {

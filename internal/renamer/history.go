@@ -32,6 +32,19 @@ type RenameMove struct {
 	To   string `json:"to"`
 }
 
+type UndoCheckResult struct {
+	CanUndo bool            `json:"canUndo"`
+	Batch   HistoryBatch    `json:"batch"`
+	Items   []UndoCheckItem `json:"items"`
+}
+
+type UndoCheckItem struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason"`
+}
+
 type historyFile struct {
 	Batches []HistoryBatch `json:"batches"`
 }
@@ -76,16 +89,11 @@ func UndoHistoryBatch(path string, id string) (HistoryBatch, error) {
 	if batch.Undone {
 		return HistoryBatch{}, errors.New("rename history batch already undone")
 	}
-	moves := flattenMoves(batch)
-	for i := len(moves) - 1; i >= 0; i-- {
-		move := moves[i]
-		if _, err := os.Stat(move.To); err != nil {
-			return HistoryBatch{}, err
-		}
-		if _, err := os.Stat(move.From); err == nil && !samePath(move.From, move.To) {
-			return HistoryBatch{}, errors.New("undo target already exists: " + move.From)
-		}
+	check := checkBatchUndoable(batch)
+	if !check.CanUndo {
+		return HistoryBatch{}, errors.New("rename history batch is not fully undoable")
 	}
+	moves := flattenMoves(batch)
 	for i := len(moves) - 1; i >= 0; i-- {
 		move := moves[i]
 		if err := os.MkdirAll(filepath.Dir(move.From), 0o755); err != nil {
@@ -101,6 +109,44 @@ func UndoHistoryBatch(path string, id string) (HistoryBatch, error) {
 		return HistoryBatch{}, err
 	}
 	return history.Batches[index], nil
+}
+
+func CheckHistoryBatchUndo(path string, id string) (UndoCheckResult, error) {
+	history, err := readHistory(path)
+	if err != nil {
+		return UndoCheckResult{}, err
+	}
+	for _, batch := range history.Batches {
+		if batch.ID == id {
+			return checkBatchUndoable(batch), nil
+		}
+	}
+	return UndoCheckResult{}, errors.New("rename history batch not found")
+}
+
+func checkBatchUndoable(batch HistoryBatch) UndoCheckResult {
+	result := UndoCheckResult{CanUndo: !batch.Undone, Batch: batch}
+	if batch.Undone {
+		result.Items = append(result.Items, UndoCheckItem{OK: false, Reason: "批次已撤销"})
+		return result
+	}
+	moves := flattenMoves(batch)
+	for i := len(moves) - 1; i >= 0; i-- {
+		move := moves[i]
+		item := UndoCheckItem{From: move.From, To: move.To, OK: true}
+		if _, err := os.Stat(move.To); err != nil {
+			item.OK = false
+			item.Reason = "当前路径不存在: " + err.Error()
+		} else if _, err := os.Stat(move.From); err == nil && !samePath(move.From, move.To) {
+			item.OK = false
+			item.Reason = "原路径已存在"
+		}
+		if !item.OK {
+			result.CanUndo = false
+		}
+		result.Items = append(result.Items, item)
+	}
+	return result
 }
 
 func appendHistoryBatch(path string, batch HistoryBatch) error {

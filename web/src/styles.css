@@ -480,6 +480,34 @@ button:disabled {
   margin-top: 18px;
 }
 
+.batch-episode-modal {
+  width: min(560px, 100%);
+}
+
+.batch-episode-form {
+  margin-top: 14px;
+}
+
+.batch-mode-list {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.batch-mode-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #44403c;
+}
+
+.batch-mode-list input[type="number"] {
+  width: 180px;
+}
+
 .directory-list {
   display: grid;
   gap: 8px;

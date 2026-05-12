@@ -139,6 +139,7 @@ type DirectoryList = { path: string; parent: string; entries: DirectoryEntry[] }
 
 type RescanScope = 'all' | 'dir' | 'path';
 type RescanStrategy = 'missing' | 'force';
+type BatchEpisodeMode = 'keep' | 'offset' | 'sequence';
 
 type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
@@ -261,6 +262,12 @@ export function App() {
   const [tmdbResults, setTmdbResults] = useState<TMDBSearchResult[]>([]);
   const [searchingTmdb, setSearchingTmdb] = useState(false);
   const [applyingRename, setApplyingRename] = useState(false);
+  const [batchEpisodeOpen, setBatchEpisodeOpen] = useState(false);
+  const [batchSeason, setBatchSeason] = useState(1);
+  const [batchEpisodeMode, setBatchEpisodeMode] = useState<BatchEpisodeMode>('sequence');
+  const [batchEpisodeOffset, setBatchEpisodeOffset] = useState(0);
+  const [batchEpisodeStart, setBatchEpisodeStart] = useState(1);
+  const [applyingBatchEpisode, setApplyingBatchEpisode] = useState(false);
   const [previewingRename, setPreviewingRename] = useState(false);
   const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; onSelect: (path: string) => void } | null>(null);
   const [newWatchDir, setNewWatchDir] = useState('');
@@ -470,7 +477,7 @@ export function App() {
     setSelectedRenamePaths((paths) => checked ? [...new Set([...paths, path])] : paths.filter((item) => item !== path));
   }
 
-  async function recalculateRenameItem(item: RenamePreviewItem, options: { tmdbShowId?: number; show?: string; forceTmdb?: boolean; keepManualName?: boolean } = {}) {
+  async function previewAdjustedRenameItem(item: RenamePreviewItem, options: { tmdbShowId?: number; show?: string; forceTmdb?: boolean; keepManualName?: boolean } = {}) {
     setError('');
     const response = await fetch('/api/rename/preview/item', {
       method: 'POST',
@@ -490,9 +497,14 @@ export function App() {
     });
     if (!response.ok) {
       setError(await response.text());
-      return;
+      return null;
     }
-    replaceRenameItem(await response.json());
+    return await response.json() as RenamePreviewItem;
+  }
+
+  async function recalculateRenameItem(item: RenamePreviewItem, options: { tmdbShowId?: number; show?: string; forceTmdb?: boolean; keepManualName?: boolean } = {}) {
+    const next = await previewAdjustedRenameItem(item, options);
+    if (next) replaceRenameItem(next);
   }
 
   async function searchTmdbShows() {
@@ -533,6 +545,42 @@ export function App() {
 
   function clearRenameSelection() {
     setSelectedRenamePaths([]);
+  }
+
+  function openBatchEpisodeDialog() {
+    const first = renamePreview.find((item) => selectedRenamePaths.includes(item.path));
+    setBatchSeason(first?.season ?? 1);
+    setBatchEpisodeMode('sequence');
+    setBatchEpisodeOffset(0);
+    setBatchEpisodeStart(1);
+    setBatchEpisodeOpen(true);
+  }
+
+  async function applyBatchEpisodeFix() {
+    const targets = renamePreview.filter((item) => selectedRenamePaths.includes(item.path));
+    if (!targets.length) {
+      setError('请先勾选要批量修正的文件');
+      return;
+    }
+    setApplyingBatchEpisode(true);
+    setError('');
+    try {
+      for (let index = 0; index < targets.length; index++) {
+        const item = targets[index];
+        const episode = batchEpisodeMode === 'sequence'
+          ? batchEpisodeStart + index
+          : batchEpisodeMode === 'offset'
+            ? item.episode + batchEpisodeOffset
+            : item.episode;
+        const adjusted = { ...item, season: batchSeason, episode: Math.max(0, episode), manualName: false };
+        const next = await previewAdjustedRenameItem(adjusted, { forceTmdb: true, keepManualName: false });
+        if (next) replaceRenameItem(next);
+      }
+      setBatchEpisodeOpen(false);
+      setNotice(`已批量修正 ${targets.length} 个文件的季集并重新预览。`);
+    } finally {
+      setApplyingBatchEpisode(false);
+    }
   }
 
   function insertRenamePlaceholder(placeholder: string) {
@@ -862,6 +910,7 @@ export function App() {
               <div className="inline-actions rename-bulk-actions">
                 <button className="secondary" type="button" onClick={selectAllRenameItems} disabled={!renamePreview.length}>全选</button>
                 <button className="secondary" type="button" onClick={clearRenameSelection} disabled={!selectedRenamePaths.length}>取消选择</button>
+                <button className="secondary" type="button" onClick={openBatchEpisodeDialog} disabled={!selectedRenamePaths.length}>批量修正季集</button>
                 <button type="button" onClick={applySelectedRenames} disabled={applyingRename || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
               </div>
               <div className="path-input">
@@ -983,6 +1032,7 @@ export function App() {
         </section>
       )}
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onBrowsePath={() => setDirectoryPicker({ title: '选择补扫目录', value: rescanTarget, onSelect: setRescanTarget })} onSubmit={() => void rescan()} />}
+      {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
       </section>
     </main>
@@ -1109,6 +1159,47 @@ function RescanModal(props: {
         <div className="inline-actions modal-actions">
           <button className="secondary" onClick={props.onClose}>取消</button>
           <button onClick={props.onSubmit} disabled={props.rescanning}>{props.rescanning ? '补扫中' : '开始补扫'}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function BatchEpisodeModal(props: {
+  count: number;
+  season: number;
+  mode: BatchEpisodeMode;
+  offset: number;
+  start: number;
+  applying: boolean;
+  onClose: () => void;
+  onSeasonChange: (value: number) => void;
+  onModeChange: (value: BatchEpisodeMode) => void;
+  onOffsetChange: (value: number) => void;
+  onStartChange: (value: number) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <section className="modal-card batch-episode-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <h2>批量修正季集</h2>
+          <button className="secondary" onClick={props.onClose}>关闭</button>
+        </div>
+        <p className="muted">将应用到当前勾选的 {props.count} 个文件，并按修正后的季集重新查询 TMDB 预览。</p>
+        <div className="config-form batch-episode-form">
+          <label>目标季<input type="number" min="0" value={props.season} onChange={(event) => props.onSeasonChange(Number(event.target.value))} /></label>
+          <div className="batch-mode-list">
+            <label><input type="radio" checked={props.mode === 'keep'} onChange={() => props.onModeChange('keep')} /> 保留当前集数</label>
+            <label><input type="radio" checked={props.mode === 'offset'} onChange={() => props.onModeChange('offset')} /> 当前集数偏移</label>
+            {props.mode === 'offset' && <input type="number" value={props.offset} onChange={(event) => props.onOffsetChange(Number(event.target.value))} placeholder="例如 -12" />}
+            <label><input type="radio" checked={props.mode === 'sequence'} onChange={() => props.onModeChange('sequence')} /> 按列表顺序重排</label>
+            {props.mode === 'sequence' && <input type="number" min="0" value={props.start} onChange={(event) => props.onStartChange(Number(event.target.value))} placeholder="起始集" />}
+          </div>
+        </div>
+        <div className="inline-actions modal-actions">
+          <button className="secondary" onClick={props.onClose}>取消</button>
+          <button onClick={props.onSubmit} disabled={props.applying}>{props.applying ? '应用中' : '应用并查 TMDB'}</button>
         </div>
       </section>
     </div>

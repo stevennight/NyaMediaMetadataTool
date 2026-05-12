@@ -22,6 +22,19 @@ const DefaultTemplate = "{show} - S{season:00}E{episode:00} - {title}"
 var episodePattern = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,4})\b`)
 var placeholderPattern = regexp.MustCompile(`\{([a-z]+)(?::([^}]+))?\}`)
 var reservedNamePattern = regexp.MustCompile(`(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$`)
+var sidecarExtensions = map[string]struct{}{
+	".nfo":  {},
+	".srt":  {},
+	".ass":  {},
+	".ssa":  {},
+	".vtt":  {},
+	".json": {},
+	".bif":  {},
+	".jpg":  {},
+	".jpeg": {},
+	".png":  {},
+	".webp": {},
+}
 
 type PreviewRequest struct {
 	Path     string `json:"path"`
@@ -317,6 +330,11 @@ func applyRename(input ApplyItem) PreviewItem {
 	name := sanitizeFilenamePart(baseName) + filepath.Ext(path)
 	item.NewName = name
 	item.NewPath = filepath.Join(filepath.Dir(path), name)
+	sidecars, err := sidecarRenames(path, item.NewPath)
+	if err != nil {
+		item.Message = err.Error()
+		return item
+	}
 	if samePath(path, item.NewPath) {
 		item.Status = "skipped"
 		item.Message = "文件名未变化"
@@ -327,15 +345,89 @@ func applyRename(input ApplyItem) PreviewItem {
 		item.Message = "目标文件已存在"
 		return item
 	}
+	for _, sidecar := range sidecars {
+		if _, err := os.Stat(sidecar.To); err == nil && !samePath(sidecar.From, sidecar.To) {
+			item.Conflict = true
+			item.Message = "附属文件目标已存在: " + filepath.Base(sidecar.To)
+			return item
+		}
+	}
 	if err := os.Rename(path, item.NewPath); err != nil {
 		item.Message = err.Error()
 		return item
 	}
+	renamedSidecars := 0
+	for _, sidecar := range sidecars {
+		if samePath(sidecar.From, sidecar.To) {
+			continue
+		}
+		if err := os.Rename(sidecar.From, sidecar.To); err != nil {
+			item.Status = "warning"
+			item.Message = "媒体文件已重命名，附属文件失败: " + err.Error()
+			item.Path = item.NewPath
+			item.CurrentName = item.NewName
+			return item
+		}
+		renamedSidecars++
+		updateRenamedNFOReferences(sidecar.To, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), strings.TrimSuffix(filepath.Base(item.NewPath), filepath.Ext(item.NewPath)))
+	}
 	item.Status = "renamed"
 	item.Message = "已重命名"
+	if renamedSidecars > 0 {
+		item.Message = "已重命名，附属文件 " + strconv.Itoa(renamedSidecars) + " 个"
+	}
 	item.Path = item.NewPath
 	item.CurrentName = item.NewName
 	return item
+}
+
+type sidecarRename struct {
+	From string
+	To   string
+}
+
+func sidecarRenames(mediaPath string, newMediaPath string) ([]sidecarRename, error) {
+	dir := filepath.Dir(mediaPath)
+	oldBase := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
+	newBase := strings.TrimSuffix(filepath.Base(newMediaPath), filepath.Ext(newMediaPath))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	renames := make([]sidecarRename, 0)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == filepath.Base(mediaPath) {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		if _, ok := sidecarExtensions[ext]; !ok {
+			continue
+		}
+		if !strings.HasPrefix(name, oldBase+".") && !strings.HasPrefix(name, oldBase+"-") {
+			continue
+		}
+		nextName := newBase + strings.TrimPrefix(name, oldBase)
+		renames = append(renames, sidecarRename{From: filepath.Join(dir, name), To: filepath.Join(dir, nextName)})
+	}
+	return renames, nil
+}
+
+func updateRenamedNFOReferences(path string, oldBase string, newBase string) {
+	if !strings.EqualFold(filepath.Ext(path), ".nfo") {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	content := string(data)
+	content = strings.ReplaceAll(content, oldBase+"-", newBase+"-")
+	content = strings.ReplaceAll(content, oldBase+".", newBase+".")
+	_ = os.WriteFile(path, []byte(content), 0o644)
 }
 
 func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path string, template string) PreviewItem {

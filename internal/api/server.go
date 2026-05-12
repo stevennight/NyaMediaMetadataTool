@@ -59,6 +59,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/rename/preview/stream", s.handleRenamePreviewStream)
 	s.mux.HandleFunc("POST /api/rename/preview/item", s.handleRenamePreviewItem)
 	s.mux.HandleFunc("POST /api/rename/apply", s.handleRenameApply)
+	s.mux.HandleFunc("GET /api/rename/history", s.handleRenameHistory)
+	s.mux.HandleFunc("POST /api/rename/history/{id}/undo", s.handleRenameHistoryUndo)
 	s.mux.HandleFunc("GET /api/tmdb/search-tv", s.handleTMDBSearchTV)
 	s.mux.HandleFunc("GET /api/watch-dirs", s.handleListWatchDirs)
 	s.mux.HandleFunc("POST /api/watch-dirs", s.handleCreateWatchDir)
@@ -254,7 +256,36 @@ func (s *Server) handleRenameApply(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, renamer.Apply(input))
+	result, err := renamer.Apply(renamer.HistoryPath(s.snapshotConfig()), input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleRenameHistory(w http.ResponseWriter, r *http.Request) {
+	items, err := renamer.ListHistory(renamer.HistoryPath(s.snapshotConfig()), 20)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleRenameHistoryUndo(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/rename/history/")
+	id = strings.TrimSuffix(id, "/undo")
+	if strings.TrimSpace(id) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("history id is required"))
+		return
+	}
+	batch, err := renamer.UndoHistoryBatch(renamer.HistoryPath(s.snapshotConfig()), id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, batch)
 }
 
 func (s *Server) handleTMDBSearchTV(w http.ResponseWriter, r *http.Request) {

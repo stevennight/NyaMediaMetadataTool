@@ -134,6 +134,10 @@ type RenamePreviewStreamMessage = {
   error?: string;
 };
 
+type RenameHistoryMove = { from: string; to: string };
+type RenameHistoryItem = { path: string; newPath: string; status: string; message: string; moves: RenameHistoryMove[] };
+type RenameHistoryBatch = { id: string; createdAt: string; undone: boolean; undoneAt?: string; items: RenameHistoryItem[] };
+
 type DirectoryEntry = { name: string; path: string };
 type DirectoryList = { path: string; parent: string; entries: DirectoryEntry[] };
 
@@ -257,6 +261,9 @@ export function App() {
   const [renameTemplateHistory, setRenameTemplateHistory] = useState(() => asArray<string>(readRenamePreferences().templateHistory).filter(Boolean));
   const [renamePreview, setRenamePreview] = useState<RenamePreviewItem[]>([]);
   const [renamePreviewCount, setRenamePreviewCount] = useState(0);
+  const [renameHistory, setRenameHistory] = useState<RenameHistoryBatch[]>([]);
+  const [loadingRenameHistory, setLoadingRenameHistory] = useState(false);
+  const [undoingHistoryId, setUndoingHistoryId] = useState('');
   const [selectedRenamePaths, setSelectedRenamePaths] = useState<string[]>([]);
   const [tmdbQuery, setTmdbQuery] = useState('');
   const [tmdbResults, setTmdbResults] = useState<TMDBSearchResult[]>([]);
@@ -302,6 +309,7 @@ export function App() {
         applyTaskList(await tasksResponse.json());
         setWatchDirs(asArray<WatchDir>(await dirsResponse.json()));
         setArtifacts(asArray<Artifact>(await artifactsResponse.json()));
+        await loadRenameHistory();
       } catch (err) {
         setError(err instanceof Error ? err.message : '加载失败');
       }
@@ -309,6 +317,20 @@ export function App() {
 
     void load();
   }, [taskPageSize]);
+
+  async function loadRenameHistory() {
+    setLoadingRenameHistory(true);
+    try {
+      const response = await fetch('/api/rename/history');
+      if (!response.ok) {
+        return;
+      }
+      const result = await response.json();
+      setRenameHistory(asArray<RenameHistoryBatch>(result.items));
+    } finally {
+      setLoadingRenameHistory(false);
+    }
+  }
 
   useEffect(() => {
     function handlePopState() {
@@ -628,10 +650,29 @@ export function App() {
       setRenamePreview((items) => items.map((item) => updateByOriginalPath.get(item.path) ?? item));
       setSelectedRenamePaths([]);
       setNotice(`重命名完成：${updates.filter((item) => item.status === 'renamed').length} 成功，${updates.filter((item) => item.status === 'error').length} 失败。`);
+      await loadRenameHistory();
     } catch (err) {
       setError(err instanceof Error ? err.message : '执行重命名失败');
     } finally {
       setApplyingRename(false);
+    }
+  }
+
+  async function undoRenameBatch(id: string) {
+    setUndoingHistoryId(id);
+    setError('');
+    try {
+      const response = await fetch(`/api/rename/history/${id}/undo`, { method: 'POST' });
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      setNotice('已撤销最近一次重命名。');
+      await loadRenameHistory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '撤销失败');
+    } finally {
+      setUndoingHistoryId('');
     }
   }
 
@@ -972,6 +1013,20 @@ export function App() {
                 </tbody>
               </table>
             </div>
+          </Card>
+
+          <Card title="重命名历史" action={<button className="secondary" onClick={() => void loadRenameHistory()} disabled={loadingRenameHistory}>{loadingRenameHistory ? '刷新中' : '刷新历史'}</button>}>
+            {renameHistory.length ? renameHistory.map((batch) => (
+              <div className="history-item" key={batch.id}>
+                <div>
+                  <strong>{formatStoredTime(batch.createdAt, displayTimezone)}</strong>
+                  <small>{batch.items.length} 项 · {batch.id}{batch.undone ? ` · 已撤销 ${batch.undoneAt ? formatStoredTime(batch.undoneAt, displayTimezone) : ''}` : ''}</small>
+                </div>
+                <div className="inline-actions">
+                  <button className="secondary" onClick={() => void undoRenameBatch(batch.id)} disabled={batch.undone || undoingHistoryId === batch.id}>{batch.undone ? '已撤销' : undoingHistoryId === batch.id ? '撤销中' : '撤销'}</button>
+                </div>
+              </div>
+            )) : <p className="muted">暂无重命名历史。</p>}
           </Card>
         </section>
       )}

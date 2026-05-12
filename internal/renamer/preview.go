@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"NyaMediaMetadataTool/internal/config"
@@ -92,7 +93,8 @@ type ApplyItem struct {
 }
 
 type ApplyResult struct {
-	Items []PreviewItem `json:"items"`
+	BatchID string        `json:"batchId"`
+	Items   []PreviewItem `json:"items"`
 }
 
 type episodeNFO struct {
@@ -331,12 +333,20 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 	return item, nil
 }
 
-func Apply(input ApplyRequest) ApplyResult {
-	result := ApplyResult{Items: make([]PreviewItem, 0, len(input.Items))}
+func Apply(historyPath string, input ApplyRequest) (ApplyResult, error) {
+	batch := HistoryBatch{ID: strconv.FormatInt(timeNowUnixNano(), 36), CreatedAt: nowRFC3339()}
+	result := ApplyResult{BatchID: batch.ID, Items: make([]PreviewItem, 0, len(input.Items))}
 	for _, entry := range input.Items {
-		result.Items = append(result.Items, applyRename(entry))
+		item, moves := applyRename(entry)
+		result.Items = append(result.Items, item)
+		if len(moves) > 0 {
+			batch.Items = append(batch.Items, HistoryItem{Path: entry.Path, NewPath: item.NewPath, Status: item.Status, Message: item.Message, Moves: moves})
+		}
 	}
-	return result
+	if err := appendHistoryBatch(historyPath, batch); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func previewWorkerCount(configured int) int {
@@ -349,70 +359,72 @@ func previewWorkerCount(configured int) int {
 	return configured
 }
 
-func applyRename(input ApplyItem) PreviewItem {
+func applyRename(input ApplyItem) (PreviewItem, []RenameMove) {
+	moves := make([]RenameMove, 0)
 	path := strings.TrimSpace(input.Path)
 	item := PreviewItem{Path: path, CurrentName: filepath.Base(path), Status: "error"}
 	if path == "" {
 		item.Message = "path is required"
-		return item
+		return item, moves
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		item.Message = err.Error()
-		return item
+		return item, moves
 	}
 	if info.IsDir() {
 		item.Message = "不支持重命名目录"
-		return item
+		return item, moves
 	}
 	targetValue := firstNonEmpty(input.NewPath, input.NewName)
 	target := targetPathFromTemplate(path, targetValue)
 	if strings.TrimSpace(target) == "" {
 		item.Message = "newName is required"
-		return item
+		return item, moves
 	}
 	item.NewPath = target
 	item.NewName = filepath.Base(target)
 	sidecars, err := sidecarRenames(path, item.NewPath)
 	if err != nil {
 		item.Message = err.Error()
-		return item
+		return item, moves
 	}
 	if samePath(path, item.NewPath) {
 		item.Status = "skipped"
 		item.Message = "文件名未变化"
-		return item
+		return item, moves
 	}
 	if _, err := os.Stat(item.NewPath); err == nil {
 		item.Conflict = true
 		item.Message = "目标文件已存在"
-		return item
+		return item, moves
 	}
 	for _, sidecar := range sidecars {
 		if _, err := os.Stat(sidecar.To); err == nil && !samePath(sidecar.From, sidecar.To) {
 			item.Conflict = true
 			item.Message = "附属文件目标已存在: " + filepath.Base(sidecar.To)
-			return item
+			return item, moves
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(item.NewPath), 0o755); err != nil {
 		item.Message = err.Error()
-		return item
+		return item, moves
 	}
 	for _, sidecar := range sidecars {
 		if err := os.MkdirAll(filepath.Dir(sidecar.To), 0o755); err != nil {
 			item.Message = err.Error()
-			return item
+			return item, moves
 		}
 	}
 	if err := os.Rename(path, item.NewPath); err != nil {
 		item.Message = err.Error()
-		return item
+		return item, moves
 	}
+	moves = append(moves, RenameMove{From: path, To: item.NewPath})
 	if _, err := os.Stat(item.NewPath); err != nil {
 		item.Status = "warning"
 		item.Message = "系统报告已重命名，但目标文件不可访问: " + err.Error()
-		return item
+		return item, moves
 	}
 	renamedSidecars := 0
 	for _, sidecar := range sidecars {
@@ -424,8 +436,9 @@ func applyRename(input ApplyItem) PreviewItem {
 			item.Message = "媒体文件已重命名，附属文件失败: " + err.Error()
 			item.Path = item.NewPath
 			item.CurrentName = item.NewName
-			return item
+			return item, moves
 		}
+		moves = append(moves, RenameMove{From: sidecar.From, To: sidecar.To})
 		renamedSidecars++
 		updateRenamedNFOReferences(sidecar.To, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), strings.TrimSuffix(filepath.Base(item.NewPath), filepath.Ext(item.NewPath)))
 	}
@@ -436,8 +449,12 @@ func applyRename(input ApplyItem) PreviewItem {
 	}
 	item.Path = item.NewPath
 	item.CurrentName = item.NewName
-	return item
+	return item, moves
 }
+
+func nowRFC3339() string { return time.Now().Format(time.RFC3339) }
+
+func timeNowUnixNano() int64 { return time.Now().UnixNano() }
 
 type sidecarRename struct {
 	From string

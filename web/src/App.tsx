@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 type Health = {
   status: string;
@@ -204,6 +204,7 @@ const regionOptions: RegionOption[] = [
 
 const timeZoneOptions = ['Asia/Shanghai', 'Asia/Tokyo', 'UTC', 'America/Los_Angeles', 'America/New_York', 'Europe/London'];
 const defaultRenameTemplate = '{show} - S{season:00}E{episode:00} - {title}';
+const renamePlaceholders = ['{show}', '{season:00}', '{episode:00}', '{title}', '{year}'];
 
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -244,6 +245,7 @@ export function App() {
   const [rescanning, setRescanning] = useState(false);
   const [error, setError] = useState<string>('');
   const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
+  const renameTemplateRef = useRef<HTMLInputElement | null>(null);
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
 
   useEffect(() => {
@@ -487,6 +489,23 @@ export function App() {
 
   function clearRenameSelection() {
     setSelectedRenamePaths([]);
+  }
+
+  function insertRenamePlaceholder(placeholder: string) {
+    const input = renameTemplateRef.current;
+    if (!input) {
+      setRenameTemplate((value) => value + placeholder);
+      return;
+    }
+    const start = input.selectionStart ?? renameTemplate.length;
+    const end = input.selectionEnd ?? start;
+    const next = renameTemplate.slice(0, start) + placeholder + renameTemplate.slice(end);
+    setRenameTemplate(next);
+    requestAnimationFrame(() => {
+      input.focus();
+      const cursor = start + placeholder.length;
+      input.setSelectionRange(cursor, cursor);
+    });
   }
 
   async function applySelectedRenames() {
@@ -775,11 +794,15 @@ export function App() {
           <Card title="整理命名" action={<button onClick={previewRename} disabled={previewingRename}>{previewingRename ? `扫描中 ${renamePreviewCount}` : '生成预览'}</button>}>
             <div className="rename-controls">
               <label>目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}>选择</button></div></label>
-              <label>命名模板<input value={renameTemplate} onChange={(event) => setRenameTemplate(event.target.value)} placeholder={defaultRenameTemplate} /></label>
+              <label>命名模板<input ref={renameTemplateRef} value={renameTemplate} onChange={(event) => setRenameTemplate(event.target.value)} placeholder={defaultRenameTemplate} /></label>
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <Toggle label="缺少 NFO 时查询 TMDB" checked={renameUseTmdb} onChange={setRenameUseTmdb} />
             </div>
-            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时从 TMDB 获取 {'{title}'}。可用占位符：{'{show}'}、{'{season:00}'}、{'{episode:00}'}、{'{title}'}、{'{year}'}。本页只生成预览，不执行重命名。</p>
+            <div className="placeholder-bar">
+              <span>点击插入占位符：</span>
+              {renamePlaceholders.map((placeholder) => <button className="secondary" type="button" key={placeholder} onClick={() => insertRenamePlaceholder(placeholder)}>{placeholder}</button>)}
+            </div>
+            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时，从 TMDB 获取剧集标题并影响 {'{title}'}。占位符支持点击插入；{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
           </Card>
 
           <Card title="重命名预览">

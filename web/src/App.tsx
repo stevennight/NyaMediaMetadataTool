@@ -802,7 +802,7 @@ export function App() {
               <span>点击插入占位符：</span>
               {renamePlaceholders.map((placeholder) => <button className="secondary" type="button" key={placeholder} onClick={() => insertRenamePlaceholder(placeholder)}>{placeholder}</button>)}
             </div>
-            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时，从 TMDB 获取剧集标题并影响 {'{title}'}。占位符支持点击插入；{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
+            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。占位符支持点击插入；{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
           </Card>
 
           <Card title="重命名预览">

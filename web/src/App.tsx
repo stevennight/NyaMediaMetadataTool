@@ -100,7 +100,7 @@ type TaskDetail = {
 };
 
 type RescanScope = 'all' | 'dir' | 'path';
-type RescanStrategy = 'normal' | 'missing' | 'force';
+type RescanStrategy = 'missing' | 'force';
 
 type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
@@ -180,7 +180,7 @@ export function App() {
   const [rescanOpen, setRescanOpen] = useState(false);
   const [rescanScope, setRescanScope] = useState<RescanScope>('all');
   const [rescanTarget, setRescanTarget] = useState('');
-  const [rescanStrategy, setRescanStrategy] = useState<RescanStrategy>('normal');
+  const [rescanStrategy, setRescanStrategy] = useState<RescanStrategy>('missing');
   const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null);
   const [checkingTools, setCheckingTools] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
@@ -352,7 +352,7 @@ export function App() {
   function openRescanDialog(scope: RescanScope, target = '') {
     setRescanScope(scope);
     setRescanTarget(target);
-    setRescanStrategy('normal');
+    setRescanStrategy('missing');
     setRescanOpen(true);
   }
 
@@ -703,7 +703,6 @@ function RescanModal(props: {
           <label>
             策略
             <select value={props.strategy} onChange={(event) => props.onStrategyChange(event.target.value as RescanStrategy)}>
-              <option value="normal">正常补扫</option>
               <option value="missing">只补缺失</option>
               <option value="force">强制重建</option>
             </select>

@@ -158,6 +158,10 @@ h1 {
   max-width: none;
 }
 
+.rename-page-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .task-page-grid {
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
@@ -330,6 +334,29 @@ button:disabled {
 
 .task-table tbody tr:hover {
   background: rgba(245, 158, 11, 0.08);
+}
+
+.rename-controls {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) minmax(220px, 0.6fr);
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+
+.rename-controls label {
+  display: grid;
+  gap: 6px;
+  color: #78716c;
+  font-size: 13px;
+}
+
+.rename-controls input {
+  width: 100%;
+}
+
+.rename-table {
+  min-width: 1120px;
 }
 
 .path-cell {
@@ -665,6 +692,7 @@ h3 {
   .task-page-grid,
   .settings-form,
   .task-filters,
+  .rename-controls,
   .rescan-modal-grid {
     grid-template-columns: 1fr;
   }

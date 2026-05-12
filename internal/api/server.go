@@ -13,6 +13,7 @@ import (
 
 	"NyaMediaMetadataTool/internal/bootstrap"
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/renamer"
 	"NyaMediaMetadataTool/internal/store"
 	"NyaMediaMetadataTool/internal/tools"
 	"NyaMediaMetadataTool/web"
@@ -52,6 +53,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
 	s.mux.HandleFunc("GET /api/tasks/", s.handleTaskDetail)
 	s.mux.HandleFunc("GET /api/artifacts", s.handleArtifacts)
+	s.mux.HandleFunc("POST /api/rename/preview", s.handleRenamePreview)
 	s.mux.HandleFunc("GET /api/watch-dirs", s.handleListWatchDirs)
 	s.mux.HandleFunc("POST /api/watch-dirs", s.handleCreateWatchDir)
 	s.mux.HandleFunc("PUT /api/watch-dirs/", s.handleUpdateWatchDir)
@@ -177,6 +179,20 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, artifacts)
+}
+
+func (s *Server) handleRenamePreview(w http.ResponseWriter, r *http.Request) {
+	var input renamer.PreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	result, err := renamer.Preview(r.Context(), s.snapshotConfig(), input)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleListWatchDirs(w http.ResponseWriter, r *http.Request) {

@@ -99,18 +99,36 @@ type TaskDetail = {
   artifacts: Artifact[];
 };
 
+type RenamePreviewItem = {
+  path: string;
+  currentName: string;
+  newName: string;
+  newPath: string;
+  show: string;
+  title: string;
+  season: number;
+  episode: number;
+  year: string;
+  source: string;
+  status: string;
+  message: string;
+  conflict: boolean;
+  sanitizedTitle: string;
+};
+
 type RescanScope = 'all' | 'dir' | 'path';
 type RescanStrategy = 'missing' | 'force';
 
 type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
-type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks';
+type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'rename';
 
 const pagePaths: Record<PageKey, string> = {
   dashboard: '/',
   settings: '/settings',
   watchDirs: '/watch-dirs',
-  tasks: '/tasks'
+  tasks: '/tasks',
+  rename: '/rename'
 };
 
 function pageFromPath(pathname: string): PageKey {
@@ -121,6 +139,8 @@ function pageFromPath(pathname: string): PageKey {
       return 'watchDirs';
     case '/tasks':
       return 'tasks';
+    case '/rename':
+      return 'rename';
     default:
       return 'dashboard';
   }
@@ -162,6 +182,7 @@ const regionOptions: RegionOption[] = [
 ];
 
 const timeZoneOptions = ['Asia/Shanghai', 'Asia/Tokyo', 'UTC', 'America/Los_Angeles', 'America/New_York', 'Europe/London'];
+const defaultRenameTemplate = '{show} - S{season:00}E{episode:00} - {title}';
 
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -176,6 +197,11 @@ export function App() {
   const [taskToFilter, setTaskToFilter] = useState('');
   const [watchDirs, setWatchDirs] = useState<WatchDir[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [renamePath, setRenamePath] = useState('');
+  const [renameTemplate, setRenameTemplate] = useState(defaultRenameTemplate);
+  const [renameUseTmdb, setRenameUseTmdb] = useState(true);
+  const [renamePreview, setRenamePreview] = useState<RenamePreviewItem[]>([]);
+  const [previewingRename, setPreviewingRename] = useState(false);
   const [newWatchDir, setNewWatchDir] = useState('');
   const [rescanOpen, setRescanOpen] = useState(false);
   const [rescanScope, setRescanScope] = useState<RescanScope>('all');
@@ -283,6 +309,32 @@ export function App() {
       setError(err instanceof Error ? err.message : '工具检测失败');
     } finally {
       setCheckingTools(false);
+    }
+  }
+
+  async function previewRename() {
+    if (!renamePath.trim()) {
+      setError('请输入目录或文件路径');
+      return;
+    }
+    setPreviewingRename(true);
+    setError('');
+    try {
+      const response = await fetch('/api/rename/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, useTmdb: renameUseTmdb })
+      });
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const result = await response.json();
+      setRenamePreview(asArray<RenamePreviewItem>(result.items));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '生成预览失败');
+    } finally {
+      setPreviewingRename(false);
     }
   }
 
@@ -418,6 +470,7 @@ export function App() {
           <TabButton active={activePage === 'settings'} label="设置" onClick={() => navigate('settings')} />
           <TabButton active={activePage === 'watchDirs'} label="监听目录" onClick={() => navigate('watchDirs')} />
           <TabButton active={activePage === 'tasks'} label="任务" onClick={() => navigate('tasks')} />
+          <TabButton active={activePage === 'rename'} label="整理命名" onClick={() => navigate('rename')} />
         </nav>
         <div className="service-mini">
           <span>服务状态</span>
@@ -527,6 +580,50 @@ export function App() {
                 </div>
               </div>
             )) : <p className="muted">尚未配置监听目录。</p>}
+          </Card>
+        </section>
+      )}
+
+        {activePage === 'rename' && (
+        <section className="page-grid rename-page-grid">
+          <Card title="整理命名" action={<button onClick={previewRename} disabled={previewingRename}>{previewingRename ? '扫描中' : '生成预览'}</button>}>
+            <div className="rename-controls">
+              <label>目录或文件路径<input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /></label>
+              <label>命名模板<input value={renameTemplate} onChange={(event) => setRenameTemplate(event.target.value)} placeholder={defaultRenameTemplate} /></label>
+              <Toggle label="缺少 NFO 时查询 TMDB" checked={renameUseTmdb} onChange={setRenameUseTmdb} />
+            </div>
+            <p className="muted">可用占位符：{'{show}'}、{'{season:00}'}、{'{episode:00}'}、{'{title}'}、{'{year}'}。本页只生成预览，不执行重命名。</p>
+          </Card>
+
+          <Card title="重命名预览">
+            <div className="task-table-wrap">
+              <table className="task-table rename-table">
+                <thead>
+                  <tr>
+                    <th>状态</th>
+                    <th>来源</th>
+                    <th>识别结果</th>
+                    <th>原文件名</th>
+                    <th>新文件名</th>
+                    <th>说明</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {renamePreview.length ? renamePreview.map((item) => (
+                    <tr key={item.path}>
+                      <td><span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{item.status}</span></td>
+                      <td>{item.source || '-'}</td>
+                      <td className="path-cell">{item.show || '-'} S{String(item.season).padStart(2, '0')}E{String(item.episode).padStart(2, '0')} {item.title || ''}</td>
+                      <td className="path-cell">{item.currentName}</td>
+                      <td className="path-cell">{item.newName || '-'}</td>
+                      <td className="path-cell">{item.conflict ? '目标文件已存在' : item.message || '-'}</td>
+                    </tr>
+                  )) : (
+                    <tr><td colSpan={6} className="empty-cell">尚未生成预览。</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </Card>
         </section>
       )}

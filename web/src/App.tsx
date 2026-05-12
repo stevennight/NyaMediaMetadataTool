@@ -205,6 +205,35 @@ const regionOptions: RegionOption[] = [
 const timeZoneOptions = ['Asia/Shanghai', 'Asia/Tokyo', 'UTC', 'America/Los_Angeles', 'America/New_York', 'Europe/London'];
 const defaultRenameTemplate = '{show} - S{season:00}E{episode:00} - {title}';
 const renamePlaceholders = ['{show}', '{season:00}', '{episode:00}', '{title}', '{year}'];
+const renamePreferencesKey = 'nya.rename.preferences';
+const renameTemplateHistoryLimit = 20;
+
+type RenamePreferences = {
+  path?: string;
+  template?: string;
+  language?: string;
+  useTmdb?: boolean;
+  templateHistory?: string[];
+};
+
+function readRenamePreferences(): RenamePreferences {
+  try {
+    const raw = window.localStorage.getItem(renamePreferencesKey);
+    if (!raw) return {};
+    const value = JSON.parse(raw) as RenamePreferences;
+    return value && typeof value === 'object' ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeRenamePreferences(value: RenamePreferences) {
+  try {
+    window.localStorage.setItem(renamePreferencesKey, JSON.stringify(value));
+  } catch {
+    // Ignore storage failures, for example private browsing quota limits.
+  }
+}
 
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -219,11 +248,12 @@ export function App() {
   const [taskToFilter, setTaskToFilter] = useState('');
   const [watchDirs, setWatchDirs] = useState<WatchDir[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [renamePath, setRenamePath] = useState('');
-  const [renameTemplate, setRenameTemplate] = useState(defaultRenameTemplate);
-  const [renameUseTmdb, setRenameUseTmdb] = useState(true);
-  const [renameLanguage, setRenameLanguage] = useState('zh-CN');
-  const [renameLanguageInitialized, setRenameLanguageInitialized] = useState(false);
+  const [renamePath, setRenamePath] = useState(() => readRenamePreferences().path ?? '');
+  const [renameTemplate, setRenameTemplate] = useState(() => readRenamePreferences().template ?? defaultRenameTemplate);
+  const [renameUseTmdb, setRenameUseTmdb] = useState(() => readRenamePreferences().useTmdb ?? true);
+  const [renameLanguage, setRenameLanguage] = useState(() => readRenamePreferences().language ?? 'zh-CN');
+  const [renameLanguageInitialized, setRenameLanguageInitialized] = useState(() => Boolean(readRenamePreferences().language));
+  const [renameTemplateHistory, setRenameTemplateHistory] = useState(() => asArray<string>(readRenamePreferences().templateHistory).filter(Boolean));
   const [renamePreview, setRenamePreview] = useState<RenamePreviewItem[]>([]);
   const [renamePreviewCount, setRenamePreviewCount] = useState(0);
   const [selectedRenamePaths, setSelectedRenamePaths] = useState<string[]>([]);
@@ -356,6 +386,7 @@ export function App() {
       setError('请输入目录或文件路径');
       return;
     }
+    rememberRenamePreferences();
     setPreviewingRename(true);
     setError('');
     setNotice('');
@@ -398,6 +429,19 @@ export function App() {
     } finally {
       setPreviewingRename(false);
     }
+  }
+
+  function rememberRenamePreferences() {
+    const template = renameTemplate.trim() || defaultRenameTemplate;
+    const nextHistory = [template, ...renameTemplateHistory.filter((item) => item !== template)].slice(0, renameTemplateHistoryLimit);
+    setRenameTemplateHistory(nextHistory);
+    writeRenamePreferences({
+      path: renamePath.trim(),
+      template,
+      language: renameLanguage,
+      useTmdb: renameUseTmdb,
+      templateHistory: nextHistory
+    });
   }
 
   function handleRenamePreviewMessage(line: string) {
@@ -794,7 +838,15 @@ export function App() {
           <Card title="整理命名" action={<button onClick={previewRename} disabled={previewingRename}>{previewingRename ? `扫描中 ${renamePreviewCount}` : '生成预览'}</button>}>
             <div className="rename-controls">
               <label>目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}>选择</button></div></label>
-              <label>命名模板<input ref={renameTemplateRef} value={renameTemplate} onChange={(event) => setRenameTemplate(event.target.value)} placeholder={defaultRenameTemplate} /></label>
+              <label>命名模板
+                <div className="template-input-row">
+                  <input ref={renameTemplateRef} value={renameTemplate} onChange={(event) => setRenameTemplate(event.target.value)} placeholder={defaultRenameTemplate} />
+                  <select value="" onChange={(event) => { if (event.target.value) setRenameTemplate(event.target.value); }} disabled={!renameTemplateHistory.length} title="最近模板">
+                    <option value="">最近模板</option>
+                    {renameTemplateHistory.map((template) => <option key={template} value={template}>{template}</option>)}
+                  </select>
+                </div>
+              </label>
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <Toggle label="缺少 NFO 时查询 TMDB" checked={renameUseTmdb} onChange={setRenameUseTmdb} />
             </div>

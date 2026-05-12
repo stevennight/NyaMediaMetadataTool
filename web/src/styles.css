@@ -356,6 +356,12 @@ button:disabled {
   width: 100%;
 }
 
+.template-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.35fr);
+  gap: 8px;
+}
+
 .placeholder-bar {
   display: flex;
   flex-wrap: wrap;

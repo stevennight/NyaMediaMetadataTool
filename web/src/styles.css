@@ -378,7 +378,7 @@ button:disabled {
 }
 
 .rename-table {
-  min-width: 1480px;
+  min-width: 1280px;
 }
 
 .rename-match-bar {
@@ -409,7 +409,7 @@ button:disabled {
 .rename-edit-cell {
   display: grid;
   gap: 6px;
-  min-width: 260px;
+  min-width: 230px;
 }
 
 .rename-edit-cell input {
@@ -428,7 +428,64 @@ button:disabled {
 }
 
 .rename-row-actions {
-  min-width: 150px;
+  display: flex;
+  flex-wrap: nowrap;
+  min-width: 170px;
+}
+
+.rename-row-actions button {
+  white-space: nowrap;
+}
+
+.rename-select-box {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(120, 113, 108, 0.24);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+}
+
+.rename-select-box span {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #a8a29e;
+  border-radius: 6px;
+  background: #fffaf1;
+}
+
+.rename-select-box.selected span {
+  border-color: #f59e0b;
+  background: #f59e0b;
+  box-shadow: inset 0 0 0 3px #fffaf1;
+}
+
+.rename-target-cell {
+  width: 280px;
+  max-width: 280px;
+}
+
+.target-path-preview {
+  width: 100%;
+  min-height: 39px;
+  overflow: hidden;
+  color: #1f2937;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(120, 113, 108, 0.18);
+}
+
+.target-path-modal textarea {
+  width: 100%;
+  min-height: 160px;
+  resize: vertical;
+  margin-top: 12px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .history-item {

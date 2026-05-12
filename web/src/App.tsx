@@ -279,6 +279,7 @@ export function App() {
   const [batchEpisodeOffset, setBatchEpisodeOffset] = useState(0);
   const [batchEpisodeStart, setBatchEpisodeStart] = useState(1);
   const [applyingBatchEpisode, setApplyingBatchEpisode] = useState(false);
+  const [targetPathEditor, setTargetPathEditor] = useState<{ path: string; value: string } | null>(null);
   const [previewingRename, setPreviewingRename] = useState(false);
   const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; onSelect: (path: string) => void } | null>(null);
   const [newWatchDir, setNewWatchDir] = useState('');
@@ -294,6 +295,7 @@ export function App() {
   const [error, setError] = useState<string>('');
   const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
   const renameTemplateRef = useRef<HTMLInputElement | null>(null);
+  const lastRenameSelectionRef = useRef<string | null>(null);
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
 
   useEffect(() => {
@@ -499,8 +501,20 @@ export function App() {
     setRenamePreview((items) => items.map((item) => item.path === next.path ? next : item));
   }
 
-  function toggleRenameSelection(path: string, checked: boolean) {
-    setSelectedRenamePaths((paths) => checked ? [...new Set([...paths, path])] : paths.filter((item) => item !== path));
+  function toggleRenameSelection(path: string, checked: boolean, shiftKey = false) {
+    setSelectedRenamePaths((paths) => {
+      if (shiftKey && lastRenameSelectionRef.current) {
+        const start = renamePreview.findIndex((item) => item.path === lastRenameSelectionRef.current);
+        const end = renamePreview.findIndex((item) => item.path === path);
+        if (start >= 0 && end >= 0) {
+          const [from, to] = start < end ? [start, end] : [end, start];
+          const range = renamePreview.slice(from, to + 1).map((item) => item.path);
+          return checked ? [...new Set([...paths, ...range])] : paths.filter((item) => !range.includes(item));
+        }
+      }
+      return checked ? [...new Set([...paths, path])] : paths.filter((item) => item !== path);
+    });
+    lastRenameSelectionRef.current = path;
   }
 
   async function previewAdjustedRenameItem(item: RenamePreviewItem, options: { tmdbShowId?: number; show?: string; forceTmdb?: boolean; keepManualName?: boolean } = {}) {
@@ -569,8 +583,18 @@ export function App() {
     setSelectedRenamePaths(renamePreview.map((item) => item.path));
   }
 
+  function invertRenameSelection() {
+    setSelectedRenamePaths(renamePreview.filter((item) => !selectedRenamePaths.includes(item.path)).map((item) => item.path));
+  }
+
   function clearRenameSelection() {
     setSelectedRenamePaths([]);
+  }
+
+  function applyTargetPathEdit() {
+    if (!targetPathEditor) return;
+    updateRenameItem(targetPathEditor.path, { newName: targetPathEditor.value, newPath: targetPathEditor.value, manualName: true });
+    setTargetPathEditor(null);
   }
 
   function openBatchEpisodeDialog() {
@@ -974,6 +998,7 @@ export function App() {
             <div className="rename-match-bar">
               <div className="inline-actions rename-bulk-actions">
                 <button className="secondary" type="button" onClick={selectAllRenameItems} disabled={!renamePreview.length}>全选</button>
+                <button className="secondary" type="button" onClick={invertRenameSelection} disabled={!renamePreview.length}>反选</button>
                 <button className="secondary" type="button" onClick={clearRenameSelection} disabled={!selectedRenamePaths.length}>取消选择</button>
                 <button className="secondary" type="button" onClick={openBatchEpisodeDialog} disabled={!selectedRenamePaths.length}>批量修正季集</button>
                 <button type="button" onClick={applySelectedRenames} disabled={applyingRename || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
@@ -1009,7 +1034,7 @@ export function App() {
                 <tbody>
                   {renamePreview.length ? renamePreview.map((item) => (
                     <tr key={item.path}>
-                      <td><input type="checkbox" checked={selectedRenamePaths.includes(item.path)} onChange={(event) => toggleRenameSelection(item.path, event.target.checked)} /></td>
+                      <td><button className={selectedRenamePaths.includes(item.path) ? 'rename-select-box selected' : 'rename-select-box'} type="button" onClick={(event) => toggleRenameSelection(item.path, !selectedRenamePaths.includes(item.path), event.shiftKey)} aria-pressed={selectedRenamePaths.includes(item.path)} title="点击选择，Shift+点击连续选择"><span /></button></td>
                       <td><span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{item.status}</span></td>
                       <td>{item.source || '-'}</td>
                       <td className="rename-edit-cell">
@@ -1022,7 +1047,9 @@ export function App() {
                         {item.tmdbShowId ? <small>TMDB #{item.tmdbShowId}</small> : null}
                       </td>
                       <td className="path-cell">{item.currentName}</td>
-                      <td className="rename-edit-cell"><input value={item.newPath || item.newName || ''} onChange={(event) => updateRenameItem(item.path, { newName: event.target.value, newPath: event.target.value, manualName: true })} placeholder="新文件名或完整路径" /></td>
+                      <td className="rename-target-cell">
+                        <button className="target-path-preview" type="button" onClick={() => setTargetPathEditor({ path: item.path, value: item.newPath || item.newName || '' })}>{item.newPath || item.newName || '-'}</button>
+                      </td>
                       <td className="path-cell">{item.conflict ? '目标文件已存在' : item.message || '-'}</td>
                       <td>
                         <div className="inline-actions rename-row-actions">
@@ -1116,6 +1143,7 @@ export function App() {
       )}
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onBrowsePath={() => setDirectoryPicker({ title: '选择补扫目录', value: rescanTarget, onSelect: setRescanTarget })} onSubmit={() => void rescan()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
+      {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
       </section>
     </main>
@@ -1311,6 +1339,25 @@ function HistoryDetails(props: { batch: RenameHistoryBatch; undoCheck: RenameUnd
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function TargetPathEditorModal(props: { value: string; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <section className="modal-card target-path-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <h2>编辑目标路径</h2>
+          <button className="secondary" onClick={props.onClose}>关闭</button>
+        </div>
+        <textarea value={props.value} onChange={(event) => props.onChange(event.target.value)} autoFocus />
+        <p className="muted">可以填写文件名、相对路径或完整路径。执行前仍会检查目标冲突。</p>
+        <div className="inline-actions modal-actions">
+          <button className="secondary" onClick={props.onClose}>取消</button>
+          <button onClick={props.onSubmit}>应用</button>
+        </div>
+      </section>
     </div>
   );
 }

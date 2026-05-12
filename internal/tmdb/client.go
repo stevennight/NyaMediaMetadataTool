@@ -55,6 +55,7 @@ type Show struct {
 	PosterPath       string
 	BackdropPath     string
 	LogoPath         string
+	Actors           []Actor
 }
 
 type SearchResult struct {
@@ -73,6 +74,7 @@ type Season struct {
 	SeasonNumber int
 	EpisodeCount int
 	PosterPath   string
+	Actors       []Actor
 }
 
 type Actor struct {
@@ -403,6 +405,18 @@ func (c *Client) FindShowAndSeason(ctx context.Context, showQuery string, season
 	if err != nil {
 		return Show{}, Season{}, err
 	}
+	var showCredits episodeCredits
+	var seasonCredits episodeCredits
+	if c.people {
+		showCredits, err = c.getShowCredits(ctx, showMatch.ID)
+		if err != nil {
+			return Show{}, Season{}, err
+		}
+		seasonCredits, err = c.getSeasonCredits(ctx, showMatch.ID, season)
+		if err != nil {
+			return Show{}, Season{}, err
+		}
+	}
 
 	genres := make([]string, 0, len(showDetail.Genres))
 	for _, genre := range showDetail.Genres {
@@ -420,6 +434,7 @@ func (c *Client) FindShowAndSeason(ctx context.Context, showQuery string, season
 			Status:           showDetail.Status,
 			VoteAverage:      showDetail.VoteAverage,
 			Genres:           genres,
+			Actors:           showCredits.Actors,
 		}, Season{
 			ID:           seasonDetail.ID,
 			Name:         seasonDetail.Name,
@@ -427,6 +442,7 @@ func (c *Client) FindShowAndSeason(ctx context.Context, showQuery string, season
 			AirDate:      seasonDetail.AirDate,
 			SeasonNumber: seasonDetail.SeasonNumber,
 			EpisodeCount: len(seasonDetail.Episodes),
+			Actors:       seasonCredits.Actors,
 		}, nil
 }
 
@@ -602,8 +618,22 @@ type episodeCredits struct {
 }
 
 func (c *Client) getEpisodeCredits(ctx context.Context, showID int, season int, episode int) (episodeCredits, error) {
-	var parsed episodeCreditsResponse
 	path := fmt.Sprintf("/tv/%d/season/%d/episode/%d/credits", showID, season, episode)
+	return c.getCredits(ctx, path, true)
+}
+
+func (c *Client) getShowCredits(ctx context.Context, showID int) (episodeCredits, error) {
+	path := fmt.Sprintf("/tv/%d/credits", showID)
+	return c.getCredits(ctx, path, false)
+}
+
+func (c *Client) getSeasonCredits(ctx context.Context, showID int, season int) (episodeCredits, error) {
+	path := fmt.Sprintf("/tv/%d/season/%d/credits", showID, season)
+	return c.getCredits(ctx, path, false)
+}
+
+func (c *Client) getCredits(ctx context.Context, path string, includeGuestStars bool) (episodeCredits, error) {
+	var parsed episodeCreditsResponse
 	if err := c.get(ctx, c.language, path, nil, &parsed); err != nil {
 		return episodeCredits{}, err
 	}
@@ -625,8 +655,10 @@ func (c *Client) getEpisodeCredits(ctx context.Context, showID int, season int, 
 	for _, person := range parsed.Cast {
 		appendCredit(person)
 	}
-	for _, person := range parsed.GuestStars {
-		appendCredit(person)
+	if includeGuestStars {
+		for _, person := range parsed.GuestStars {
+			appendCredit(person)
+		}
 	}
 
 	crew := make([]CrewMember, 0, len(parsed.Crew))

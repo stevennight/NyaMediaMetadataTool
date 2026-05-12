@@ -56,3 +56,30 @@ func TestSimplifyRate(t *testing.T) {
 		t.Fatalf("unexpected frame rate: %s", got)
 	}
 }
+
+func TestMergeActorsAppendsWithoutDuplicates(t *testing.T) {
+	t.Parallel()
+
+	existing := []nfoActor{{Name: "A", Role: "Lead"}}
+	incoming := []nfoActor{{Name: "A", Role: "Lead"}, {Name: "B", Role: "Support"}}
+
+	got := mergeActors(existing, incoming, false)
+	if len(got) != 2 {
+		t.Fatalf("unexpected actor count: %d", len(got))
+	}
+	if got[0].Name != "A" || got[1].Name != "B" {
+		t.Fatalf("unexpected actors: %+v", got)
+	}
+}
+
+func TestMergeActorsOverwrite(t *testing.T) {
+	t.Parallel()
+
+	existing := []nfoActor{{Name: "A", Role: "Old"}}
+	incoming := []nfoActor{{Name: "B", Role: "New"}}
+
+	got := mergeActors(existing, incoming, true)
+	if len(got) != 1 || got[0].Name != "B" {
+		t.Fatalf("unexpected actors after overwrite: %+v", got)
+	}
+}

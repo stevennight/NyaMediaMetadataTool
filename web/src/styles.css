@@ -381,6 +381,26 @@ button:disabled {
   min-width: 1280px;
 }
 
+.rename-row {
+  cursor: pointer;
+  user-select: none;
+}
+
+.rename-row.selected {
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.rename-row.selected:hover {
+  background: rgba(245, 158, 11, 0.18);
+}
+
+.rename-row input,
+.rename-row textarea,
+.rename-row select,
+.rename-row button {
+  user-select: text;
+}
+
 .rename-match-bar {
   display: grid;
   gap: 10px;
@@ -437,30 +457,30 @@ button:disabled {
   white-space: nowrap;
 }
 
-.rename-select-box {
+.rename-row-index {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
-  padding: 0;
-  border: 1px solid rgba(120, 113, 108, 0.24);
+  gap: 2px;
+  min-width: 44px;
+  padding: 6px 8px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.7);
-  cursor: pointer;
+  background: rgba(255, 255, 255, 0.68);
+  color: #78716c;
 }
 
-.rename-select-box span {
-  width: 18px;
-  height: 18px;
-  border: 2px solid #a8a29e;
-  border-radius: 6px;
-  background: #fffaf1;
+.rename-row-index strong {
+  color: #44403c;
+  font-size: 12px;
 }
 
-.rename-select-box.selected span {
-  border-color: #f59e0b;
-  background: #f59e0b;
-  box-shadow: inset 0 0 0 3px #fffaf1;
+.rename-row-index small {
+  color: #b45309;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.rename-row-index.selected {
+  background: rgba(245, 158, 11, 0.2);
 }
 
 .rename-target-cell {

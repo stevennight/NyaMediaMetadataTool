@@ -108,6 +108,7 @@ type tvshowNFO struct {
 	Rating        string        `xml:"rating,omitempty"`
 	Genre         []string      `xml:"genre,omitempty"`
 	UniqueID      []nfoUniqueID `xml:"uniqueid,omitempty"`
+	Actor         []nfoActor    `xml:"actor,omitempty"`
 }
 
 type seasonNFO struct {
@@ -120,6 +121,7 @@ type seasonNFO struct {
 	Premiered    string        `xml:"premiered,omitempty"`
 	Aired        string        `xml:"aired,omitempty"`
 	UniqueID     []nfoUniqueID `xml:"uniqueid,omitempty"`
+	Actor        []nfoActor    `xml:"actor,omitempty"`
 }
 
 type nfoFileInfo struct {
@@ -361,12 +363,12 @@ func applyTMDBShowAndSeason(ctx context.Context, cfg config.Config, episode epis
 
 	showPath := filepath.Join(showNFOBaseDir(result.Path), "tvshow.nfo")
 	seasonPath := filepath.Join(filepath.Dir(result.Path), "season.nfo")
-	if err := upsertTVShowNFO(showPath, cfg, show); err == nil {
+	if err := upsertTVShowNFO(showPath, cfg, client, show); err == nil {
 		result.ShowNFOPath = showPath
 	} else if result.TMDBDetail == "" {
 		result.TMDBDetail = "tvshow nfo failed: " + err.Error()
 	}
-	if err := upsertSeasonNFO(seasonPath, cfg, season); err == nil {
+	if err := upsertSeasonNFO(seasonPath, cfg, client, season); err == nil {
 		result.SeasonNFOPath = seasonPath
 	} else if result.TMDBDetail == "" {
 		result.TMDBDetail = "season nfo failed: " + err.Error()
@@ -496,7 +498,7 @@ func showNFOBaseDir(episodeNFOPath string) string {
 	return dir
 }
 
-func upsertTVShowNFO(path string, cfg config.Config, show tmdb.Show) error {
+func upsertTVShowNFO(path string, cfg config.Config, client *tmdb.Client, show tmdb.Show) error {
 	doc := tvshowNFO{}
 	if data, err := os.ReadFile(path); err == nil {
 		_ = xml.Unmarshal(data, &doc)
@@ -509,6 +511,7 @@ func upsertTVShowNFO(path string, cfg config.Config, show tmdb.Show) error {
 		Premiered:     show.FirstAirDate,
 		Status:        show.Status,
 		Genre:         show.Genres,
+		Actor:         tmdbActorsToNFOActors(client, show.Actors),
 	}
 	if show.VoteAverage > 0 {
 		incoming.Rating = fmt.Sprintf("%.1f", show.VoteAverage)
@@ -529,10 +532,11 @@ func upsertTVShowNFO(path string, cfg config.Config, show tmdb.Show) error {
 		doc.Genre = incoming.Genre
 	}
 	doc.UniqueID = mergeUniqueIDs(doc.UniqueID, incoming.UniqueID, cfg.Processing.OverwriteExisting)
+	doc.Actor = mergeActors(doc.Actor, incoming.Actor, cfg.Processing.OverwriteExisting)
 	return writeXMLFile(path, doc)
 }
 
-func upsertSeasonNFO(path string, cfg config.Config, season tmdb.Season) error {
+func upsertSeasonNFO(path string, cfg config.Config, client *tmdb.Client, season tmdb.Season) error {
 	doc := seasonNFO{}
 	if data, err := os.ReadFile(path); err == nil {
 		_ = xml.Unmarshal(data, &doc)
@@ -545,6 +549,7 @@ func upsertSeasonNFO(path string, cfg config.Config, season tmdb.Season) error {
 		Outline:      season.Overview,
 		Premiered:    season.AirDate,
 		Aired:        season.AirDate,
+		Actor:        tmdbActorsToNFOActors(client, season.Actors),
 	}
 	if season.ID > 0 {
 		incoming.UniqueID = []nfoUniqueID{{Type: "tmdb", Default: true, Value: strconv.Itoa(season.ID)}}
@@ -563,7 +568,25 @@ func upsertSeasonNFO(path string, cfg config.Config, season tmdb.Season) error {
 		doc.EpisodeCount = incoming.EpisodeCount
 	}
 	doc.UniqueID = mergeUniqueIDs(doc.UniqueID, incoming.UniqueID, cfg.Processing.OverwriteExisting)
+	doc.Actor = mergeActors(doc.Actor, incoming.Actor, cfg.Processing.OverwriteExisting)
 	return writeXMLFile(path, doc)
+}
+
+func tmdbActorsToNFOActors(client *tmdb.Client, actors []tmdb.Actor) []nfoActor {
+	result := make([]nfoActor, 0, len(actors))
+	for _, actor := range actors {
+		name := strings.TrimSpace(actor.Name)
+		if name == "" {
+			continue
+		}
+		result = append(result, nfoActor{
+			Name:  name,
+			Role:  strings.TrimSpace(actor.Role),
+			Order: actor.Order,
+			Thumb: client.ImageURL(actor.ProfilePath),
+		})
+	}
+	return result
 }
 
 func mergeText(target *string, value string, overwrite bool) {
@@ -594,6 +617,40 @@ func mergeUniqueIDs(existing []nfoUniqueID, incoming []nfoUniqueID, overwrite bo
 		}
 	}
 	return result
+}
+
+func mergeActors(existing []nfoActor, incoming []nfoActor, overwrite bool) []nfoActor {
+	if overwrite || len(existing) == 0 {
+		return incoming
+	}
+	result := existing
+	seen := map[string]struct{}{}
+	for _, actor := range result {
+		key := actorKey(actor)
+		if key != "" {
+			seen[key] = struct{}{}
+		}
+	}
+	for _, actor := range incoming {
+		key := actorKey(actor)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, actor)
+	}
+	return result
+}
+
+func actorKey(actor nfoActor) string {
+	name := strings.TrimSpace(actor.Name)
+	if name == "" {
+		return ""
+	}
+	return strings.ToLower(name + "\x00" + strings.TrimSpace(actor.Role))
 }
 
 func writeXMLFile(path string, doc any) error {

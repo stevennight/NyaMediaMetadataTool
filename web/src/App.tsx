@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 
 type Health = {
   status: string;
@@ -295,7 +296,7 @@ export function App() {
   const [error, setError] = useState<string>('');
   const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
   const renameTemplateRef = useRef<HTMLInputElement | null>(null);
-  const lastRenameSelectionRef = useRef<string | null>(null);
+  const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
 
   useEffect(() => {
@@ -502,19 +503,33 @@ export function App() {
   }
 
   function toggleRenameSelection(path: string, checked: boolean, shiftKey = false) {
+    const index = renamePreview.findIndex((item) => item.path === path);
     setSelectedRenamePaths((paths) => {
-      if (shiftKey && lastRenameSelectionRef.current) {
-        const start = renamePreview.findIndex((item) => item.path === lastRenameSelectionRef.current);
-        const end = renamePreview.findIndex((item) => item.path === path);
-        if (start >= 0 && end >= 0) {
-          const [from, to] = start < end ? [start, end] : [end, start];
+      if (shiftKey && lastRenameSelectionIndexRef.current !== null && index >= 0) {
+        const start = lastRenameSelectionIndexRef.current;
+        if (start >= 0) {
+          const [from, to] = start < index ? [start, index] : [index, start];
           const range = renamePreview.slice(from, to + 1).map((item) => item.path);
           return checked ? [...new Set([...paths, ...range])] : paths.filter((item) => !range.includes(item));
         }
       }
       return checked ? [...new Set([...paths, path])] : paths.filter((item) => item !== path);
     });
-    lastRenameSelectionRef.current = path;
+    if (index >= 0) lastRenameSelectionIndexRef.current = index;
+  }
+
+  function handleRenameRowClick(event: ReactMouseEvent<HTMLTableRowElement>, item: RenamePreviewItem, index: number) {
+    const target = event.target as HTMLElement;
+    if (target.closest('input, button, select, textarea, a')) return;
+    const selected = selectedRenamePaths.includes(item.path);
+    if (event.shiftKey && lastRenameSelectionIndexRef.current !== null) {
+      const [from, to] = lastRenameSelectionIndexRef.current < index ? [lastRenameSelectionIndexRef.current, index] : [index, lastRenameSelectionIndexRef.current];
+      const range = renamePreview.slice(from, to + 1).map((entry) => entry.path);
+      setSelectedRenamePaths((paths) => selected ? paths.filter((path) => !range.includes(path)) : [...new Set([...paths, ...range])]);
+      return;
+    }
+    setSelectedRenamePaths((paths) => selected ? paths.filter((path) => path !== item.path) : [...new Set([...paths, item.path])]);
+    lastRenameSelectionIndexRef.current = index;
   }
 
   async function previewAdjustedRenameItem(item: RenamePreviewItem, options: { tmdbShowId?: number; show?: string; forceTmdb?: boolean; keepManualName?: boolean } = {}) {
@@ -585,10 +600,6 @@ export function App() {
 
   function invertRenameSelection() {
     setSelectedRenamePaths(renamePreview.filter((item) => !selectedRenamePaths.includes(item.path)).map((item) => item.path));
-  }
-
-  function clearRenameSelection() {
-    setSelectedRenamePaths([]);
   }
 
   function applyTargetPathEdit() {
@@ -999,7 +1010,6 @@ export function App() {
               <div className="inline-actions rename-bulk-actions">
                 <button className="secondary" type="button" onClick={selectAllRenameItems} disabled={!renamePreview.length}>全选</button>
                 <button className="secondary" type="button" onClick={invertRenameSelection} disabled={!renamePreview.length}>反选</button>
-                <button className="secondary" type="button" onClick={clearRenameSelection} disabled={!selectedRenamePaths.length}>取消选择</button>
                 <button className="secondary" type="button" onClick={openBatchEpisodeDialog} disabled={!selectedRenamePaths.length}>批量修正季集</button>
                 <button type="button" onClick={applySelectedRenames} disabled={applyingRename || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
               </div>
@@ -1032,9 +1042,9 @@ export function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {renamePreview.length ? renamePreview.map((item) => (
-                    <tr key={item.path}>
-                      <td><button className={selectedRenamePaths.includes(item.path) ? 'rename-select-box selected' : 'rename-select-box'} type="button" onClick={(event) => toggleRenameSelection(item.path, !selectedRenamePaths.includes(item.path), event.shiftKey)} aria-pressed={selectedRenamePaths.includes(item.path)} title="点击选择，Shift+点击连续选择"><span /></button></td>
+                  {renamePreview.length ? renamePreview.map((item, index) => (
+                    <tr className={selectedRenamePaths.includes(item.path) ? 'rename-row selected' : 'rename-row'} key={item.path} onClick={(event) => handleRenameRowClick(event, item, index)} title="点击行选择，Shift+点击连续选择">
+                      <td><span className={selectedRenamePaths.includes(item.path) ? 'rename-row-index selected' : 'rename-row-index'} aria-hidden="true"><strong>{index + 1}</strong></span></td>
                       <td><span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{item.status}</span></td>
                       <td>{item.source || '-'}</td>
                       <td className="rename-edit-cell">

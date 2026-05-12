@@ -669,7 +669,7 @@ func (c *Client) get(ctx context.Context, language string, path string, query ur
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return err
 	}
@@ -679,6 +679,27 @@ func (c *Client) get(ctx context.Context, language string, path string, query ur
 		return fmt.Errorf("tmdb request failed: %s", resp.Status)
 	}
 	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-time.After(time.Duration(attempt) * 300 * time.Millisecond):
+			}
+		}
+
+		clone := req.Clone(req.Context())
+		resp, err := c.httpClient.Do(clone)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 func languageOrder(primary string, fallback []string) []string {

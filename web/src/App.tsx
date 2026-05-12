@@ -568,7 +568,7 @@ export function App() {
       const response = await fetch('/api/rename/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: targets.map((item) => ({ path: item.path, newName: item.newPath || item.newName })) })
+        body: JSON.stringify({ items: targets.map((item) => ({ path: item.path, newName: item.newName, newPath: item.newPath })) })
       });
       if (!response.ok) {
         setError(await response.text());

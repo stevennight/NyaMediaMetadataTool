@@ -88,6 +88,7 @@ type ApplyRequest struct {
 type ApplyItem struct {
 	Path    string `json:"path"`
 	NewName string `json:"newName"`
+	NewPath string `json:"newPath"`
 }
 
 type ApplyResult struct {
@@ -311,7 +312,7 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 		} else {
 			item.Show = firstNonEmpty(episode.ShowName, item.Show)
 			item.Title = episode.Title
-			item.Year = yearFromDate(episode.AirDate)
+			item.Year = yearFromDate(firstNonEmpty(episode.ShowFirstAirDate, episode.AirDate))
 			item.TMDBShowID = episode.ShowID
 			item.TMDBEpisodeID = episode.EpisodeID
 			item.Source = "tmdb"
@@ -364,7 +365,8 @@ func applyRename(input ApplyItem) PreviewItem {
 		item.Message = "不支持重命名目录"
 		return item
 	}
-	target := targetPathFromTemplate(path, input.NewName)
+	targetValue := firstNonEmpty(input.NewPath, input.NewName)
+	target := targetPathFromTemplate(path, targetValue)
 	if strings.TrimSpace(target) == "" {
 		item.Message = "newName is required"
 		return item
@@ -407,6 +409,11 @@ func applyRename(input ApplyItem) PreviewItem {
 		item.Message = err.Error()
 		return item
 	}
+	if _, err := os.Stat(item.NewPath); err != nil {
+		item.Status = "warning"
+		item.Message = "系统报告已重命名，但目标文件不可访问: " + err.Error()
+		return item
+	}
 	renamedSidecars := 0
 	for _, sidecar := range sidecars {
 		if samePath(sidecar.From, sidecar.To) {
@@ -439,6 +446,7 @@ type sidecarRename struct {
 
 func sidecarRenames(mediaPath string, newMediaPath string) ([]sidecarRename, error) {
 	dir := filepath.Dir(mediaPath)
+	targetDir := filepath.Dir(newMediaPath)
 	oldBase := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
 	newBase := strings.TrimSuffix(filepath.Base(newMediaPath), filepath.Ext(newMediaPath))
 	entries, err := os.ReadDir(dir)
@@ -462,7 +470,7 @@ func sidecarRenames(mediaPath string, newMediaPath string) ([]sidecarRename, err
 			continue
 		}
 		nextName := newBase + strings.TrimPrefix(name, oldBase)
-		renames = append(renames, sidecarRename{From: filepath.Join(dir, name), To: filepath.Join(dir, nextName)})
+		renames = append(renames, sidecarRename{From: filepath.Join(dir, name), To: filepath.Join(targetDir, nextName)})
 	}
 	return renames, nil
 }
@@ -490,7 +498,9 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 		return item
 	}
 
+	matchedNFO := false
 	if nfo, ok := readEpisodeNFO(path); ok && nfoMatchesLanguage(nfo, cfg.Scraping.Language) {
+		matchedNFO = true
 		if strings.TrimSpace(nfo.ShowTitle) != "" {
 			item.Show = strings.TrimSpace(nfo.ShowTitle)
 		}
@@ -505,15 +515,18 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 		}
 		item.Year = yearFromDate(firstNonEmpty(nfo.Premiered, nfo.Aired))
 		item.Source = "nfo"
-	} else if client != nil {
+	}
+	if client != nil {
 		if episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Season, item.Episode); err == nil {
-			item.Show = firstNonEmpty(episode.ShowName, item.Show)
-			item.Title = episode.Title
-			item.Year = yearFromDate(episode.AirDate)
+			if !matchedNFO {
+				item.Show = firstNonEmpty(episode.ShowName, item.Show)
+				item.Title = episode.Title
+				item.Source = "tmdb"
+			}
+			item.Year = yearFromDate(firstNonEmpty(episode.ShowFirstAirDate, episode.AirDate))
 			item.TMDBShowID = episode.ShowID
 			item.TMDBEpisodeID = episode.EpisodeID
-			item.Source = "tmdb"
-		} else {
+		} else if !matchedNFO {
 			item.Status = "warning"
 			item.Message = err.Error()
 		}
@@ -551,14 +564,14 @@ func targetPathFromTemplate(sourcePath string, rendered string) string {
 	}
 	rendered = strings.TrimSuffix(rendered, filepath.Ext(rendered))
 	rendered = sanitizePath(rendered) + filepath.Ext(sourcePath)
-	if filepath.IsAbs(rendered) {
+	if isAbsoluteTargetPath(rendered) {
 		return filepath.Clean(rendered)
 	}
 	return filepath.Join(filepath.Dir(sourcePath), rendered)
 }
 
 func sanitizePath(value string) string {
-	volume := filepath.VolumeName(value)
+	volume := volumeName(value)
 	rest := strings.TrimPrefix(value, volume)
 	separatorPrefix := ""
 	for strings.HasPrefix(rest, `\`) || strings.HasPrefix(rest, `/`) {
@@ -578,6 +591,27 @@ func sanitizePath(value string) string {
 		joined = ""
 	}
 	return volume + separatorPrefix + joined
+}
+
+func isAbsoluteTargetPath(value string) bool {
+	if filepath.IsAbs(value) {
+		return true
+	}
+	return len(value) >= 3 && isWindowsDriveLetter(value[0]) && value[1] == ':' && (value[2] == '\\' || value[2] == '/')
+}
+
+func volumeName(value string) string {
+	if volume := filepath.VolumeName(value); volume != "" {
+		return volume
+	}
+	if len(value) >= 2 && isWindowsDriveLetter(value[0]) && value[1] == ':' {
+		return value[:2]
+	}
+	return ""
+}
+
+func isWindowsDriveLetter(value byte) bool {
+	return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')
 }
 
 func applyConflict(path string, item *PreviewItem) {

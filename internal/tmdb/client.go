@@ -28,17 +28,18 @@ type Client struct {
 }
 
 type Episode struct {
-	ShowID       int
-	EpisodeID    int
-	ShowName     string
-	Title        string
-	Overview     string
-	AirDate      string
-	VoteAverage  float64
-	StillPath    string
-	EpisodeGroup string
-	Actors       []Actor
-	Crew         []CrewMember
+	ShowID           int
+	EpisodeID        int
+	ShowName         string
+	ShowFirstAirDate string
+	Title            string
+	Overview         string
+	AirDate          string
+	VoteAverage      float64
+	StillPath        string
+	EpisodeGroup     string
+	Actors           []Actor
+	Crew             []CrewMember
 }
 
 type Show struct {
@@ -268,16 +269,17 @@ func (c *Client) FindEpisode(ctx context.Context, showQuery string, season int, 
 	}
 
 	return Episode{
-		ShowID:      show.ID,
-		EpisodeID:   episodeDetail.ID,
-		ShowName:    firstNonEmpty(show.Name, show.OriginalName),
-		Title:       episodeDetail.Name,
-		Overview:    episodeDetail.Overview,
-		AirDate:     episodeDetail.AirDate,
-		VoteAverage: episodeDetail.VoteAverage,
-		StillPath:   episodeDetail.StillPath,
-		Actors:      credits.Actors,
-		Crew:        credits.Crew,
+		ShowID:           show.ID,
+		EpisodeID:        episodeDetail.ID,
+		ShowName:         firstNonEmpty(show.Name, show.OriginalName),
+		ShowFirstAirDate: show.FirstAirDate,
+		Title:            episodeDetail.Name,
+		Overview:         episodeDetail.Overview,
+		AirDate:          episodeDetail.AirDate,
+		VoteAverage:      episodeDetail.VoteAverage,
+		StillPath:        episodeDetail.StillPath,
+		Actors:           credits.Actors,
+		Crew:             credits.Crew,
 	}, nil
 }
 
@@ -303,16 +305,17 @@ func (c *Client) FindEpisodeByShowID(ctx context.Context, showID int, season int
 	}
 
 	return Episode{
-		ShowID:      showID,
-		EpisodeID:   episodeDetail.ID,
-		ShowName:    firstNonEmpty(showDetail.Name, showDetail.OriginalName),
-		Title:       episodeDetail.Name,
-		Overview:    episodeDetail.Overview,
-		AirDate:     episodeDetail.AirDate,
-		VoteAverage: episodeDetail.VoteAverage,
-		StillPath:   episodeDetail.StillPath,
-		Actors:      credits.Actors,
-		Crew:        credits.Crew,
+		ShowID:           showID,
+		EpisodeID:        episodeDetail.ID,
+		ShowName:         firstNonEmpty(showDetail.Name, showDetail.OriginalName),
+		ShowFirstAirDate: showDetail.FirstAirDate,
+		Title:            episodeDetail.Name,
+		Overview:         episodeDetail.Overview,
+		AirDate:          episodeDetail.AirDate,
+		VoteAverage:      episodeDetail.VoteAverage,
+		StillPath:        episodeDetail.StillPath,
+		Actors:           credits.Actors,
+		Crew:             credits.Crew,
 	}, nil
 }
 
@@ -334,7 +337,7 @@ func (c *Client) FindEpisodeStrictTitle(ctx context.Context, showQuery string, s
 	if err != nil {
 		return Episode{}, err
 	}
-	return c.episodeFromDetails(ctx, show.ID, firstNonEmpty(show.Name, show.OriginalName), episodeDetail, season, episode)
+	return c.episodeFromDetails(ctx, show.ID, firstNonEmpty(show.Name, show.OriginalName), show.FirstAirDate, episodeDetail, season, episode)
 }
 
 func (c *Client) FindEpisodeByShowIDStrictTitle(ctx context.Context, showID int, season int, episode int) (Episode, error) {
@@ -350,10 +353,10 @@ func (c *Client) FindEpisodeByShowIDStrictTitle(ctx context.Context, showID int,
 	if err != nil {
 		return Episode{}, err
 	}
-	return c.episodeFromDetails(ctx, showID, firstNonEmpty(showDetail.Name, showDetail.OriginalName), episodeDetail, season, episode)
+	return c.episodeFromDetails(ctx, showID, firstNonEmpty(showDetail.Name, showDetail.OriginalName), showDetail.FirstAirDate, episodeDetail, season, episode)
 }
 
-func (c *Client) episodeFromDetails(ctx context.Context, showID int, showName string, detail episodeResponse, season int, episode int) (Episode, error) {
+func (c *Client) episodeFromDetails(ctx context.Context, showID int, showName string, showFirstAirDate string, detail episodeResponse, season int, episode int) (Episode, error) {
 	var credits episodeCredits
 	var err error
 	if c.people {
@@ -364,16 +367,17 @@ func (c *Client) episodeFromDetails(ctx context.Context, showID int, showName st
 	}
 
 	return Episode{
-		ShowID:      showID,
-		EpisodeID:   detail.ID,
-		ShowName:    showName,
-		Title:       detail.Name,
-		Overview:    detail.Overview,
-		AirDate:     detail.AirDate,
-		VoteAverage: detail.VoteAverage,
-		StillPath:   detail.StillPath,
-		Actors:      credits.Actors,
-		Crew:        credits.Crew,
+		ShowID:           showID,
+		EpisodeID:        detail.ID,
+		ShowName:         showName,
+		ShowFirstAirDate: showFirstAirDate,
+		Title:            detail.Name,
+		Overview:         detail.Overview,
+		AirDate:          detail.AirDate,
+		VoteAverage:      detail.VoteAverage,
+		StillPath:        detail.StillPath,
+		Actors:           credits.Actors,
+		Crew:             credits.Crew,
 	}, nil
 }
 

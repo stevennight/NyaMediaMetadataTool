@@ -777,8 +777,8 @@ export function App() {
                       <td className="rename-edit-cell">
                         <input value={item.show || ''} onChange={(event) => updateRenameItem(item.path, { show: event.target.value })} placeholder="剧名" />
                         <div className="rename-episode-edit">
-                          <input type="number" min="1" value={item.season || 1} onChange={(event) => updateRenameItem(item.path, { season: Number(event.target.value) })} title="季" />
-                          <input type="number" min="1" value={item.episode || 1} onChange={(event) => updateRenameItem(item.path, { episode: Number(event.target.value) })} title="集" />
+                          <input type="number" min="0" value={item.season ?? 0} onChange={(event) => updateRenameItem(item.path, { season: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem(item, { forceTmdb: true }); }} title="季，回车重新查 TMDB" />
+                          <input type="number" min="0" value={item.episode ?? 0} onChange={(event) => updateRenameItem(item.path, { episode: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem(item, { forceTmdb: true }); }} title="集，回车重新查 TMDB" />
                         </div>
                         <input value={item.title || ''} onChange={(event) => updateRenameItem(item.path, { title: event.target.value })} placeholder="标题" />
                         {item.tmdbShowId ? <small>TMDB #{item.tmdbShowId}</small> : null}

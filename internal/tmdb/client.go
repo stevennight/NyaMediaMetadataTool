@@ -316,6 +316,67 @@ func (c *Client) FindEpisodeByShowID(ctx context.Context, showID int, season int
 	}, nil
 }
 
+func (c *Client) FindEpisodeStrictTitle(ctx context.Context, showQuery string, season int, episode int) (Episode, error) {
+	showQuery = strings.TrimSpace(showQuery)
+	if showQuery == "" {
+		return Episode{}, errors.New("tmdb show query is empty")
+	}
+
+	show, err := c.searchTV(ctx, showQuery)
+	if err != nil {
+		return Episode{}, err
+	}
+	if show.ID == 0 {
+		return Episode{}, fmt.Errorf("tmdb tv show not found: %s", showQuery)
+	}
+
+	episodeDetail, err := c.getEpisode(ctx, c.language, show.ID, season, episode)
+	if err != nil {
+		return Episode{}, err
+	}
+	return c.episodeFromDetails(ctx, show.ID, firstNonEmpty(show.Name, show.OriginalName), episodeDetail, season, episode)
+}
+
+func (c *Client) FindEpisodeByShowIDStrictTitle(ctx context.Context, showID int, season int, episode int) (Episode, error) {
+	if showID == 0 {
+		return Episode{}, errors.New("tmdb show id is empty")
+	}
+
+	showDetail, err := c.getShow(ctx, c.language, showID)
+	if err != nil {
+		return Episode{}, err
+	}
+	episodeDetail, err := c.getEpisode(ctx, c.language, showID, season, episode)
+	if err != nil {
+		return Episode{}, err
+	}
+	return c.episodeFromDetails(ctx, showID, firstNonEmpty(showDetail.Name, showDetail.OriginalName), episodeDetail, season, episode)
+}
+
+func (c *Client) episodeFromDetails(ctx context.Context, showID int, showName string, detail episodeResponse, season int, episode int) (Episode, error) {
+	var credits episodeCredits
+	var err error
+	if c.people {
+		credits, err = c.getEpisodeCredits(ctx, showID, season, episode)
+		if err != nil {
+			return Episode{}, err
+		}
+	}
+
+	return Episode{
+		ShowID:      showID,
+		EpisodeID:   detail.ID,
+		ShowName:    showName,
+		Title:       detail.Name,
+		Overview:    detail.Overview,
+		AirDate:     detail.AirDate,
+		VoteAverage: detail.VoteAverage,
+		StillPath:   detail.StillPath,
+		Actors:      credits.Actors,
+		Crew:        credits.Crew,
+	}, nil
+}
+
 func (c *Client) FindShowAndSeason(ctx context.Context, showQuery string, season int) (Show, Season, error) {
 	showQuery = strings.TrimSpace(showQuery)
 	if showQuery == "" {

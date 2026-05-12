@@ -61,8 +61,8 @@ type PreviewItemRequest struct {
 	Language   string `json:"language"`
 	Show       string `json:"show"`
 	Title      string `json:"title"`
-	Season     int    `json:"season"`
-	Episode    int    `json:"episode"`
+	Season     *int   `json:"season"`
+	Episode    *int   `json:"episode"`
 	TMDBShowID int    `json:"tmdbShowId"`
 	NewName    string `json:"newName"`
 }
@@ -225,11 +225,11 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 	if strings.TrimSpace(input.Title) != "" {
 		item.Title = strings.TrimSpace(input.Title)
 	}
-	if input.Season > 0 {
-		item.Season = input.Season
+	if input.Season != nil && *input.Season >= 0 {
+		item.Season = *input.Season
 	}
-	if input.Episode > 0 {
-		item.Episode = input.Episode
+	if input.Episode != nil && *input.Episode >= 0 {
+		item.Episode = *input.Episode
 	}
 	if input.TMDBShowID > 0 {
 		item.TMDBShowID = input.TMDBShowID
@@ -316,9 +316,9 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 
 func findEpisode(ctx context.Context, client *tmdb.Client, tmdbShowID int, show string, season int, episode int) (tmdb.Episode, error) {
 	if tmdbShowID > 0 {
-		return client.FindEpisodeByShowID(ctx, tmdbShowID, season, episode)
+		return client.FindEpisodeByShowIDStrictTitle(ctx, tmdbShowID, season, episode)
 	}
-	return client.FindEpisode(ctx, show, season, episode)
+	return client.FindEpisodeStrictTitle(ctx, show, season, episode)
 }
 
 func finalizeItem(path string, template string, item *PreviewItem) {

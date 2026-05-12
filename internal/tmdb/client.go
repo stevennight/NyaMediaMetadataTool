@@ -56,6 +56,14 @@ type Show struct {
 	LogoPath         string
 }
 
+type SearchResult struct {
+	ID           int    `json:"id"`
+	Name         string `json:"name"`
+	OriginalName string `json:"originalName"`
+	FirstAirDate string `json:"firstAirDate"`
+	Overview     string `json:"overview"`
+}
+
 type Season struct {
 	ID           int
 	Name         string
@@ -210,6 +218,29 @@ func (c *Client) ImageURL(path string) string {
 	return c.imageURL + path
 }
 
+func (c *Client) SearchTV(ctx context.Context, query string) ([]SearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("tmdb show query is empty")
+	}
+
+	var parsed searchTVResponse
+	if err := c.get(ctx, c.language, "/search/tv", url.Values{"query": {query}}, &parsed); err != nil {
+		return nil, err
+	}
+	results := make([]SearchResult, 0, len(parsed.Results))
+	for _, result := range parsed.Results {
+		results = append(results, SearchResult{
+			ID:           result.ID,
+			Name:         result.Name,
+			OriginalName: result.OriginalName,
+			FirstAirDate: result.FirstAirDate,
+			Overview:     result.Overview,
+		})
+	}
+	return results, nil
+}
+
 func (c *Client) FindEpisode(ctx context.Context, showQuery string, season int, episode int) (Episode, error) {
 	showQuery = strings.TrimSpace(showQuery)
 	if showQuery == "" {
@@ -240,6 +271,41 @@ func (c *Client) FindEpisode(ctx context.Context, showQuery string, season int, 
 		ShowID:      show.ID,
 		EpisodeID:   episodeDetail.ID,
 		ShowName:    firstNonEmpty(show.Name, show.OriginalName),
+		Title:       episodeDetail.Name,
+		Overview:    episodeDetail.Overview,
+		AirDate:     episodeDetail.AirDate,
+		VoteAverage: episodeDetail.VoteAverage,
+		StillPath:   episodeDetail.StillPath,
+		Actors:      credits.Actors,
+		Crew:        credits.Crew,
+	}, nil
+}
+
+func (c *Client) FindEpisodeByShowID(ctx context.Context, showID int, season int, episode int) (Episode, error) {
+	if showID == 0 {
+		return Episode{}, errors.New("tmdb show id is empty")
+	}
+
+	showDetail, err := c.getShowWithFallback(ctx, showID)
+	if err != nil {
+		return Episode{}, err
+	}
+	episodeDetail, err := c.getEpisodeWithFallback(ctx, showID, season, episode)
+	if err != nil {
+		return Episode{}, err
+	}
+	var credits episodeCredits
+	if c.people {
+		credits, err = c.getEpisodeCredits(ctx, showID, season, episode)
+		if err != nil {
+			return Episode{}, err
+		}
+	}
+
+	return Episode{
+		ShowID:      showID,
+		EpisodeID:   episodeDetail.ID,
+		ShowName:    firstNonEmpty(showDetail.Name, showDetail.OriginalName),
 		Title:       episodeDetail.Name,
 		Overview:    episodeDetail.Overview,
 		AirDate:     episodeDetail.AirDate,

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	"NyaMediaMetadataTool/internal/config"
@@ -26,6 +27,7 @@ type PreviewRequest struct {
 	Path     string `json:"path"`
 	Template string `json:"template"`
 	UseTMDB  bool   `json:"useTmdb"`
+	Language string `json:"language"`
 }
 
 type PreviewResult struct {
@@ -42,16 +44,34 @@ type PreviewItem struct {
 	Season         int    `json:"season"`
 	Episode        int    `json:"episode"`
 	Year           string `json:"year"`
+	TMDBShowID     int    `json:"tmdbShowId"`
+	TMDBEpisodeID  int    `json:"tmdbEpisodeId"`
 	Source         string `json:"source"`
 	Status         string `json:"status"`
 	Message        string `json:"message"`
 	Conflict       bool   `json:"conflict"`
 	SanitizedTitle string `json:"sanitizedTitle"`
+	ManualName     bool   `json:"manualName"`
+}
+
+type PreviewItemRequest struct {
+	Path       string `json:"path"`
+	Template   string `json:"template"`
+	UseTMDB    bool   `json:"useTmdb"`
+	Language   string `json:"language"`
+	Show       string `json:"show"`
+	Title      string `json:"title"`
+	Season     int    `json:"season"`
+	Episode    int    `json:"episode"`
+	TMDBShowID int    `json:"tmdbShowId"`
+	NewName    string `json:"newName"`
 }
 
 type episodeNFO struct {
 	Title     string `xml:"title"`
 	ShowTitle string `xml:"showtitle"`
+	Language  string `xml:"language"`
+	LangAttr  string `xml:"lang,attr"`
 	Season    int    `xml:"season"`
 	Episode   int    `xml:"episode"`
 	Premiered string `xml:"premiered"`
@@ -59,9 +79,20 @@ type episodeNFO struct {
 }
 
 func Preview(ctx context.Context, cfg config.Config, input PreviewRequest) (PreviewResult, error) {
+	items := make([]PreviewItem, 0)
+	if err := PreviewEach(ctx, cfg, input, func(item PreviewItem) error {
+		items = append(items, item)
+		return nil
+	}); err != nil {
+		return PreviewResult{}, err
+	}
+	return PreviewResult{Items: items}, nil
+}
+
+func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, emit func(PreviewItem) error) error {
 	root := strings.TrimSpace(input.Path)
 	if root == "" {
-		return PreviewResult{}, errors.New("path is required")
+		return errors.New("path is required")
 	}
 	template := strings.TrimSpace(input.Template)
 	if template == "" {
@@ -70,7 +101,7 @@ func Preview(ctx context.Context, cfg config.Config, input PreviewRequest) (Prev
 
 	info, err := os.Stat(root)
 	if err != nil {
-		return PreviewResult{}, err
+		return err
 	}
 
 	allowed := make(map[string]struct{}, len(cfg.Processing.Extensions))
@@ -78,35 +109,167 @@ func Preview(ctx context.Context, cfg config.Config, input PreviewRequest) (Prev
 		allowed[strings.ToLower(ext)] = struct{}{}
 	}
 
+	if language := strings.TrimSpace(input.Language); language != "" {
+		cfg.Scraping.Language = language
+	}
 	client, _ := tmdb.NewClient(cfg.Scraping)
 	if !input.UseTMDB {
 		client = nil
 	}
 
-	items := make([]PreviewItem, 0)
+	files := make([]string, 0)
 	addFile := func(path string) {
 		if _, ok := allowed[strings.ToLower(filepath.Ext(path))]; !ok {
 			return
 		}
-		items = append(items, buildItem(ctx, cfg, client, path, template))
+		files = append(files, path)
 	}
 
 	if !info.IsDir() {
 		addFile(root)
-		return PreviewResult{Items: items}, nil
+	} else {
+		err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return nil
+			}
+			addFile(path)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
 	}
 
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
-			return nil
+	workers := previewWorkerCount(cfg.Processing.Concurrency)
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	var emitMu sync.Mutex
+	var firstErr error
+	var firstErrMu sync.Mutex
+
+	setErr := func(err error) {
+		if err == nil {
+			return
 		}
-		addFile(path)
-		return nil
-	})
-	if err != nil {
-		return PreviewResult{}, err
+		firstErrMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		firstErrMu.Unlock()
 	}
-	return PreviewResult{Items: items}, nil
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				select {
+				case <-ctx.Done():
+					setErr(ctx.Err())
+					return
+				default:
+				}
+
+				item := buildItem(ctx, cfg, client, path, template)
+				emitMu.Lock()
+				err := emit(item)
+				emitMu.Unlock()
+				if err != nil {
+					setErr(err)
+					return
+				}
+			}
+		}()
+	}
+
+	for _, path := range files {
+		firstErrMu.Lock()
+		err := firstErr
+		firstErrMu.Unlock()
+		if err != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			setErr(ctx.Err())
+		case jobs <- path:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	return firstErr
+}
+
+func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequest) (PreviewItem, error) {
+	path := strings.TrimSpace(input.Path)
+	if path == "" {
+		return PreviewItem{}, errors.New("path is required")
+	}
+	template := strings.TrimSpace(input.Template)
+	if template == "" {
+		template = DefaultTemplate
+	}
+	if language := strings.TrimSpace(input.Language); language != "" {
+		cfg.Scraping.Language = language
+	}
+
+	client, _ := tmdb.NewClient(cfg.Scraping)
+	if !input.UseTMDB {
+		client = nil
+	}
+
+	item := buildItem(ctx, cfg, nil, path, template)
+	if strings.TrimSpace(input.Show) != "" {
+		item.Show = strings.TrimSpace(input.Show)
+	}
+	if strings.TrimSpace(input.Title) != "" {
+		item.Title = strings.TrimSpace(input.Title)
+	}
+	if input.Season > 0 {
+		item.Season = input.Season
+	}
+	if input.Episode > 0 {
+		item.Episode = input.Episode
+	}
+	if input.TMDBShowID > 0 {
+		item.TMDBShowID = input.TMDBShowID
+	}
+
+	if client != nil {
+		episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Season, item.Episode)
+		if err != nil {
+			item.Status = "warning"
+			item.Message = err.Error()
+		} else {
+			item.Show = firstNonEmpty(episode.ShowName, item.Show)
+			item.Title = episode.Title
+			item.Year = yearFromDate(episode.AirDate)
+			item.TMDBShowID = episode.ShowID
+			item.TMDBEpisodeID = episode.EpisodeID
+			item.Source = "tmdb"
+			item.Status = "ok"
+			item.Message = ""
+		}
+	}
+
+	finalizeItem(path, template, &item)
+	if strings.TrimSpace(input.NewName) != "" {
+		item.NewName = sanitizeFilenamePart(strings.TrimSuffix(input.NewName, filepath.Ext(input.NewName))) + filepath.Ext(path)
+		item.NewPath = filepath.Join(filepath.Dir(path), item.NewName)
+		item.ManualName = true
+		applyConflict(path, &item)
+	}
+	return item, nil
+}
+
+func previewWorkerCount(configured int) int {
+	if configured < 4 {
+		return 4
+	}
+	if configured > 8 {
+		return 8
+	}
+	return configured
 }
 
 func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path string, template string) PreviewItem {
@@ -118,7 +281,7 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 		return item
 	}
 
-	if nfo, ok := readEpisodeNFO(path); ok {
+	if nfo, ok := readEpisodeNFO(path); ok && nfoMatchesLanguage(nfo, cfg.Scraping.Language) {
 		if strings.TrimSpace(nfo.ShowTitle) != "" {
 			item.Show = strings.TrimSpace(nfo.ShowTitle)
 		}
@@ -134,10 +297,12 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 		item.Year = yearFromDate(firstNonEmpty(nfo.Premiered, nfo.Aired))
 		item.Source = "nfo"
 	} else if client != nil {
-		if episode, err := client.FindEpisode(ctx, item.Show, item.Season, item.Episode); err == nil {
+		if episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Season, item.Episode); err == nil {
 			item.Show = firstNonEmpty(episode.ShowName, item.Show)
 			item.Title = episode.Title
 			item.Year = yearFromDate(episode.AirDate)
+			item.TMDBShowID = episode.ShowID
+			item.TMDBEpisodeID = episode.EpisodeID
 			item.Source = "tmdb"
 		} else {
 			item.Status = "warning"
@@ -145,18 +310,34 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 		}
 	}
 
+	finalizeItem(path, template, &item)
+	return item
+}
+
+func findEpisode(ctx context.Context, client *tmdb.Client, tmdbShowID int, show string, season int, episode int) (tmdb.Episode, error) {
+	if tmdbShowID > 0 {
+		return client.FindEpisodeByShowID(ctx, tmdbShowID, season, episode)
+	}
+	return client.FindEpisode(ctx, show, season, episode)
+}
+
+func finalizeItem(path string, template string, item *PreviewItem) {
 	if strings.TrimSpace(item.Title) == "" {
 		item.Title = titleFromName(path)
 	}
 	item.SanitizedTitle = sanitizeFilenamePart(item.Title)
-
-	name := applyTemplate(template, item)
+	name := applyTemplate(template, *item)
 	if strings.TrimSpace(name) == "" {
 		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	}
 	name = sanitizeFilenamePart(name) + filepath.Ext(path)
 	item.NewName = name
 	item.NewPath = filepath.Join(filepath.Dir(path), name)
+	applyConflict(path, item)
+}
+
+func applyConflict(path string, item *PreviewItem) {
+	item.Conflict = false
 	if !samePath(path, item.NewPath) {
 		if _, err := os.Stat(item.NewPath); err == nil {
 			item.Conflict = true
@@ -164,7 +345,6 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 			item.Message = "目标文件已存在"
 		}
 	}
-	return item
 }
 
 type parsedEpisode struct {
@@ -206,6 +386,20 @@ func readEpisodeNFO(mediaPath string) (episodeNFO, bool) {
 		return episodeNFO{}, false
 	}
 	return doc, true
+}
+
+func nfoMatchesLanguage(nfo episodeNFO, requested string) bool {
+	nfoLanguage := firstNonEmpty(nfo.Language, nfo.LangAttr)
+	if strings.TrimSpace(nfoLanguage) == "" || strings.TrimSpace(requested) == "" {
+		return false
+	}
+	return normalizeLanguage(nfoLanguage) == normalizeLanguage(requested)
+}
+
+func normalizeLanguage(language string) string {
+	language = strings.TrimSpace(strings.ToLower(language))
+	language = strings.ReplaceAll(language, "_", "-")
+	return language
 }
 
 func applyTemplate(template string, item PreviewItem) string {

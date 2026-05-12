@@ -338,7 +338,7 @@ button:disabled {
 
 .rename-controls {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) minmax(220px, 0.6fr);
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) minmax(180px, 0.55fr) minmax(220px, 0.6fr);
   gap: 12px;
   align-items: end;
   margin-bottom: 14px;
@@ -351,12 +351,59 @@ button:disabled {
   font-size: 13px;
 }
 
-.rename-controls input {
+.rename-controls input,
+.rename-controls select {
   width: 100%;
 }
 
 .rename-table {
-  min-width: 1120px;
+  min-width: 1480px;
+}
+
+.rename-match-bar {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.tmdb-results {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tmdb-results button {
+  text-align: left;
+}
+
+.tmdb-results small {
+  display: block;
+  opacity: 0.72;
+}
+
+.rename-edit-cell {
+  display: grid;
+  gap: 6px;
+  min-width: 260px;
+}
+
+.rename-edit-cell input {
+  width: 100%;
+  padding: 8px 10px;
+}
+
+.rename-edit-cell small {
+  color: #78716c;
+}
+
+.rename-episode-edit {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.rename-row-actions {
+  min-width: 150px;
 }
 
 .path-cell {
@@ -408,6 +455,26 @@ button:disabled {
   margin-top: 18px;
 }
 
+.directory-list {
+  display: grid;
+  gap: 8px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.directory-item {
+  border: 1px solid rgba(120, 113, 108, 0.18);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #1f2937;
+  text-align: left;
+}
+
+.directory-error {
+  margin-bottom: 12px;
+}
+
 h3 {
   margin: 18px 0 8px;
   font-size: 15px;
@@ -437,6 +504,16 @@ h3 {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   margin-bottom: 14px;
+}
+
+.path-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.path-input input {
+  width: 100%;
 }
 
 .dir-item {

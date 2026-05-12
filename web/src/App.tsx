@@ -109,12 +109,33 @@ type RenamePreviewItem = {
   season: number;
   episode: number;
   year: string;
+  tmdbShowId: number;
+  tmdbEpisodeId: number;
   source: string;
   status: string;
   message: string;
   conflict: boolean;
   sanitizedTitle: string;
+  manualName: boolean;
 };
+
+type TMDBSearchResult = {
+  id: number;
+  name: string;
+  originalName: string;
+  firstAirDate: string;
+  overview: string;
+};
+
+type RenamePreviewStreamMessage = {
+  type: 'item' | 'done' | 'error';
+  item?: RenamePreviewItem;
+  count?: number;
+  error?: string;
+};
+
+type DirectoryEntry = { name: string; path: string };
+type DirectoryList = { path: string; parent: string; entries: DirectoryEntry[] };
 
 type RescanScope = 'all' | 'dir' | 'path';
 type RescanStrategy = 'missing' | 'force';
@@ -200,8 +221,16 @@ export function App() {
   const [renamePath, setRenamePath] = useState('');
   const [renameTemplate, setRenameTemplate] = useState(defaultRenameTemplate);
   const [renameUseTmdb, setRenameUseTmdb] = useState(true);
+  const [renameLanguage, setRenameLanguage] = useState('zh-CN');
+  const [renameLanguageInitialized, setRenameLanguageInitialized] = useState(false);
   const [renamePreview, setRenamePreview] = useState<RenamePreviewItem[]>([]);
+  const [renamePreviewCount, setRenamePreviewCount] = useState(0);
+  const [selectedRenamePaths, setSelectedRenamePaths] = useState<string[]>([]);
+  const [tmdbQuery, setTmdbQuery] = useState('');
+  const [tmdbResults, setTmdbResults] = useState<TMDBSearchResult[]>([]);
+  const [searchingTmdb, setSearchingTmdb] = useState(false);
   const [previewingRename, setPreviewingRename] = useState(false);
+  const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; onSelect: (path: string) => void } | null>(null);
   const [newWatchDir, setNewWatchDir] = useState('');
   const [rescanOpen, setRescanOpen] = useState(false);
   const [rescanScope, setRescanScope] = useState<RescanScope>('all');
@@ -249,6 +278,13 @@ export function App() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  useEffect(() => {
+    if (!renameLanguageInitialized && config?.scraping.language) {
+      setRenameLanguage(config.scraping.language);
+      setRenameLanguageInitialized(true);
+    }
+  }, [config?.scraping.language, renameLanguageInitialized]);
 
   function navigate(page: PageKey) {
     setActivePage(page);
@@ -319,22 +355,128 @@ export function App() {
     }
     setPreviewingRename(true);
     setError('');
+    setNotice('');
+    setRenamePreview([]);
+    setRenamePreviewCount(0);
+    setSelectedRenamePaths([]);
     try {
-      const response = await fetch('/api/rename/preview', {
+      const response = await fetch('/api/rename/preview/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, useTmdb: renameUseTmdb })
+        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, useTmdb: renameUseTmdb, language: renameLanguage })
       });
       if (!response.ok) {
         setError(await response.text());
         return;
       }
-      const result = await response.json();
-      setRenamePreview(asArray<RenamePreviewItem>(result.items));
+      if (!response.body) {
+        setError('当前浏览器不支持流式预览');
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        pending += decoder.decode(value, { stream: !done });
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        for (const line of lines) {
+          handleRenamePreviewMessage(line);
+        }
+        if (done) break;
+      }
+      if (pending.trim()) {
+        handleRenamePreviewMessage(pending);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成预览失败');
     } finally {
       setPreviewingRename(false);
+    }
+  }
+
+  function handleRenamePreviewMessage(line: string) {
+    if (!line.trim()) return;
+    const message = JSON.parse(line) as RenamePreviewStreamMessage;
+    if (message.type === 'item' && message.item) {
+      setRenamePreview((items) => [...items, message.item as RenamePreviewItem]);
+      setRenamePreviewCount(message.count ?? 0);
+    } else if (message.type === 'error') {
+      setError(message.error || '生成预览失败');
+    } else if (message.type === 'done') {
+      setRenamePreviewCount(message.count ?? 0);
+      setNotice(`预览生成完成，共 ${message.count ?? 0} 个文件。`);
+    }
+  }
+
+  function updateRenameItem(path: string, patch: Partial<RenamePreviewItem>) {
+    setRenamePreview((items) => items.map((item) => item.path === path ? { ...item, ...patch } : item));
+  }
+
+  function replaceRenameItem(next: RenamePreviewItem) {
+    setRenamePreview((items) => items.map((item) => item.path === next.path ? next : item));
+  }
+
+  function toggleRenameSelection(path: string, checked: boolean) {
+    setSelectedRenamePaths((paths) => checked ? [...new Set([...paths, path])] : paths.filter((item) => item !== path));
+  }
+
+  async function recalculateRenameItem(item: RenamePreviewItem, options: { tmdbShowId?: number; show?: string; forceTmdb?: boolean; keepManualName?: boolean } = {}) {
+    setError('');
+    const response = await fetch('/api/rename/preview/item', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: item.path,
+        template: renameTemplate,
+        useTmdb: options.forceTmdb ?? false,
+        language: renameLanguage,
+        show: options.show ?? item.show,
+        title: item.title,
+        season: item.season,
+        episode: item.episode,
+        tmdbShowId: options.tmdbShowId ?? item.tmdbShowId,
+        newName: (options.keepManualName ?? item.manualName) ? item.newName : ''
+      })
+    });
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+    replaceRenameItem(await response.json());
+  }
+
+  async function searchTmdbShows() {
+    if (!tmdbQuery.trim()) return;
+    setSearchingTmdb(true);
+    setError('');
+    try {
+      const params = new URLSearchParams({ query: tmdbQuery.trim(), language: renameLanguage });
+      const response = await fetch(`/api/tmdb/search-tv?${params.toString()}`);
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const result = await response.json();
+      setTmdbResults(asArray<TMDBSearchResult>(result.items));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '搜索 TMDB 失败');
+    } finally {
+      setSearchingTmdb(false);
+    }
+  }
+
+  async function applyTmdbShowToSelected(show: TMDBSearchResult) {
+    const targets = renamePreview.filter((item) => selectedRenamePaths.includes(item.path));
+    if (!targets.length) {
+      setError('请先勾选要套用的文件');
+      return;
+    }
+    setError('');
+    for (const item of targets) {
+      await recalculateRenameItem(item, { tmdbShowId: show.id, show: show.name || show.originalName, forceTmdb: true });
     }
   }
 
@@ -565,7 +707,7 @@ export function App() {
         <section className="page-grid">
           <Card title="监听目录" action={<button onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '补扫中' : '补扫'}</button>}>
             <div className="form-row">
-              <input value={newWatchDir} onChange={(event) => setNewWatchDir(event.target.value)} placeholder="D:\\Media\\Anime" />
+              <div className="path-input"><input value={newWatchDir} onChange={(event) => setNewWatchDir(event.target.value)} placeholder="D:\\Media\\Anime" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择监听目录', value: newWatchDir, onSelect: setNewWatchDir })}>选择</button></div>
               <button onClick={addWatchDir}>添加</button>
             </div>
             {watchDirs.length ? watchDirs.map((dir) => (
@@ -586,40 +728,73 @@ export function App() {
 
         {activePage === 'rename' && (
         <section className="page-grid rename-page-grid">
-          <Card title="整理命名" action={<button onClick={previewRename} disabled={previewingRename}>{previewingRename ? '扫描中' : '生成预览'}</button>}>
+          <Card title="整理命名" action={<button onClick={previewRename} disabled={previewingRename}>{previewingRename ? `扫描中 ${renamePreviewCount}` : '生成预览'}</button>}>
             <div className="rename-controls">
-              <label>目录或文件路径<input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /></label>
+              <label>目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}>选择</button></div></label>
               <label>命名模板<input value={renameTemplate} onChange={(event) => setRenameTemplate(event.target.value)} placeholder={defaultRenameTemplate} /></label>
+              <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <Toggle label="缺少 NFO 时查询 TMDB" checked={renameUseTmdb} onChange={setRenameUseTmdb} />
             </div>
-            <p className="muted">可用占位符：{'{show}'}、{'{season:00}'}、{'{episode:00}'}、{'{title}'}、{'{year}'}。本页只生成预览，不执行重命名。</p>
+            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时从 TMDB 获取 {'{title}'}。可用占位符：{'{show}'}、{'{season:00}'}、{'{episode:00}'}、{'{title}'}、{'{year}'}。本页只生成预览，不执行重命名。</p>
           </Card>
 
           <Card title="重命名预览">
+            <div className="rename-match-bar">
+              <div className="path-input">
+                <input value={tmdbQuery} onChange={(event) => setTmdbQuery(event.target.value)} placeholder="搜索 TMDB 剧集，例如 Frieren" />
+                <button type="button" onClick={searchTmdbShows} disabled={searchingTmdb}>{searchingTmdb ? '搜索中' : '搜索剧集'}</button>
+              </div>
+              {tmdbResults.length ? (
+                <div className="tmdb-results">
+                  {tmdbResults.map((show) => (
+                    <button type="button" key={show.id} onClick={() => applyTmdbShowToSelected(show)} title="套用到勾选项并按各自行季集重新获取标题">
+                      {show.name || show.originalName} <small>{show.firstAirDate?.slice(0, 4) || '----'} · #{show.id}</small>
+                    </button>
+                  ))}
+                </div>
+              ) : <p className="muted">勾选文件后搜索剧集，点击候选即可套用到选中项并重新预览。</p>}
+            </div>
             <div className="task-table-wrap">
               <table className="task-table rename-table">
                 <thead>
                   <tr>
+                    <th>选择</th>
                     <th>状态</th>
                     <th>来源</th>
                     <th>识别结果</th>
                     <th>原文件名</th>
                     <th>新文件名</th>
                     <th>说明</th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {renamePreview.length ? renamePreview.map((item) => (
                     <tr key={item.path}>
+                      <td><input type="checkbox" checked={selectedRenamePaths.includes(item.path)} onChange={(event) => toggleRenameSelection(item.path, event.target.checked)} /></td>
                       <td><span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{item.status}</span></td>
                       <td>{item.source || '-'}</td>
-                      <td className="path-cell">{item.show || '-'} S{String(item.season).padStart(2, '0')}E{String(item.episode).padStart(2, '0')} {item.title || ''}</td>
+                      <td className="rename-edit-cell">
+                        <input value={item.show || ''} onChange={(event) => updateRenameItem(item.path, { show: event.target.value })} placeholder="剧名" />
+                        <div className="rename-episode-edit">
+                          <input type="number" min="1" value={item.season || 1} onChange={(event) => updateRenameItem(item.path, { season: Number(event.target.value) })} title="季" />
+                          <input type="number" min="1" value={item.episode || 1} onChange={(event) => updateRenameItem(item.path, { episode: Number(event.target.value) })} title="集" />
+                        </div>
+                        <input value={item.title || ''} onChange={(event) => updateRenameItem(item.path, { title: event.target.value })} placeholder="标题" />
+                        {item.tmdbShowId ? <small>TMDB #{item.tmdbShowId}</small> : null}
+                      </td>
                       <td className="path-cell">{item.currentName}</td>
-                      <td className="path-cell">{item.newName || '-'}</td>
+                      <td className="rename-edit-cell"><input value={item.newName || ''} onChange={(event) => updateRenameItem(item.path, { newName: event.target.value, manualName: true })} placeholder="新文件名" /></td>
                       <td className="path-cell">{item.conflict ? '目标文件已存在' : item.message || '-'}</td>
+                      <td>
+                        <div className="inline-actions rename-row-actions">
+                          <button className="secondary" type="button" onClick={() => recalculateRenameItem({ ...item, manualName: false }, { keepManualName: false })}>按模板</button>
+                          <button type="button" onClick={() => recalculateRenameItem(item, { forceTmdb: true })}>查 TMDB</button>
+                        </div>
+                      </td>
                     </tr>
                   )) : (
-                    <tr><td colSpan={6} className="empty-cell">尚未生成预览。</td></tr>
+                    <tr><td colSpan={8} className="empty-cell">尚未生成预览。</td></tr>
                   )}
                 </tbody>
               </table>
@@ -683,7 +858,8 @@ export function App() {
           {selectedTask && <TaskDetailModal detail={selectedTask} timezone={displayTimezone} onClose={() => setSelectedTask(null)} />}
         </section>
       )}
-      {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onSubmit={() => void rescan()} />}
+      {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onBrowsePath={() => setDirectoryPicker({ title: '选择补扫目录', value: rescanTarget, onSelect: setRescanTarget })} onSubmit={() => void rescan()} />}
+      {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
       </section>
     </main>
   );
@@ -764,6 +940,7 @@ function RescanModal(props: {
   onScopeChange: (value: RescanScope) => void;
   onTargetChange: (value: string) => void;
   onStrategyChange: (value: RescanStrategy) => void;
+  onBrowsePath: () => void;
   onSubmit: () => void;
 }) {
   return (
@@ -794,7 +971,7 @@ function RescanModal(props: {
           {props.scope === 'path' && (
             <label>
               路径
-              <input value={props.target} onChange={(event) => props.onTargetChange(event.target.value)} placeholder="D:\\Media\\Anime\\S01" />
+              <div className="path-input"><input value={props.target} onChange={(event) => props.onTargetChange(event.target.value)} placeholder="D:\\Media\\Anime\\S01" /><button type="button" onClick={props.onBrowsePath}>选择</button></div>
             </label>
           )}
           <label>
@@ -808,6 +985,63 @@ function RescanModal(props: {
         <div className="inline-actions modal-actions">
           <button className="secondary" onClick={props.onClose}>取消</button>
           <button onClick={props.onSubmit} disabled={props.rescanning}>{props.rescanning ? '补扫中' : '开始补扫'}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DirectoryPicker(props: { title: string; initialPath: string; onSelect: (path: string) => void; onClose: () => void }) {
+  const [currentPath, setCurrentPath] = useState(props.initialPath);
+  const [data, setData] = useState<DirectoryList>({ path: '', parent: '', entries: [] });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    void load(currentPath);
+  }, []);
+
+  async function load(path: string) {
+    setLoading(true);
+    setError('');
+    try {
+      const params = new URLSearchParams();
+      if (path.trim()) params.set('path', path.trim());
+      const response = await fetch(`/api/fs/directories?${params.toString()}`);
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const result = await response.json();
+      setData({ ...result, entries: asArray<DirectoryEntry>(result.entries) });
+      setCurrentPath(result.path || path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '读取目录失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <section className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <h2>{props.title}</h2>
+          <button className="secondary" onClick={props.onClose}>关闭</button>
+        </div>
+        <div className="form-row">
+          <input value={currentPath} onChange={(event) => setCurrentPath(event.target.value)} placeholder="选择磁盘或输入路径" />
+          <button onClick={() => load(currentPath)} disabled={loading}>{loading ? '读取中' : '打开'}</button>
+        </div>
+        {error && <section className="error-card directory-error">{error}</section>}
+        <div className="directory-list">
+          {data.parent && <button className="directory-item" onClick={() => load(data.parent)}>..</button>}
+          {data.entries.map((entry) => <button className="directory-item" key={entry.path} onClick={() => load(entry.path)}>{entry.name}</button>)}
+          {!data.entries.length && !data.parent && <p className="muted">没有可显示的目录。</p>}
+        </div>
+        <div className="inline-actions modal-actions">
+          <button className="secondary" onClick={props.onClose}>取消</button>
+          <button onClick={() => props.onSelect(currentPath)} disabled={!currentPath.trim()}>选择当前目录</button>
         </div>
       </section>
     </div>

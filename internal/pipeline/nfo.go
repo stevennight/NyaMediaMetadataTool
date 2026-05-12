@@ -64,6 +64,7 @@ type episodeNFO struct {
 	XMLName   xml.Name      `xml:"episodedetails"`
 	Title     string        `xml:"title"`
 	ShowTitle string        `xml:"showtitle,omitempty"`
+	Language  string        `xml:"language,omitempty"`
 	SortTitle string        `xml:"sorttitle"`
 	Runtime   int           `xml:"runtime,omitempty"`
 	Season    int           `xml:"season"`
@@ -198,6 +199,7 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 	doc := episodeNFO{
 		ShowTitle: episode.Show,
 		Title:     episode.Title,
+		Language:  strings.TrimSpace(cfg.Scraping.Language),
 		SortTitle: episode.Title,
 		Runtime:   runtime,
 		Season:    episode.Season,

@@ -15,6 +15,7 @@ import (
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/renamer"
 	"NyaMediaMetadataTool/internal/store"
+	"NyaMediaMetadataTool/internal/tmdb"
 	"NyaMediaMetadataTool/internal/tools"
 	"NyaMediaMetadataTool/web"
 )
@@ -53,7 +54,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
 	s.mux.HandleFunc("GET /api/tasks/", s.handleTaskDetail)
 	s.mux.HandleFunc("GET /api/artifacts", s.handleArtifacts)
+	s.mux.HandleFunc("GET /api/fs/directories", s.handleListDirectories)
 	s.mux.HandleFunc("POST /api/rename/preview", s.handleRenamePreview)
+	s.mux.HandleFunc("POST /api/rename/preview/stream", s.handleRenamePreviewStream)
+	s.mux.HandleFunc("POST /api/rename/preview/item", s.handleRenamePreviewItem)
+	s.mux.HandleFunc("GET /api/tmdb/search-tv", s.handleTMDBSearchTV)
 	s.mux.HandleFunc("GET /api/watch-dirs", s.handleListWatchDirs)
 	s.mux.HandleFunc("POST /api/watch-dirs", s.handleCreateWatchDir)
 	s.mux.HandleFunc("PUT /api/watch-dirs/", s.handleUpdateWatchDir)
@@ -193,6 +198,71 @@ func (s *Server) handleRenamePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleRenamePreviewStream(w http.ResponseWriter, r *http.Request) {
+	var input renamer.PreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	encoder := json.NewEncoder(w)
+	count := 0
+	err := renamer.PreviewEach(r.Context(), s.snapshotConfig(), input, func(item renamer.PreviewItem) error {
+		count++
+		if err := encoder.Encode(map[string]any{"type": "item", "item": item, "count": count}); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	})
+	if err != nil {
+		_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "count": count})
+	} else {
+		_ = encoder.Encode(map[string]any{"type": "done", "count": count})
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
+func (s *Server) handleRenamePreviewItem(w http.ResponseWriter, r *http.Request) {
+	var input renamer.PreviewItemRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	item, err := renamer.PreviewSingle(r.Context(), s.snapshotConfig(), input)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) handleTMDBSearchTV(w http.ResponseWriter, r *http.Request) {
+	cfg := s.snapshotConfig()
+	if language := strings.TrimSpace(r.URL.Query().Get("language")); language != "" {
+		cfg.Scraping.Language = language
+	}
+	client, err := tmdb.NewClient(cfg.Scraping)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	results, err := client.SearchTV(r.Context(), r.URL.Query().Get("query"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": results})
 }
 
 func (s *Server) handleListWatchDirs(w http.ResponseWriter, r *http.Request) {

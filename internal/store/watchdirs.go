@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-
-	"NyaMediaMetadataTool/internal/config"
 )
 
 var ErrWatchDirNotFound = errors.New("watch dir not found")
@@ -15,43 +13,6 @@ type WatchDir struct {
 	Path      string `json:"path"`
 	Recursive bool   `json:"recursive"`
 	Enabled   bool   `json:"enabled"`
-}
-
-func (s *Store) SyncWatchDirs(ctx context.Context, dirs []config.WatchDir) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.ExecContext(ctx, "DELETE FROM watch_dirs"); err != nil {
-		return err
-	}
-
-	stmt, err := tx.PrepareContext(ctx, `
-INSERT INTO watch_dirs (path, recursive, enabled)
-VALUES (?, ?, ?)
-`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, dir := range dirs {
-		recursive := 0
-		if dir.Recursive {
-			recursive = 1
-		}
-		enabled := 0
-		if dir.Enabled {
-			enabled = 1
-		}
-		if _, err := stmt.ExecContext(ctx, dir.Path, recursive, enabled); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
 }
 
 func (s *Store) ListWatchDirs(ctx context.Context) ([]WatchDir, error) {

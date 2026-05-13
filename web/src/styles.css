@@ -717,6 +717,25 @@ h3 {
   width: 100%;
 }
 
+.watch-dir-create {
+  display: grid;
+  gap: 8px;
+}
+
+.watch-dir-form-row {
+  align-items: start;
+}
+
+.watch-dir-add-button {
+  align-self: start;
+  min-height: 38px;
+}
+
+.watch-dir-create .toggle-row {
+  border-top: 0;
+  padding: 0;
+}
+
 .dir-item {
   display: flex;
   align-items: center;

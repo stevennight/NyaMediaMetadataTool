@@ -284,6 +284,7 @@ export function App() {
   const [previewingRename, setPreviewingRename] = useState(false);
   const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; onSelect: (path: string) => void } | null>(null);
   const [newWatchDir, setNewWatchDir] = useState('');
+  const [newWatchDirEnabled, setNewWatchDirEnabled] = useState(true);
   const [rescanOpen, setRescanOpen] = useState(false);
   const [rescanScope, setRescanScope] = useState<RescanScope>('all');
   const [rescanTarget, setRescanTarget] = useState('');
@@ -741,7 +742,7 @@ export function App() {
     const response = await fetch('/api/watch-dirs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, enabled: true })
+      body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, enabled: newWatchDirEnabled })
     });
     if (!response.ok) {
       setError(await response.text());
@@ -750,6 +751,23 @@ export function App() {
     const created = await response.json();
     setWatchDirs((items) => [...items, created]);
     setNewWatchDir('');
+  }
+
+  async function updateWatchDir(dir: WatchDir, patch: Partial<WatchDir>) {
+    setError('');
+    const next = { ...dir, ...patch };
+    const response = await fetch(`/api/watch-dirs/${dir.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(next)
+    });
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+    const updated = await response.json();
+    setWatchDirs((items) => items.map((item) => item.id === dir.id ? updated : item));
+    setNotice('目录配置已更新，自动监听变更需要重启服务后生效；补扫可立即手动执行。');
   }
 
   async function deleteWatchDir(id: number) {
@@ -770,7 +788,7 @@ export function App() {
       if (rescanScope === 'dir') {
         const selected = watchDirs.find((dir) => dir.path === rescanTarget);
         if (!selected) {
-          setError('请选择监听目录');
+          setError('请选择媒体目录');
           return;
         }
         payload.watchDirId = selected.id;
@@ -865,7 +883,7 @@ export function App() {
         <nav className="module-nav" aria-label="后台模块">
           <TabButton active={activePage === 'dashboard'} label="Dashboard" onClick={() => navigate('dashboard')} />
           <TabButton active={activePage === 'settings'} label="设置" onClick={() => navigate('settings')} />
-          <TabButton active={activePage === 'watchDirs'} label="监听目录" onClick={() => navigate('watchDirs')} />
+          <TabButton active={activePage === 'watchDirs'} label="媒体目录" onClick={() => navigate('watchDirs')} />
           <TabButton active={activePage === 'tasks'} label="任务" onClick={() => navigate('tasks')} />
           <TabButton active={activePage === 'rename'} label="整理命名" onClick={() => navigate('rename')} />
         </nav>
@@ -960,23 +978,27 @@ export function App() {
 
         {activePage === 'watchDirs' && (
         <section className="page-grid">
-          <Card title="监听目录" action={<button onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '补扫中' : '补扫'}</button>}>
-            <div className="form-row">
-              <div className="path-input"><input value={newWatchDir} onChange={(event) => setNewWatchDir(event.target.value)} placeholder="D:\\Media\\Anime" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择监听目录', value: newWatchDir, onSelect: setNewWatchDir })}>选择</button></div>
-              <button onClick={addWatchDir}>添加</button>
+          <Card title="媒体目录" action={<button onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '补扫中' : '补扫'}</button>}>
+            <div className="form-row watch-dir-form-row">
+              <div className="watch-dir-create">
+                <div className="path-input"><input value={newWatchDir} onChange={(event) => setNewWatchDir(event.target.value)} placeholder="D:\\Media\\Anime" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })}>选择</button></div>
+                <Toggle label="自动监听并启动时扫描" checked={newWatchDirEnabled} onChange={setNewWatchDirEnabled} />
+              </div>
+              <button className="watch-dir-add-button" onClick={addWatchDir}>添加</button>
             </div>
             {watchDirs.length ? watchDirs.map((dir) => (
               <div className="dir-item" key={dir.id}>
                 <div>
                   <strong>{dir.path}</strong>
-                  <small>{dir.enabled ? '启用' : '停用'} · {dir.recursive ? '递归' : '当前层'}</small>
+                  <small>{dir.enabled ? '自动监听' : '仅手动补扫'} · {dir.recursive ? '递归' : '当前层'}</small>
                 </div>
                 <div className="inline-actions">
+                  <button className="secondary" onClick={() => void updateWatchDir(dir, { enabled: !dir.enabled })}>{dir.enabled ? '关闭监听' : '开启监听'}</button>
                   <button onClick={() => openRescanDialog('dir', dir.path)} disabled={rescanning}>补扫</button>
                   <button className="danger" onClick={() => deleteWatchDir(dir.id)}>删除</button>
                 </div>
               </div>
-            )) : <p className="muted">尚未配置监听目录。</p>}
+            )) : <p className="muted">尚未配置媒体目录。</p>}
           </Card>
         </section>
       )}
@@ -1249,14 +1271,14 @@ function RescanModal(props: {
           <label>
             范围
             <select value={props.scope} onChange={(event) => props.onScopeChange(event.target.value as RescanScope)}>
-              <option value="all">全部监听目录</option>
-              <option value="dir">指定监听目录</option>
+              <option value="all">全部媒体目录</option>
+              <option value="dir">指定媒体目录</option>
               <option value="path">指定路径</option>
             </select>
           </label>
           {props.scope === 'dir' && (
             <label>
-              监听目录
+              媒体目录
               <select value={props.target} onChange={(event) => props.onTargetChange(event.target.value)}>
                 <option value="">请选择</option>
                 {props.directories.map((dir) => <option key={dir.id} value={dir.path}>{dir.path}</option>)}

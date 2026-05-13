@@ -439,7 +439,7 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		for _, dir := range dirs {
-			cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: dir.Enabled}
+			cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: true}
 			if err := bootstrap.ScanWatchDir(context.Background(), cfg, s.store, s.logger, cfgDir, options); err != nil {
 				s.logger.Warn("manual rescan failed", "path", dir.Path, "error", err)
 			}

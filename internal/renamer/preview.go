@@ -579,8 +579,11 @@ func targetPathFromTemplate(sourcePath string, rendered string) string {
 	if rendered == "" {
 		return ""
 	}
-	rendered = strings.TrimSuffix(rendered, filepath.Ext(rendered))
-	rendered = sanitizePath(rendered) + filepath.Ext(sourcePath)
+	sourceExt := filepath.Ext(sourcePath)
+	if strings.EqualFold(filepath.Ext(rendered), sourceExt) {
+		rendered = strings.TrimSuffix(rendered, filepath.Ext(rendered))
+	}
+	rendered = sanitizePath(rendered) + sourceExt
 	if isAbsoluteTargetPath(rendered) {
 		return filepath.Clean(rendered)
 	}

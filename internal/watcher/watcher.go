@@ -25,6 +25,8 @@ type Watcher struct {
 	timers  map[string]*time.Timer
 }
 
+const ignoreFileName = ".ignore"
+
 func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Watcher {
 	allowed := make(map[string]struct{}, len(cfg.Processing.Extensions))
 	for _, ext := range cfg.Processing.Extensions {
@@ -75,6 +77,9 @@ func (w *Watcher) addWatchDirs(fsw *fsnotify.Watcher, root string, recursive boo
 		if !d.IsDir() {
 			return nil
 		}
+		if hasIgnoreFile(path) {
+			return filepath.SkipDir
+		}
 		if path != root && !recursive {
 			return filepath.SkipDir
 		}
@@ -85,6 +90,9 @@ func (w *Watcher) addWatchDirs(fsw *fsnotify.Watcher, root string, recursive boo
 func (w *Watcher) handleEvent(ctx context.Context, fsw *fsnotify.Watcher, event fsnotify.Event) {
 	if event.Op&fsnotify.Create != 0 {
 		if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+			if hasIgnoreFile(event.Name) {
+				return
+			}
 			_ = w.addWatchDirs(fsw, event.Name, true)
 			go w.scheduleDirectory(ctx, event.Name)
 			return
@@ -109,7 +117,13 @@ func (w *Watcher) scheduleDirectory(ctx context.Context, root string) {
 	}
 
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if hasIgnoreFile(path) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if _, ok := w.allowed[strings.ToLower(filepath.Ext(path))]; !ok {
@@ -135,6 +149,10 @@ func (w *Watcher) debounceFile(ctx context.Context, path string) {
 }
 
 func (w *Watcher) scheduleFile(ctx context.Context, path string) {
+	if hasIgnoreFileInAncestors(filepath.Dir(path)) {
+		return
+	}
+
 	checks := w.cfg.Processing.StableChecks
 	if checks <= 0 {
 		checks = 1
@@ -172,5 +190,23 @@ func (w *Watcher) scheduleFile(ctx context.Context, path string) {
 	}
 	if err := w.store.EnqueueMediaTaskWithOverwrite(ctx, mediaFileID, w.cfg.Processing.OverwriteExisting); err != nil {
 		w.logger.Warn("watch enqueue media task failed", "path", path, "error", err)
+	}
+}
+
+func hasIgnoreFile(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ignoreFileName))
+	return err == nil
+}
+
+func hasIgnoreFileInAncestors(dir string) bool {
+	for {
+		if hasIgnoreFile(dir) {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
 	}
 }

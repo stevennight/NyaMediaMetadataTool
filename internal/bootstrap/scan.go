@@ -19,6 +19,8 @@ import (
 var episodePattern = regexp.MustCompile(`(?i)s\d{1,2}e\d{1,4}\b`)
 var seasonDirPattern = regexp.MustCompile(`(?i)^(season\s*\d{1,2}|s\d{1,2}|第\s*\d{1,2}\s*季)$`)
 
+const ignoreFileName = ".ignore"
+
 type ScanOptions struct {
 	OverwriteExisting bool
 	Force             bool
@@ -49,6 +51,9 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 			return nil
 		}
 		if entry.IsDir() {
+			if hasIgnoreFile(path) {
+				return filepath.SkipDir
+			}
 			if path != dir.Path && !dir.Recursive {
 				return filepath.SkipDir
 			}
@@ -94,6 +99,9 @@ func ScanPath(ctx context.Context, cfg config.Config, st *store.Store, logger *s
 	if info.IsDir() {
 		return ScanWatchDir(ctx, cfg, st, logger, config.WatchDir{Path: path, Recursive: true, Enabled: true}, options)
 	}
+	if hasIgnoreFileInAncestors(filepath.Dir(path)) {
+		return nil
+	}
 
 	allowed := make(map[string]struct{}, len(cfg.Processing.Extensions))
 	for _, ext := range cfg.Processing.Extensions {
@@ -136,6 +144,24 @@ func hasMissingOutputs(cfg config.Config, mediaPath string) bool {
 func missing(path string) bool {
 	_, err := os.Stat(path)
 	return errors.Is(err, os.ErrNotExist)
+}
+
+func hasIgnoreFile(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ignoreFileName))
+	return err == nil
+}
+
+func hasIgnoreFileInAncestors(dir string) bool {
+	for {
+		if hasIgnoreFile(dir) {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
 
 func showBaseDir(basePath string) string {

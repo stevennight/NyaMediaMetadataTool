@@ -522,18 +522,10 @@ button:disabled {
 
 .target-path-dir {
   display: inline-flex;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   align-items: center;
-  min-width: 56px;
-  max-width: 100%;
-  gap: 6px;
-  padding: 4px 8px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(245, 158, 11, 0.16);
-  color: #92400e;
-  font-size: 12px;
-  font-weight: 700;
+  gap: 8px;
+  min-width: 0;
 }
 
 .target-path-dir-icon {
@@ -556,12 +548,8 @@ button:disabled {
   background: #f59e0b;
 }
 
-.target-path-dir-text,
 .target-path-name {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .target-path-name {

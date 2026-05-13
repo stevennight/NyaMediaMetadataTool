@@ -54,6 +54,7 @@ type PreviewItem struct {
 	CurrentName    string `json:"currentName"`
 	NewName        string `json:"newName"`
 	NewPath        string `json:"newPath"`
+	RenderedTarget string `json:"renderedTarget"`
 	Show           string `json:"show"`
 	Title          string `json:"title"`
 	Season         int    `json:"season"`
@@ -325,6 +326,7 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 
 	finalizeItem(path, template, &item)
 	if strings.TrimSpace(input.NewName) != "" {
+		item.RenderedTarget = strings.TrimSpace(input.NewName)
 		item.NewPath = targetPathFromTemplate(path, input.NewName)
 		item.NewName = filepath.Base(item.NewPath)
 		item.ManualName = true
@@ -569,6 +571,7 @@ func finalizeItem(path string, template string, item *PreviewItem) {
 	if strings.TrimSpace(rendered) == "" {
 		rendered = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	}
+	item.RenderedTarget = strings.TrimSpace(rendered)
 	item.NewPath = targetPathFromTemplate(path, rendered)
 	item.NewName = filepath.Base(item.NewPath)
 	applyConflict(path, item)

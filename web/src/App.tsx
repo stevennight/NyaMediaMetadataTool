@@ -105,6 +105,7 @@ type RenamePreviewItem = {
   currentName: string;
   newName: string;
   newPath: string;
+  renderedTarget: string;
   show: string;
   title: string;
   season: number;
@@ -261,14 +262,21 @@ function RenameTargetPathDisplay(props: { value: string }) {
   if (!parts.dir) return <span className="target-path-name">{parts.name}</span>;
 
   return (
-    <>
-      <span className="target-path-dir" title={parts.dir}>
-        <span className="target-path-dir-icon" aria-hidden="true" />
-        <span className="target-path-dir-text">{parts.dir}</span>
-      </span>
+    <span className="target-path-dir" title={parts.dir}>
+      <span className="target-path-dir-icon" aria-hidden="true" />
       <span className="target-path-name">{parts.name}</span>
-    </>
+    </span>
   );
+}
+
+function getRenameTargetDisplayValue(item: RenamePreviewItem) {
+  const renderedTarget = item.renderedTarget || item.newName || item.newPath || '';
+  if (splitRenameTargetPath(renderedTarget).dir) return item.newPath || renderedTarget;
+  return item.newName || renderedTarget;
+}
+
+function getRenameTargetEditorValue(item: RenamePreviewItem) {
+  return item.renderedTarget || item.newPath || item.newName || '';
 }
 
 export function App() {
@@ -634,7 +642,7 @@ export function App() {
 
   function applyTargetPathEdit() {
     if (!targetPathEditor) return;
-    updateRenameItem(targetPathEditor.path, { newName: targetPathEditor.value, newPath: targetPathEditor.value, manualName: true });
+    updateRenameItem(targetPathEditor.path, { newName: targetPathEditor.value, newPath: targetPathEditor.value, renderedTarget: targetPathEditor.value, manualName: true });
     setTargetPathEditor(null);
   }
 
@@ -672,11 +680,6 @@ export function App() {
     } finally {
       setApplyingBatchEpisode(false);
     }
-  }
-
-  function insertRenamePlaceholder(placeholder: string) {
-    setRenameTemplate((value) => value + placeholder);
-    setRenameTemplateEditorOpen(true);
   }
 
   async function applySelectedRenames() {
@@ -1058,11 +1061,7 @@ export function App() {
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <Toggle label="缺少 NFO 时查询 TMDB" checked={renameUseTmdb} onChange={setRenameUseTmdb} />
             </div>
-            <div className="placeholder-bar">
-              <span>点击插入占位符：</span>
-              {renamePlaceholders.map((placeholder) => <button className="secondary" type="button" key={placeholder} onClick={() => insertRenamePlaceholder(placeholder)}>{placeholder}</button>)}
-            </div>
-            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。模板可填写文件名或完整路径；占位符支持点击插入；{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
+            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。模板可填写文件名或完整路径；{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
           </Card>
 
           <Card title="重命名预览">
@@ -1118,8 +1117,8 @@ export function App() {
                       </td>
                       <td className="path-cell">{item.currentName}</td>
                       <td className="rename-target-cell">
-                        <button className="target-path-preview" type="button" title={item.newPath || item.newName || ''} onClick={() => setTargetPathEditor({ path: item.path, value: item.newPath || item.newName || '' })}>
-                          <RenameTargetPathDisplay value={item.newPath || item.newName || ''} />
+                        <button className="target-path-preview" type="button" title={getRenameTargetDisplayValue(item)} onClick={() => setTargetPathEditor({ path: item.path, value: getRenameTargetEditorValue(item) })}>
+                          <RenameTargetPathDisplay value={getRenameTargetDisplayValue(item)} />
                         </button>
                       </td>
                       <td className="path-cell">{item.conflict ? '目标文件已存在' : item.message || '-'}</td>

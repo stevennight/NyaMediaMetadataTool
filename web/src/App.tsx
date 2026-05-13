@@ -281,6 +281,7 @@ export function App() {
   const [batchEpisodeStart, setBatchEpisodeStart] = useState(1);
   const [applyingBatchEpisode, setApplyingBatchEpisode] = useState(false);
   const [targetPathEditor, setTargetPathEditor] = useState<{ path: string; value: string } | null>(null);
+  const [renameTemplateEditorOpen, setRenameTemplateEditorOpen] = useState(false);
   const [previewingRename, setPreviewingRename] = useState(false);
   const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; onSelect: (path: string) => void } | null>(null);
   const [newWatchDir, setNewWatchDir] = useState('');
@@ -297,7 +298,6 @@ export function App() {
   const [rescanning, setRescanning] = useState(false);
   const [error, setError] = useState<string>('');
   const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
-  const renameTemplateRef = useRef<HTMLInputElement | null>(null);
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
 
@@ -647,20 +647,8 @@ export function App() {
   }
 
   function insertRenamePlaceholder(placeholder: string) {
-    const input = renameTemplateRef.current;
-    if (!input) {
-      setRenameTemplate((value) => value + placeholder);
-      return;
-    }
-    const start = input.selectionStart ?? renameTemplate.length;
-    const end = input.selectionEnd ?? start;
-    const next = renameTemplate.slice(0, start) + placeholder + renameTemplate.slice(end);
-    setRenameTemplate(next);
-    requestAnimationFrame(() => {
-      input.focus();
-      const cursor = start + placeholder.length;
-      input.setSelectionRange(cursor, cursor);
-    });
+    setRenameTemplate((value) => value + placeholder);
+    setRenameTemplateEditorOpen(true);
   }
 
   async function applySelectedRenames() {
@@ -1032,7 +1020,7 @@ export function App() {
               <label>目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}>选择</button></div></label>
               <label>命名模板
                 <div className="template-input-row">
-                  <input ref={renameTemplateRef} value={renameTemplate} onChange={(event) => setRenameTemplate(event.target.value)} placeholder={defaultRenameTemplate} />
+                  <button className="target-path-preview rename-template-preview" type="button" onClick={() => setRenameTemplateEditorOpen(true)}>{renameTemplate || defaultRenameTemplate}</button>
                   <select value="" onChange={(event) => { if (event.target.value) setRenameTemplate(event.target.value); }} disabled={!renameTemplateHistory.length} title="最近模板">
                     <option value="">最近模板</option>
                     {renameTemplateHistory.map((template) => <option key={template} value={template}>{template}</option>)}
@@ -1197,6 +1185,7 @@ export function App() {
       )}
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onBrowsePath={() => setDirectoryPicker({ title: '选择补扫目录', value: rescanTarget, onSelect: setRescanTarget })} onSubmit={() => void rescan()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
+      {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} placeholders={renamePlaceholders} onChange={setRenameTemplate} onClose={() => setRenameTemplateEditorOpen(false)} />}
       {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
       </section>
@@ -1393,6 +1382,47 @@ function HistoryDetails(props: { batch: RenameHistoryBatch; undoCheck: RenameUnd
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function RenameTemplateEditorModal(props: { value: string; placeholders: string[]; onChange: (value: string) => void; onClose: () => void }) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  function insertPlaceholder(placeholder: string) {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      props.onChange(props.value + placeholder);
+      return;
+    }
+    const start = textarea.selectionStart ?? props.value.length;
+    const end = textarea.selectionEnd ?? start;
+    const next = props.value.slice(0, start) + placeholder + props.value.slice(end);
+    props.onChange(next);
+    requestAnimationFrame(() => {
+      textarea.focus();
+      const cursor = start + placeholder.length;
+      textarea.setSelectionRange(cursor, cursor);
+    });
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <section className="modal-card rename-template-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <h2>编辑命名模板</h2>
+          <button className="secondary" onClick={props.onClose}>关闭</button>
+        </div>
+        <textarea ref={textareaRef} value={props.value} onChange={(event) => props.onChange(event.target.value)} placeholder={defaultRenameTemplate} autoFocus />
+        <div className="placeholder-bar modal-placeholder-bar">
+          <span>插入占位符：</span>
+          {props.placeholders.map((placeholder) => <button className="secondary" type="button" key={placeholder} onClick={() => insertPlaceholder(placeholder)}>{placeholder}</button>)}
+        </div>
+        <p className="muted">可填写文件名、相对路径或完整路径；{'{season:00}'} / {'{episode:000}'} 可控制补零位数。</p>
+        <div className="inline-actions modal-actions">
+          <button onClick={props.onClose}>完成</button>
+        </div>
+      </section>
     </div>
   );
 }

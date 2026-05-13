@@ -214,6 +214,16 @@ input {
   padding: 9px 14px;
 }
 
+textarea {
+  min-width: 0;
+  border: 1px solid rgba(120, 113, 108, 0.28);
+  border-radius: 18px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  padding: 12px 14px;
+}
+
 select {
   min-width: 0;
   border: 1px solid rgba(120, 113, 108, 0.28);
@@ -498,6 +508,25 @@ button:disabled {
   white-space: nowrap;
   background: rgba(255, 255, 255, 0.72);
   border-color: rgba(120, 113, 108, 0.18);
+}
+
+.rename-template-preview {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.rename-template-modal {
+  width: min(1120px, 100%);
+}
+
+.rename-template-modal textarea {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.modal-placeholder-bar {
+  margin-top: 14px;
 }
 
 .target-path-modal textarea {

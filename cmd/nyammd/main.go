@@ -46,6 +46,12 @@ func main() {
 		logger.Error("reset running tasks", "error", err)
 		os.Exit(1)
 	}
+	dirs, err := db.ListWatchDirs(context.Background())
+	if err != nil {
+		logger.Error("load watch dirs", "error", err)
+		os.Exit(1)
+	}
+	cfg.WatchDirs = watchDirsFromStore(dirs)
 
 	if err := bootstrap.SyncAndScan(context.Background(), cfg, db, logger); err != nil {
 		logger.Error("bootstrap sync and scan", "error", err)
@@ -92,4 +98,12 @@ func main() {
 		logger.Error("shutdown server", "error", err)
 		os.Exit(1)
 	}
+}
+
+func watchDirsFromStore(dirs []store.WatchDir) []config.WatchDir {
+	result := make([]config.WatchDir, 0, len(dirs))
+	for _, dir := range dirs {
+		result = append(result, config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: dir.Enabled})
+	}
+	return result
 }

@@ -97,16 +97,6 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dirs, err := s.store.ListWatchDirs(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	next.WatchDirs = make([]config.WatchDir, 0, len(dirs))
-	for _, dir := range dirs {
-		next.WatchDirs = append(next.WatchDirs, config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: dir.Enabled})
-	}
-
 	if err := config.Save(s.configPath, next); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

@@ -15,7 +15,7 @@ type Config struct {
 	Tools      ToolsConfig      `json:"tools" yaml:"tools"`
 	Processing ProcessingConfig `json:"processing" yaml:"processing"`
 	Scraping   ScrapingConfig   `json:"scraping" yaml:"scraping"`
-	WatchDirs  []WatchDir       `json:"watchDirs" yaml:"watchDirs"`
+	WatchDirs  []WatchDir       `json:"-" yaml:"-"`
 }
 
 type ServerConfig struct {

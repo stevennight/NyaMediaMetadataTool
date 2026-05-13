@@ -26,10 +26,6 @@ type ScanOptions struct {
 }
 
 func SyncAndScan(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger) error {
-	if err := st.SyncWatchDirs(ctx, cfg.WatchDirs); err != nil {
-		return err
-	}
-
 	for _, dir := range cfg.WatchDirs {
 		if err := ScanWatchDir(ctx, cfg, st, logger, dir, ScanOptions{OverwriteExisting: cfg.Processing.OverwriteExisting}); err != nil {
 			logger.Warn("bootstrap scan failed", "path", dir.Path, "error", err)

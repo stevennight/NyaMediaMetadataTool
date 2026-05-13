@@ -67,15 +67,16 @@ func main() {
 		}
 	}()
 
+	taskRunner := runner.New(cfg, db, logger)
 	go func() {
-		if err := runner.New(cfg, db, logger).Run(serviceCtx); err != nil {
+		if err := taskRunner.Run(serviceCtx); err != nil {
 			logger.Error("runner stopped", "error", err)
 		}
 	}()
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
-		Handler:           api.NewServer(cfg, *configPath, db, logger),
+		Handler:           api.NewServer(cfg, *configPath, db, taskRunner, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

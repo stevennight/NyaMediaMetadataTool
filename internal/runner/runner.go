@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"NyaMediaMetadataTool/internal/config"
@@ -15,10 +16,22 @@ type Runner struct {
 	cfg    config.Config
 	store  *store.Store
 	logger *slog.Logger
+	mu     sync.Mutex
+	active map[int64]context.CancelFunc
 }
 
 func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Runner {
-	return &Runner{cfg: cfg, store: st, logger: logger}
+	return &Runner{cfg: cfg, store: st, logger: logger, active: make(map[int64]context.CancelFunc)}
+}
+
+func (r *Runner) CancelRunningTasks() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := len(r.active)
+	for _, cancel := range r.active {
+		cancel()
+	}
+	return count
 }
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -52,15 +65,41 @@ func (r *Runner) worker(ctx context.Context) {
 			continue
 		}
 
-		if err := r.processTask(ctx, task); err != nil {
+		taskCtx, cancel := context.WithCancel(ctx)
+		r.trackTask(task.ID, cancel)
+		err = r.processTask(taskCtx, task)
+		cancel()
+		r.untrackTask(task.ID)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				continue
+			}
+			if canceled, checkErr := r.store.IsTaskCanceled(ctx, task.ID); checkErr == nil && canceled {
+				continue
+			}
 			r.logger.Warn("process task failed", "taskID", task.ID, "error", err)
 			_ = r.store.AddTaskLog(ctx, task.ID, "error", "task failed", err.Error())
 			_ = r.store.FailTask(ctx, task.ID, err.Error())
 			continue
 		}
+		if canceled, checkErr := r.store.IsTaskCanceled(ctx, task.ID); checkErr == nil && canceled {
+			continue
+		}
 		_ = r.store.AddTaskLog(ctx, task.ID, "info", "task completed", "")
 		_ = r.store.CompleteTask(ctx, task.ID)
 	}
+}
+
+func (r *Runner) trackTask(taskID int64, cancel context.CancelFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.active[taskID] = cancel
+}
+
+func (r *Runner) untrackTask(taskID int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.active, taskID)
 }
 
 func (r *Runner) processTask(ctx context.Context, task store.Task) error {

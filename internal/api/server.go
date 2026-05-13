@@ -25,15 +25,21 @@ type Server struct {
 	cfg        config.Config
 	configPath string
 	store      *store.Store
+	tasks      TaskCanceller
 	logger     *slog.Logger
 	mux        *http.ServeMux
 }
 
-func NewServer(cfg config.Config, configPath string, store *store.Store, logger *slog.Logger) http.Handler {
+type TaskCanceller interface {
+	CancelRunningTasks() int
+}
+
+func NewServer(cfg config.Config, configPath string, store *store.Store, tasks TaskCanceller, logger *slog.Logger) http.Handler {
 	server := &Server{
 		cfg:        cfg,
 		configPath: configPath,
 		store:      store,
+		tasks:      tasks,
 		logger:     logger,
 		mux:        http.NewServeMux(),
 	}
@@ -52,6 +58,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/tools/status", s.handleToolsStatus)
 	s.mux.HandleFunc("POST /api/tools/check", s.handleToolsCheck)
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
+	s.mux.HandleFunc("POST /api/tasks/cancel-active", s.handleCancelActiveTasks)
 	s.mux.HandleFunc("GET /api/tasks/", s.handleTaskDetail)
 	s.mux.HandleFunc("GET /api/artifacts", s.handleArtifacts)
 	s.mux.HandleFunc("GET /api/fs/directories", s.handleListDirectories)
@@ -151,6 +158,19 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (s *Server) handleCancelActiveTasks(w http.ResponseWriter, r *http.Request) {
+	count, err := s.store.CancelActiveTasks(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	running := 0
+	if s.tasks != nil {
+		running = s.tasks.CancelRunningTasks()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "canceled", "count": count, "running": running})
 }
 
 func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {

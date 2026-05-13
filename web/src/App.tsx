@@ -292,6 +292,7 @@ export function App() {
   const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null);
   const [checkingTools, setCheckingTools] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
+  const [cancelingTasks, setCancelingTasks] = useState(false);
   const [notice, setNotice] = useState('');
   const [rescanning, setRescanning] = useState(false);
   const [error, setError] = useState<string>('');
@@ -838,6 +839,27 @@ export function App() {
     });
   }
 
+  async function cancelActiveTasks() {
+    if (!window.confirm('确定取消所有待执行和执行中的任务吗？')) return;
+    setCancelingTasks(true);
+    setError('');
+    setNotice('');
+    try {
+      const response = await fetch('/api/tasks/cancel-active', { method: 'POST' });
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const result = await response.json();
+      setNotice(`已取消 ${result.count ?? 0} 个待执行/执行中任务。`);
+      await loadTasks(taskPage);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '取消任务失败');
+    } finally {
+      setCancelingTasks(false);
+    }
+  }
+
   async function saveConfig() {
     if (!config) return;
     setSavingConfig(true);
@@ -1120,7 +1142,7 @@ export function App() {
 
         {activePage === 'tasks' && (
         <section className="page-grid task-page-grid">
-          <Card title="任务列表">
+          <Card title="任务列表" action={<button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button>}>
             <div className="task-filters">
               <label>路径<input value={taskPathFilter} onChange={(event) => setTaskPathFilter(event.target.value)} placeholder="输入路径关键字" /></label>
               <label>开始时间（{displayTimezone}）<input type="datetime-local" value={taskFromFilter} onChange={(event) => setTaskFromFilter(event.target.value)} /></label>
@@ -1146,7 +1168,7 @@ export function App() {
                   {tasks.length ? tasks.map((task) => (
                     <tr key={task.id} onClick={() => loadTaskDetail(task.id)}>
                       <td>#{task.id}</td>
-                      <td><span className={`pill ${task.status === 'completed' ? 'ok' : task.status === 'failed' ? 'bad' : ''}`}>{task.status}</span></td>
+                      <td><span className={`pill ${task.status === 'completed' ? 'ok' : task.status === 'failed' || task.status === 'canceled' ? 'bad' : ''}`}>{task.status}</span></td>
                       <td>{task.type}</td>
                       <td className="path-cell">{task.mediaPath || '-'}</td>
                       <td>{formatStoredTime(task.createdAt, displayTimezone)}</td>

@@ -81,11 +81,78 @@ WHERE status = 'running'
 	return err
 }
 
+func (s *Store) CancelActiveTasks(ctx context.Context) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+SELECT id
+FROM tasks
+WHERE status IN ('pending', 'running')
+`)
+	if err != nil {
+		return 0, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+UPDATE tasks
+SET status = 'canceled', error_summary = '已取消', finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+WHERE status IN ('pending', 'running')
+`); err != nil {
+		return 0, err
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO task_logs (task_id, level, message, detail)
+VALUES (?, 'info', 'task canceled', 'manual cancel')
+`, id); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
+func (s *Store) IsTaskCanceled(ctx context.Context, taskID int64) (bool, error) {
+	var status string
+	err := s.db.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&status)
+	if err != nil {
+		return false, err
+	}
+	return status == "canceled", nil
+}
+
 func (s *Store) CompleteTask(ctx context.Context, taskID int64) error {
 	_, err := s.db.ExecContext(ctx, `
 UPDATE tasks
 SET status = 'completed', error_summary = '', finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-WHERE id = ?
+WHERE id = ? AND status = 'running'
 `, taskID)
 	return err
 }
@@ -94,7 +161,7 @@ func (s *Store) FailTask(ctx context.Context, taskID int64, summary string) erro
 	_, err := s.db.ExecContext(ctx, `
 UPDATE tasks
 SET status = 'failed', error_summary = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-WHERE id = ?
+WHERE id = ? AND status = 'running'
 `, summary, taskID)
 	return err
 }

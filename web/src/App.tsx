@@ -243,6 +243,34 @@ function writeRenamePreferences(value: RenamePreferences) {
   }
 }
 
+function splitRenameTargetPath(value: string) {
+  const trimmed = value.trim();
+  const separatorIndex = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (separatorIndex >= 0 && separatorIndex < trimmed.length - 1) {
+    return {
+      dir: trimmed.slice(0, separatorIndex + 1),
+      name: trimmed.slice(separatorIndex + 1)
+    };
+  }
+  return { dir: '', name: trimmed };
+}
+
+function RenameTargetPathDisplay(props: { value: string }) {
+  const parts = splitRenameTargetPath(props.value);
+  if (!parts.name) return <>-</>;
+  if (!parts.dir) return <span className="target-path-name">{parts.name}</span>;
+
+  return (
+    <>
+      <span className="target-path-dir" title={parts.dir}>
+        <span className="target-path-dir-icon" aria-hidden="true" />
+        <span className="target-path-dir-text">{parts.dir}</span>
+      </span>
+      <span className="target-path-name">{parts.name}</span>
+    </>
+  );
+}
+
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -1090,7 +1118,9 @@ export function App() {
                       </td>
                       <td className="path-cell">{item.currentName}</td>
                       <td className="rename-target-cell">
-                        <button className="target-path-preview" type="button" onClick={() => setTargetPathEditor({ path: item.path, value: item.newPath || item.newName || '' })}>{item.newPath || item.newName || '-'}</button>
+                        <button className="target-path-preview" type="button" title={item.newPath || item.newName || ''} onClick={() => setTargetPathEditor({ path: item.path, value: item.newPath || item.newName || '' })}>
+                          <RenameTargetPathDisplay value={item.newPath || item.newName || ''} />
+                        </button>
                       </td>
                       <td className="path-cell">{item.conflict ? '目标文件已存在' : item.message || '-'}</td>
                       <td>
@@ -1388,6 +1418,13 @@ function HistoryDetails(props: { batch: RenameHistoryBatch; undoCheck: RenameUnd
 
 function RenameTemplateEditorModal(props: { value: string; placeholders: string[]; onChange: (value: string) => void; onClose: () => void }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.focus();
+    textarea.setSelectionRange(props.value.length, props.value.length);
+  }, []);
 
   function insertPlaceholder(placeholder: string) {
     const textarea = textareaRef.current;

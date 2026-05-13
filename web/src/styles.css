@@ -510,6 +510,66 @@ button:disabled {
   border-color: rgba(120, 113, 108, 0.18);
 }
 
+.rename-target-cell .target-path-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  white-space: normal;
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(120, 113, 108, 0.18);
+}
+
+.target-path-dir {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  min-width: 56px;
+  max-width: 100%;
+  gap: 6px;
+  padding: 4px 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.16);
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.target-path-dir-icon {
+  position: relative;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+  background: #d97706;
+}
+
+.target-path-dir-icon::before {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: 1px;
+  width: 7px;
+  height: 4px;
+  border-radius: 2px 2px 0 0;
+  background: #f59e0b;
+}
+
+.target-path-dir-text,
+.target-path-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-path-name {
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .rename-template-preview {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }

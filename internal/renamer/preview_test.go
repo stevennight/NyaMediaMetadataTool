@@ -1,8 +1,12 @@
 package renamer
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"NyaMediaMetadataTool/internal/config"
 )
 
 func TestTargetPathFromTemplatePreservesFilenameSuffixBeforeSourceExtension(t *testing.T) {
@@ -37,5 +41,43 @@ func TestFinalizeItemReturnsRenderedTargetBeforeSourceDirectoryJoin(t *testing.T
 	}
 	if item.NewPath != filepath.Join(filepath.Dir(source), want+".mp4") {
 		t.Fatalf("NewPath = %q, want joined source directory", item.NewPath)
+	}
+}
+
+func TestPreviewSkipsChildOfIgnoredDirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	seasonDir := filepath.Join(root, "Series", "Season 1")
+	videoPath := filepath.Join(seasonDir, "Series - S01E01.mkv")
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "Series", ".ignore"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(videoPath, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Preview(context.Background(), config.Default(), PreviewRequest{Path: seasonDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("expected 0 items, got %d", len(result.Items))
+	}
+}
+
+func TestParseEpisodeUsesShowDirectoryMetadata(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(`D:\Media`, "K (2012) [tmid-12345]", "Season 1", "S01E01.mkv")
+	parsed, ok := parseEpisode(path)
+	if !ok {
+		t.Fatal("expected episode to parse")
+	}
+	if parsed.show != "K" || parsed.year != "2012" || parsed.tmdbShowID != 12345 {
+		t.Fatalf("unexpected parsed episode: %+v", parsed)
 	}
 }

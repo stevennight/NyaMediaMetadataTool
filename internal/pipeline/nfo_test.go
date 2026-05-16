@@ -44,6 +44,33 @@ func TestParseEpisodeInfoReadsTMDBIDFromParentDirectory(t *testing.T) {
 	}
 }
 
+func TestParseEpisodeInfoReadsTMIDFromShowDirectory(t *testing.T) {
+	t.Parallel()
+
+	info, ok := parseEpisodeInfo(`D:\Media\K (2012) [tmid-12345]\Season 1\S01E01.mkv`)
+	if !ok {
+		t.Fatal("expected episode info to parse")
+	}
+	if info.TMDBShowID != 12345 {
+		t.Fatalf("unexpected tmdb show id: %d", info.TMDBShowID)
+	}
+	if info.Show != "K" {
+		t.Fatalf("unexpected show query: %s", info.Show)
+	}
+}
+
+func TestParseEpisodeInfoIgnoresTMDBIDOutsideShowDirectory(t *testing.T) {
+	t.Parallel()
+
+	info, ok := parseEpisodeInfo(`D:\Media [tmdbid-999]\K (2012)\Season 1\K - S01E01.mkv`)
+	if !ok {
+		t.Fatal("expected episode info to parse")
+	}
+	if info.TMDBShowID != 0 {
+		t.Fatalf("unexpected tmdb show id: %d", info.TMDBShowID)
+	}
+}
+
 func TestParseEpisodeInfoReadsYearFromParentDirectory(t *testing.T) {
 	t.Parallel()
 

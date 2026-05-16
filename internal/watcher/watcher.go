@@ -70,6 +70,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 }
 
 func (w *Watcher) addWatchDirs(fsw *fsnotify.Watcher, root string, recursive bool) error {
+	if hasIgnoreFileInAncestors(root) {
+		return nil
+	}
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -110,6 +113,10 @@ func (w *Watcher) handleEvent(ctx context.Context, fsw *fsnotify.Watcher, event 
 }
 
 func (w *Watcher) scheduleDirectory(ctx context.Context, root string) {
+	if hasIgnoreFileInAncestors(root) {
+		return
+	}
+
 	select {
 	case <-ctx.Done():
 		return

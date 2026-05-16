@@ -152,3 +152,45 @@ func TestSyncAndScanSkipsIgnoredDirectory(t *testing.T) {
 		t.Fatalf("expected 1 task, got %d", len(tasks))
 	}
 }
+
+func TestScanPathSkipsChildOfIgnoredDirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	seasonDir := filepath.Join(root, "Series", "Season 1")
+	videoPath := filepath.Join(seasonDir, "Series - S01E01.mkv")
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "Series", ".ignore"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(videoPath, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	if err := ScanPath(context.Background(), cfg, st, logger, seasonDir, ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	tasks, err := st.ListTasks(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("expected 0 tasks, got %d", len(tasks))
+	}
+}

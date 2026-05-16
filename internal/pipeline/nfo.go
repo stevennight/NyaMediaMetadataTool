@@ -24,7 +24,7 @@ import (
 
 var episodePattern = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,4})\b`)
 var seasonDirPattern = regexp.MustCompile(`(?i)^(season\s*\d{1,2}|s\d{1,2}|第\s*\d{1,2}\s*季)$`)
-var tmdbIDPattern = regexp.MustCompile(`(?i)[\[{(]\s*tmdb(?:id)?\s*[-=: ]\s*(\d+)\s*[\]})]`)
+var tmdbIDPattern = regexp.MustCompile(`(?i)[\[{(]\s*(?:tmdb(?:id)?|tmid)\s*[-=: ]\s*(\d+)\s*[\]})]`)
 var directoryYearPattern = regexp.MustCompile(`[\[{(]\s*(?:19|20)\d{2}\s*[\]})]`)
 
 type episodeInfo struct {
@@ -260,14 +260,15 @@ func parseEpisodeInfo(path string) (episodeInfo, bool) {
 	if err != nil {
 		return episodeInfo{}, false
 	}
-	return episodeInfo{Season: season, Episode: episode, Title: name, Show: parseShowName(path, name, match[0]), Year: parseDirectoryYearFromPath(path), TMDBShowID: parseTMDBShowIDFromPath(path)}, true
+	showDir := showDirectory(path)
+	return episodeInfo{Season: season, Episode: episode, Title: name, Show: parseShowName(path, name, match[0]), Year: parseDirectoryYearFromPath(showDir), TMDBShowID: parseTMDBShowIDFromPath(showDir)}, true
 }
 
 func parseShowName(path string, fileTitle string, episodeToken string) string {
 	show := strings.TrimSpace(fileTitle)
 	if episodeToken != "" {
 		index := strings.Index(strings.ToLower(show), strings.ToLower(episodeToken))
-		if index > 0 {
+		if index >= 0 {
 			show = show[:index]
 		}
 	}
@@ -275,7 +276,7 @@ func parseShowName(path string, fileTitle string, episodeToken string) string {
 	if show != "" {
 		return show
 	}
-	return cleanTMDBQuery(filepath.Base(filepath.Dir(path)))
+	return cleanTMDBQuery(filepath.Base(showDirectory(path)))
 }
 
 func cleanTMDBQuery(value string) string {
@@ -291,34 +292,30 @@ func cleanTMDBQuery(value string) string {
 }
 
 func parseTMDBShowIDFromPath(path string) int {
-	for dir := filepath.Dir(path); dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
-		match := tmdbIDPattern.FindStringSubmatch(filepath.Base(dir))
-		if len(match) == 2 {
-			id, err := strconv.Atoi(match[1])
-			if err == nil && id > 0 {
-				return id
-			}
-		}
-		next := filepath.Dir(dir)
-		if next == dir {
-			break
+	match := tmdbIDPattern.FindStringSubmatch(filepath.Base(path))
+	if len(match) == 2 {
+		id, err := strconv.Atoi(match[1])
+		if err == nil && id > 0 {
+			return id
 		}
 	}
 	return 0
 }
 
 func parseDirectoryYearFromPath(path string) string {
-	for dir := filepath.Dir(path); dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
-		match := directoryYearPattern.FindStringSubmatch(filepath.Base(dir))
-		if len(match) > 0 {
-			return strings.Trim(match[0], " []{}()")
-		}
-		next := filepath.Dir(dir)
-		if next == dir {
-			break
-		}
+	match := directoryYearPattern.FindStringSubmatch(filepath.Base(path))
+	if len(match) > 0 {
+		return strings.Trim(match[0], " []{}()")
 	}
 	return ""
+}
+
+func showDirectory(path string) string {
+	dir := filepath.Dir(path)
+	if seasonDirPattern.MatchString(filepath.Base(dir)) {
+		return filepath.Dir(dir)
+	}
+	return dir
 }
 
 func findTMDBEpisode(ctx context.Context, client *tmdb.Client, episode episodeInfo) (tmdb.Episode, error) {

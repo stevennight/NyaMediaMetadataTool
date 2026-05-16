@@ -22,8 +22,14 @@ import (
 const DefaultTemplate = "{show} - S{season:00}E{episode:00} - {title}"
 
 var episodePattern = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,4})\b`)
+var seasonDirPattern = regexp.MustCompile(`(?i)^(season\s*\d{1,2}|s\d{1,2}|第\s*\d{1,2}\s*季)$`)
+var tmdbIDPattern = regexp.MustCompile(`(?i)[\[{(]\s*(?:tmdb(?:id)?|tmid)\s*[-=: ]\s*(\d+)\s*[\]})]`)
+var directoryYearPattern = regexp.MustCompile(`[\[{(]\s*(?:19|20)\d{2}\s*[\]})]`)
 var placeholderPattern = regexp.MustCompile(`\{([a-z]+)(?::([^}]+))?\}`)
 var reservedNamePattern = regexp.MustCompile(`(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$`)
+
+const ignoreFileName = ".ignore"
+
 var sidecarExtensions = map[string]struct{}{
 	".nfo":  {},
 	".srt":  {},
@@ -134,6 +140,13 @@ func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, e
 	if err != nil {
 		return err
 	}
+	ignoreRoot := root
+	if !info.IsDir() {
+		ignoreRoot = filepath.Dir(root)
+	}
+	if hasIgnoreFileInAncestors(ignoreRoot) {
+		return nil
+	}
 
 	allowed := make(map[string]struct{}, len(cfg.Processing.Extensions))
 	for _, ext := range cfg.Processing.Extensions {
@@ -160,7 +173,13 @@ func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, e
 		addFile(root)
 	} else {
 		err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-			if err != nil || entry.IsDir() {
+			if err != nil {
+				return nil
+			}
+			if entry.IsDir() {
+				if hasIgnoreFile(path) {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			addFile(path)
@@ -308,7 +327,7 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 	}
 
 	if client != nil {
-		episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Season, item.Episode)
+		episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Year, item.Season, item.Episode)
 		if err != nil {
 			item.Status = "warning"
 			item.Message = err.Error()
@@ -359,6 +378,24 @@ func previewWorkerCount(configured int) int {
 		return 8
 	}
 	return configured
+}
+
+func hasIgnoreFile(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ignoreFileName))
+	return err == nil
+}
+
+func hasIgnoreFileInAncestors(dir string) bool {
+	for {
+		if hasIgnoreFile(dir) {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
 
 func applyRename(input ApplyItem) (PreviewItem, []RenameMove) {
@@ -510,7 +547,7 @@ func updateRenamedNFOReferences(path string, oldBase string, newBase string) {
 
 func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path string, template string) PreviewItem {
 	parsed, ok := parseEpisode(path)
-	item := PreviewItem{Path: path, CurrentName: filepath.Base(path), Show: parsed.show, Season: parsed.season, Episode: parsed.episode, Source: "filename", Status: "ok"}
+	item := PreviewItem{Path: path, CurrentName: filepath.Base(path), Show: parsed.show, Year: parsed.year, TMDBShowID: parsed.tmdbShowID, Season: parsed.season, Episode: parsed.episode, Source: "filename", Status: "ok"}
 	if !ok {
 		item.Status = "warning"
 		item.Message = "无法从文件名解析 SxxEyy"
@@ -536,7 +573,7 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 		item.Source = "nfo"
 	}
 	if client != nil {
-		if episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Season, item.Episode); err == nil {
+		if episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Year, item.Season, item.Episode); err == nil {
 			if !matchedNFO {
 				item.Show = firstNonEmpty(episode.ShowName, item.Show)
 				item.Title = episode.Title
@@ -555,11 +592,14 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 	return item
 }
 
-func findEpisode(ctx context.Context, client *tmdb.Client, tmdbShowID int, show string, season int, episode int) (tmdb.Episode, error) {
+func findEpisode(ctx context.Context, client *tmdb.Client, tmdbShowID int, show string, year string, season int, episode int) (tmdb.Episode, error) {
 	if tmdbShowID > 0 {
-		return client.FindEpisodeByShowIDStrictTitle(ctx, tmdbShowID, season, episode)
+		return client.FindEpisodeByShowID(ctx, tmdbShowID, season, episode)
 	}
-	return client.FindEpisodeStrictTitle(ctx, show, season, episode)
+	if strings.TrimSpace(year) != "" {
+		return client.FindEpisodeByYear(ctx, show, year, season, episode)
+	}
+	return client.FindEpisode(ctx, show, season, episode)
 }
 
 func finalizeItem(path string, template string, item *PreviewItem) {
@@ -649,9 +689,11 @@ func applyConflict(path string, item *PreviewItem) {
 }
 
 type parsedEpisode struct {
-	show    string
-	season  int
-	episode int
+	show       string
+	year       string
+	tmdbShowID int
+	season     int
+	episode    int
 }
 
 func parseEpisode(path string) (parsedEpisode, bool) {
@@ -668,12 +710,54 @@ func parseEpisode(path string) (parsedEpisode, bool) {
 	if err != nil {
 		return parsedEpisode{}, false
 	}
-	show := strings.TrimSpace(name[:strings.Index(strings.ToLower(name), strings.ToLower(match[0]))])
-	show = cleanQuery(show)
+	showDir := showDirectory(path)
+	show := parseShowName(path, name, match[0])
 	if show == "" {
-		show = cleanQuery(filepath.Base(filepath.Dir(path)))
+		show = cleanTMDBQuery(filepath.Base(showDir))
 	}
-	return parsedEpisode{show: show, season: season, episode: episode}, true
+	return parsedEpisode{show: show, year: parseDirectoryYearFromPath(showDir), tmdbShowID: parseTMDBShowIDFromPath(showDir), season: season, episode: episode}, true
+}
+
+func parseShowName(path string, fileTitle string, episodeToken string) string {
+	show := strings.TrimSpace(fileTitle)
+	if episodeToken != "" {
+		index := strings.Index(strings.ToLower(show), strings.ToLower(episodeToken))
+		if index >= 0 {
+			show = show[:index]
+		}
+	}
+	show = cleanTMDBQuery(show)
+	if show != "" {
+		return show
+	}
+	return cleanTMDBQuery(filepath.Base(showDirectory(path)))
+}
+
+func parseTMDBShowIDFromPath(path string) int {
+	match := tmdbIDPattern.FindStringSubmatch(filepath.Base(path))
+	if len(match) == 2 {
+		id, err := strconv.Atoi(match[1])
+		if err == nil && id > 0 {
+			return id
+		}
+	}
+	return 0
+}
+
+func parseDirectoryYearFromPath(path string) string {
+	match := directoryYearPattern.FindStringSubmatch(filepath.Base(path))
+	if len(match) > 0 {
+		return strings.Trim(match[0], " []{}()")
+	}
+	return ""
+}
+
+func showDirectory(path string) string {
+	dir := filepath.Dir(path)
+	if seasonDirPattern.MatchString(filepath.Base(dir)) {
+		return filepath.Dir(dir)
+	}
+	return dir
 }
 
 func readEpisodeNFO(mediaPath string) (episodeNFO, bool) {
@@ -767,6 +851,14 @@ func cleanQuery(value string) string {
 	value = strings.ReplaceAll(value, "_", " ")
 	value = strings.ReplaceAll(value, "-", " ")
 	return strings.Join(strings.Fields(value), " ")
+}
+
+func cleanTMDBQuery(value string) string {
+	value = strings.TrimSpace(value)
+	value = tmdbIDPattern.ReplaceAllString(value, "")
+	value = directoryYearPattern.ReplaceAllString(value, "")
+	value = strings.NewReplacer("(", " ", ")", " ", "[", " ", "]", " ", "{", " ", "}", " ").Replace(value)
+	return cleanQuery(value)
 }
 
 func yearFromDate(value string) string {

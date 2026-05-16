@@ -40,6 +40,9 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 	if !dir.Enabled {
 		return nil
 	}
+	if hasIgnoreFileInAncestors(dir.Path) {
+		return nil
+	}
 
 	allowed := make(map[string]struct{}, len(cfg.Processing.Extensions))
 	for _, ext := range cfg.Processing.Extensions {

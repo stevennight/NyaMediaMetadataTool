@@ -20,6 +20,7 @@ type AppConfig = {
     concurrency: number;
     bifWidth: number;
     bifInterval: number;
+    bifHwAccel: string;
     overwriteExisting: boolean;
     enableSubtitles: boolean;
     enableMediaInfo: boolean;
@@ -151,6 +152,7 @@ type BatchEpisodeMode = 'keep' | 'offset' | 'sequence';
 
 type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
+type SelectOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'rename';
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
 
@@ -213,6 +215,17 @@ const regionOptions: RegionOption[] = [
 ];
 
 const timeZoneOptions = ['Asia/Shanghai', 'Asia/Tokyo', 'UTC', 'America/Los_Angeles', 'America/New_York', 'Europe/London'];
+const bifHwAccelOptions: SelectOption[] = [
+  { code: 'cpu', name: 'CPU（最稳定）' },
+  { code: 'auto', name: '自动识别并回退' },
+  { code: 'nvidia', name: 'NVIDIA CUDA' },
+  { code: 'amd', name: 'AMD（D3D11VA/DXVA2/VAAPI）' },
+  { code: 'intel', name: 'Intel QSV' },
+  { code: 'd3d11va', name: 'Windows D3D11VA' },
+  { code: 'dxva2', name: 'Windows DXVA2' },
+  { code: 'vaapi', name: 'Linux VAAPI' },
+  { code: 'videotoolbox', name: 'macOS VideoToolbox' }
+];
 const taskStatusFilters: { value: TaskStatusFilter; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'pending', label: 'Pending' },
@@ -1107,6 +1120,7 @@ export function App() {
                   <label>并发数<input type="number" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
                   <label>BIF 宽度<input type="number" value={config.processing.bifWidth} onChange={(event) => updateConfig((draft) => { draft.processing.bifWidth = Number(event.target.value); })} /></label>
                   <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
+                  <SelectField label="BIF 加速" value={config.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => updateConfig((draft) => { draft.processing.bifHwAccel = value; })} />
                 </section>
                 <section className="settings-section">
                   <h3>处理开关</h3>
@@ -1687,7 +1701,7 @@ function Toggle(props: { label: string; checked: boolean; onChange: (value: bool
   );
 }
 
-function SelectField(props: { label: string; value: string; options: Array<{ code: string; name: string }>; onChange: (value: string) => void }) {
+function SelectField(props: { label: string; value: string; options: SelectOption[]; onChange: (value: string) => void }) {
   return (
     <label>
       {props.label}

@@ -41,6 +41,7 @@ type ProcessingConfig struct {
 	StableChecks        int           `json:"stableChecks" yaml:"stableChecks"`
 	BIFWidth            int           `json:"bifWidth" yaml:"bifWidth"`
 	BIFInterval         int           `json:"bifInterval" yaml:"bifInterval"`
+	BIFHWAccel          string        `json:"bifHwAccel" yaml:"bifHwAccel"`
 	OverwriteExisting   bool          `json:"overwriteExisting" yaml:"overwriteExisting"`
 	EnableSubtitles     bool          `json:"enableSubtitles" yaml:"enableSubtitles"`
 	EnableMediaInfo     bool          `json:"enableMediaInfo" yaml:"enableMediaInfo"`
@@ -134,6 +135,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Processing.BIFInterval <= 0 {
 		c.Processing.BIFInterval = 10
+	}
+	if c.Processing.BIFHWAccel == "" {
+		c.Processing.BIFHWAccel = "cpu"
 	}
 	if len(c.Processing.Extensions) == 0 {
 		c.Processing.Extensions = []string{".mkv", ".mp4", ".ts"}

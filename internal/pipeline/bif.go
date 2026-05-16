@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -40,20 +41,8 @@ func GenerateBIF(ctx context.Context, cfg config.Config, media store.MediaFile) 
 	}
 	defer os.RemoveAll(tempDir)
 
-	pattern := filepath.Join(tempDir, "frame-%06d.jpg")
-	args := []string{
-		"-y",
-		"-i", media.Path,
-		"-vf", fmt.Sprintf("fps=1/%d,scale=%d:-1", cfg.Processing.BIFInterval, cfg.Processing.BIFWidth),
-		"-q:v", "4",
-		pattern,
-	}
-	cmd := exec.CommandContext(ctx, cfg.Tools.FFmpeg, args...)
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
-	cmd.Stdout = io.Discard
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("bif ffmpeg: %w: %s", err, strings.TrimSpace(stderrBuf.String()))
+	if err := extractBIFFrames(ctx, cfg, media.Path, tempDir); err != nil {
+		return "", err
 	}
 
 	frames, err := filepath.Glob(filepath.Join(tempDir, "frame-*.jpg"))
@@ -72,6 +61,108 @@ func GenerateBIF(ctx context.Context, cfg config.Config, media store.MediaFile) 
 		return "", err
 	}
 	return outputPath, nil
+}
+
+func extractBIFFrames(ctx context.Context, cfg config.Config, mediaPath string, tempDir string) error {
+	pattern := filepath.Join(tempDir, "frame-%06d.jpg")
+	attempts := bifHWAccelAttempts(cfg.Processing.BIFHWAccel)
+	var failures []string
+	for _, attempt := range attempts {
+		if err := clearBIFFrames(tempDir); err != nil {
+			return err
+		}
+
+		args := bifFFmpegArgs(mediaPath, pattern, cfg.Processing.BIFInterval, cfg.Processing.BIFWidth, attempt)
+		cmd := exec.CommandContext(ctx, cfg.Tools.FFmpeg, args...)
+		var stderrBuf bytes.Buffer
+		cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+		cmd.Stdout = io.Discard
+		if err := cmd.Run(); err == nil {
+			return nil
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: %v: %s", attempt.name, err, strings.TrimSpace(stderrBuf.String())))
+		}
+	}
+	return fmt.Errorf("bif ffmpeg: %s", strings.Join(failures, "\n"))
+}
+
+type bifHWAccelAttempt struct {
+	name string
+	args []string
+}
+
+func bifFFmpegArgs(mediaPath string, pattern string, interval int, width int, hw bifHWAccelAttempt) []string {
+	args := []string{"-y"}
+	args = append(args, hw.args...)
+	args = append(args,
+		"-i", mediaPath,
+		"-vf", fmt.Sprintf("fps=1/%d,scale=%d:-1", interval, width),
+		"-q:v", "4",
+		pattern,
+	)
+	return args
+}
+
+func bifHWAccelAttempts(mode string) []bifHWAccelAttempt {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "cpu", "none", "off", "software":
+		return []bifHWAccelAttempt{cpuBIFAttempt()}
+	case "auto":
+		return append(autoBIFHWAccelAttempts(), cpuBIFAttempt())
+	case "nvidia", "cuda":
+		return []bifHWAccelAttempt{hwBIFAttempt("cuda"), cpuBIFAttempt()}
+	case "intel", "qsv":
+		return []bifHWAccelAttempt{hwBIFAttempt("qsv"), cpuBIFAttempt()}
+	case "amd":
+		return append(amdBIFHWAccelAttempts(), cpuBIFAttempt())
+	case "d3d11va", "dxva2", "vaapi", "videotoolbox":
+		return []bifHWAccelAttempt{hwBIFAttempt(strings.ToLower(strings.TrimSpace(mode))), cpuBIFAttempt()}
+	default:
+		return []bifHWAccelAttempt{cpuBIFAttempt()}
+	}
+}
+
+func autoBIFHWAccelAttempts() []bifHWAccelAttempt {
+	switch runtime.GOOS {
+	case "windows":
+		return []bifHWAccelAttempt{hwBIFAttempt("d3d11va"), hwBIFAttempt("dxva2")}
+	case "darwin":
+		return []bifHWAccelAttempt{hwBIFAttempt("videotoolbox")}
+	default:
+		return []bifHWAccelAttempt{hwBIFAttempt("vaapi")}
+	}
+}
+
+func amdBIFHWAccelAttempts() []bifHWAccelAttempt {
+	switch runtime.GOOS {
+	case "windows":
+		return []bifHWAccelAttempt{hwBIFAttempt("d3d11va"), hwBIFAttempt("dxva2")}
+	case "darwin":
+		return []bifHWAccelAttempt{hwBIFAttempt("videotoolbox")}
+	default:
+		return []bifHWAccelAttempt{hwBIFAttempt("vaapi")}
+	}
+}
+
+func cpuBIFAttempt() bifHWAccelAttempt {
+	return bifHWAccelAttempt{name: "cpu"}
+}
+
+func hwBIFAttempt(name string) bifHWAccelAttempt {
+	return bifHWAccelAttempt{name: name, args: []string{"-hwaccel", name}}
+}
+
+func clearBIFFrames(tempDir string) error {
+	frames, err := filepath.Glob(filepath.Join(tempDir, "frame-*.jpg"))
+	if err != nil {
+		return err
+	}
+	for _, frame := range frames {
+		if err := os.Remove(frame); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func bifOutputPath(mediaPath string, width int, interval int) string {

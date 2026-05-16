@@ -21,6 +21,7 @@ processing:
   stableChecks: 2
   bifWidth: 320
   bifInterval: 10
+  bifHwAccel: cpu
   overwriteExisting: false
   enableSubtitles: true
   enableMediaInfo: true

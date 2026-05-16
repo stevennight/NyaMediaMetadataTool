@@ -62,3 +62,45 @@ func TestWriteBIF(t *testing.T) {
 		t.Fatalf("unexpected second timestamp: %d", secondTimestamp)
 	}
 }
+
+func TestBIFHWAccelAttempts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		mode string
+		want string
+	}{
+		{mode: "cpu", want: "cpu"},
+		{mode: "none", want: "cpu"},
+		{mode: "nvidia", want: "cuda"},
+		{mode: "cuda", want: "cuda"},
+		{mode: "intel", want: "qsv"},
+		{mode: "qsv", want: "qsv"},
+		{mode: "d3d11va", want: "d3d11va"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.mode, func(t *testing.T) {
+			t.Parallel()
+			attempts := bifHWAccelAttempts(test.mode)
+			if len(attempts) == 0 {
+				t.Fatal("expected at least one attempt")
+			}
+			if attempts[0].name != test.want {
+				t.Fatalf("unexpected first attempt: want %s got %s", test.want, attempts[0].name)
+			}
+		})
+	}
+}
+
+func TestBIFFFmpegArgsIncludesHWAccelBeforeInput(t *testing.T) {
+	t.Parallel()
+
+	args := bifFFmpegArgs("input.mkv", "frame-%06d.jpg", 10, 320, hwBIFAttempt("d3d11va"))
+	want := []string{"-y", "-hwaccel", "d3d11va", "-i", "input.mkv"}
+	for idx, value := range want {
+		if args[idx] != value {
+			t.Fatalf("unexpected arg at %d: want %s got %s", idx, value, args[idx])
+		}
+	}
+}

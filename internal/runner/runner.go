@@ -3,7 +3,9 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +13,8 @@ import (
 	"NyaMediaMetadataTool/internal/pipeline"
 	"NyaMediaMetadataTool/internal/store"
 )
+
+const maxTaskAttempts = 3
 
 type Runner struct {
 	cfg    config.Config
@@ -79,6 +83,14 @@ func (r *Runner) worker(ctx context.Context) {
 			}
 			r.logger.Warn("process task failed", "taskID", task.ID, "error", err)
 			_ = r.store.AddTaskLog(ctx, task.ID, "error", "task failed", err.Error())
+			if task.Attempts < maxTaskAttempts {
+				_ = r.store.AddTaskLog(ctx, task.ID, "warning", "task retry scheduled", fmt.Sprintf("attempt %d/%d", task.Attempts+1, maxTaskAttempts))
+				if retryErr := r.store.RetryTask(ctx, task.ID, err.Error()); retryErr == nil {
+					continue
+				} else {
+					r.logger.Warn("retry task failed", "taskID", task.ID, "error", retryErr)
+				}
+			}
 			_ = r.store.FailTask(ctx, task.ID, err.Error())
 			continue
 		}
@@ -112,6 +124,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	if err != nil {
 		return err
 	}
+	failures := make([]string, 0)
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "processing started", media.Path)
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate mediainfo", "")
@@ -176,6 +189,10 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 		if nfoResult.TMDBStatus != "" {
 			_ = r.store.AddTaskLog(ctx, task.ID, "info", "tmdb "+nfoResult.TMDBStatus, tmdbLogDetail(nfoResult))
 		}
+		for _, failure := range nfoResult.Failures {
+			_ = r.store.AddTaskLog(ctx, task.ID, "error", "nfo artifact failed", failure)
+			failures = append(failures, failure)
+		}
 	} else {
 		_ = r.store.AddTaskLog(ctx, task.ID, "info", "nfo skipped", "")
 	}
@@ -209,11 +226,19 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 				return err
 			}
 		}
+		level := "info"
+		if image.Status == "failed" {
+			level = "error"
+			failures = append(failures, image.Detail)
+		}
 		detail := image.Path
 		if image.Detail != "" {
 			detail = image.Detail
 		}
-		_ = r.store.AddTaskLog(ctx, task.ID, "info", image.Type+" "+image.Status, detail)
+		_ = r.store.AddTaskLog(ctx, task.ID, level, image.Type+" "+image.Status, detail)
+	}
+	if len(failures) > 0 {
+		return errors.New("artifact generation failed: " + strings.Join(failures, "; "))
 	}
 	return r.store.TouchMediaProcessed(ctx, media.ID)
 }

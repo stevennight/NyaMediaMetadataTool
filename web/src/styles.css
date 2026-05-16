@@ -366,6 +366,22 @@ button:disabled {
   background: rgba(245, 158, 11, 0.08);
 }
 
+.task-table tbody tr.selected {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.task-table tbody tr.selected:hover {
+  background: rgba(59, 130, 246, 0.14);
+}
+
+.task-table th:first-child,
+.task-table td:first-child,
+.task-table th:last-child,
+.task-table td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
 .rename-controls {
   display: grid;
   grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) minmax(180px, 0.55fr) minmax(220px, 0.6fr);

@@ -42,6 +42,7 @@ type NFOResult struct {
 	ShowNFOPath   string
 	SeasonNFOPath string
 	Images        []ImageArtifact
+	Failures      []string
 	TMDBStatus    string
 	TMDBDetail    string
 	TMDBShowName  string
@@ -193,6 +194,7 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 	if !cfg.Processing.OverwriteExisting {
 		if _, err := os.Stat(outputPath); err == nil {
 			result := NFOResult{Path: outputPath, TMDBStatus: "skipped", TMDBDetail: "nfo already exists"}
+			ensureEpisodeThumbOnly(ctx, cfg, episode, &result)
 			return result, nil
 		}
 	}
@@ -391,8 +393,12 @@ func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInf
 		if err == nil && thumbPath != "" {
 			result.ThumbPath = thumbPath
 			doc.Thumb = filepath.Base(thumbPath)
-		} else if err != nil && result.TMDBDetail == "" {
-			result.TMDBDetail = "thumb download failed: " + err.Error()
+		} else if err != nil {
+			detail := "thumb download failed: " + err.Error()
+			if result.TMDBDetail == "" {
+				result.TMDBDetail = detail
+			}
+			result.Failures = append(result.Failures, detail)
 		}
 	}
 	for _, actor := range detail.Actors {
@@ -413,7 +419,38 @@ func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInf
 	}
 }
 
+func ensureEpisodeThumbOnly(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult) {
+	thumbPath := strings.TrimSuffix(result.Path, filepath.Ext(result.Path)) + "-thumb.jpg"
+	if !cfg.Processing.OverwriteExisting && fileExists(thumbPath) {
+		result.ThumbPath = thumbPath
+		return
+	}
+
+	client, err := tmdb.NewClient(cfg.Scraping)
+	if err != nil {
+		return
+	}
+	detail, err := findTMDBEpisode(ctx, client, episode)
+	if err != nil || detail.StillPath == "" {
+		return
+	}
+	thumbPath, err = ensureEpisodeThumb(ctx, cfg, result.Path, client.ImageURL(detail.StillPath))
+	if err == nil && thumbPath != "" {
+		result.ThumbPath = thumbPath
+	} else if err != nil {
+		result.Failures = append(result.Failures, "thumb download failed: "+err.Error())
+	}
+}
+
 func applyTMDBShowAndSeason(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult) {
+	showPath := filepath.Join(showNFOBaseDir(result.Path), "tvshow.nfo")
+	seasonPath := filepath.Join(filepath.Dir(result.Path), "season.nfo")
+	writeShow := cfg.Processing.OverwriteExisting || !fileExists(showPath)
+	writeSeason := cfg.Processing.OverwriteExisting || !fileExists(seasonPath)
+	if !writeShow && !writeSeason {
+		return
+	}
+
 	client, err := tmdb.NewClient(cfg.Scraping)
 	if err != nil {
 		return
@@ -426,18 +463,25 @@ func applyTMDBShowAndSeason(ctx context.Context, cfg config.Config, episode epis
 		return
 	}
 
-	showPath := filepath.Join(showNFOBaseDir(result.Path), "tvshow.nfo")
-	seasonPath := filepath.Join(filepath.Dir(result.Path), "season.nfo")
-	if err := upsertTVShowNFO(showPath, cfg, client, show); err == nil {
-		result.ShowNFOPath = showPath
-	} else if result.TMDBDetail == "" {
-		result.TMDBDetail = "tvshow nfo failed: " + err.Error()
+	if writeShow {
+		if err := upsertTVShowNFO(showPath, cfg, client, show); err == nil {
+			result.ShowNFOPath = showPath
+		} else if result.TMDBDetail == "" {
+			result.TMDBDetail = "tvshow nfo failed: " + err.Error()
+		}
 	}
-	if err := upsertSeasonNFO(seasonPath, cfg, client, season); err == nil {
-		result.SeasonNFOPath = seasonPath
-	} else if result.TMDBDetail == "" {
-		result.TMDBDetail = "season nfo failed: " + err.Error()
+	if writeSeason {
+		if err := upsertSeasonNFO(seasonPath, cfg, client, season); err == nil {
+			result.SeasonNFOPath = seasonPath
+		} else if result.TMDBDetail == "" {
+			result.TMDBDetail = "season nfo failed: " + err.Error()
+		}
 	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult) {
@@ -496,9 +540,12 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 		}
 		path, status, err := ensureImageFile(ctx, cfg, item.Path, urls[index])
 		if err != nil {
+			detail := item.Type + " image failed: " + err.Error()
 			if result.TMDBDetail == "" {
-				result.TMDBDetail = item.Type + " image failed: " + err.Error()
+				result.TMDBDetail = detail
 			}
+			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: item.Path, Status: "failed", Detail: detail})
+			result.Failures = append(result.Failures, detail)
 			continue
 		}
 		if path != "" {

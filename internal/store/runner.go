@@ -166,6 +166,54 @@ WHERE id = ? AND status = 'running'
 	return err
 }
 
+func (s *Store) RetryTask(ctx context.Context, taskID int64, summary string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET status = 'pending', error_summary = ?, started_at = NULL, finished_at = NULL, updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND status = 'running'
+`, summary, taskID)
+	return err
+}
+
+func (s *Store) RetryTasks(ctx context.Context, taskIDs []int64) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	count := 0
+	for _, taskID := range taskIDs {
+		result, err := tx.ExecContext(ctx, `
+UPDATE tasks
+SET status = 'pending', attempts = 0, error_summary = '', started_at = NULL, finished_at = NULL, updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND status IN ('failed', 'canceled') AND media_file_id IS NOT NULL
+`, taskID)
+		if err != nil {
+			return 0, err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if rows == 0 {
+			continue
+		}
+		count++
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO task_logs (task_id, level, message, detail)
+VALUES (?, 'info', 'task manually retried', '')
+`, taskID); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (s *Store) GetMediaFileByID(ctx context.Context, id int64) (MediaFile, error) {
 	var media MediaFile
 	var modifiedAt string

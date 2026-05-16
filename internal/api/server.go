@@ -59,6 +59,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tools/check", s.handleToolsCheck)
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
 	s.mux.HandleFunc("POST /api/tasks/cancel-active", s.handleCancelActiveTasks)
+	s.mux.HandleFunc("POST /api/tasks/retry", s.handleRetryTasks)
 	s.mux.HandleFunc("GET /api/tasks/", s.handleTaskDetail)
 	s.mux.HandleFunc("GET /api/artifacts", s.handleArtifacts)
 	s.mux.HandleFunc("GET /api/fs/directories", s.handleListDirectories)
@@ -172,6 +173,27 @@ func (s *Server) handleCancelActiveTasks(w http.ResponseWriter, r *http.Request)
 		running = s.tasks.CancelRunningTasks()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "canceled", "count": count, "running": running})
+}
+
+func (s *Server) handleRetryTasks(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		IDs []int64 `json:"ids"`
+	}
+	var input request
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(input.IDs) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("ids are required"))
+		return
+	}
+	count, err := s.store.RetryTasks(r.Context(), input.IDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "queued", "count": count})
 }
 
 func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {

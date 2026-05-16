@@ -2,22 +2,16 @@ package bootstrap
 
 import (
 	"context"
-	"errors"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/store"
 )
-
-var episodePattern = regexp.MustCompile(`(?i)s\d{1,2}e\d{1,4}\b`)
-var seasonDirPattern = regexp.MustCompile(`(?i)^(season\s*\d{1,2}|s\d{1,2}|第\s*\d{1,2}\s*季)$`)
 
 const ignoreFileName = ".ignore"
 
@@ -83,10 +77,6 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 			return nil
 		}
 
-		if options.MissingOnly && !hasMissingOutputs(cfg, path) {
-			return nil
-		}
-
 		if err := st.EnqueueMediaTaskWithOptions(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly); err != nil {
 			logger.Warn("enqueue media task failed", "path", path, "error", err)
 		}
@@ -113,40 +103,11 @@ func ScanPath(ctx context.Context, cfg config.Config, st *store.Store, logger *s
 	if _, ok := allowed[strings.ToLower(filepath.Ext(path))]; !ok {
 		return nil
 	}
-	if options.MissingOnly && !hasMissingOutputs(cfg, path) {
-		return nil
-	}
 	mediaFileID, err := st.UpsertMediaFile(ctx, path, info)
 	if err != nil {
 		return err
 	}
 	return st.EnqueueMediaTaskWithOptions(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly)
-}
-
-func hasMissingOutputs(cfg config.Config, mediaPath string) bool {
-	base := strings.TrimSuffix(mediaPath, filepath.Ext(mediaPath))
-	if cfg.Processing.EnableMediaInfo && missing(base+"-mediainfo.json") {
-		return true
-	}
-	if cfg.Processing.EnableBIF && missing(base+"-"+strconv.Itoa(cfg.Processing.BIFWidth)+"-"+strconv.Itoa(cfg.Processing.BIFInterval)+".bif") {
-		return true
-	}
-	if cfg.Processing.EnableNFO {
-		if missing(base + ".nfo") {
-			return true
-		}
-		if episodePattern.MatchString(filepath.Base(mediaPath)) {
-			if missing(filepath.Join(showBaseDir(base), "tvshow.nfo")) || missing(filepath.Join(filepath.Dir(mediaPath), "season.nfo")) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func missing(path string) bool {
-	_, err := os.Stat(path)
-	return errors.Is(err, os.ErrNotExist)
 }
 
 func hasIgnoreFile(dir string) bool {
@@ -165,14 +126,6 @@ func hasIgnoreFileInAncestors(dir string) bool {
 		}
 		dir = parent
 	}
-}
-
-func showBaseDir(basePath string) string {
-	dir := filepath.Dir(basePath)
-	if seasonDirPattern.MatchString(filepath.Base(dir)) {
-		return filepath.Dir(dir)
-	}
-	return dir
 }
 
 func isStable(modifiedAt time.Time, delay time.Duration) bool {

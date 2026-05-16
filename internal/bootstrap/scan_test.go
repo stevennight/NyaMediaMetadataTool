@@ -194,3 +194,56 @@ func TestScanPathSkipsChildOfIgnoredDirectory(t *testing.T) {
 		t.Fatalf("expected 0 tasks, got %d", len(tasks))
 	}
 }
+
+func TestScanPathMissingOnlyEnqueuesProcessedMedia(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	videoPath := filepath.Join(root, "Series - S01E01.mkv")
+	if err := os.WriteFile(videoPath, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(videoPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(videoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mediaFileID, err := st.UpsertMediaFile(context.Background(), videoPath, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.TouchMediaProcessed(context.Background(), mediaFileID); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	if err := ScanPath(context.Background(), cfg, st, logger, videoPath, ScanOptions{MissingOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	tasks, err := st.ListTasks(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].OverwriteExisting {
+		t.Fatal("missing-only task should not overwrite existing outputs")
+	}
+}

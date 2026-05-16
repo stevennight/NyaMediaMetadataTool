@@ -84,7 +84,7 @@ func (c *Client) GetTVImages(ctx context.Context, tvdbID int, season int, langua
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return TVImages{}, err
+		return TVImages{}, fmt.Errorf("fanart request failed: %s", c.redact(err.Error()))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -101,6 +101,16 @@ func (c *Client) GetTVImages(ctx context.Context, tvdbID int, season int, langua
 		ClearArt:     chooseImage(append(parsed.ClearArt, parsed.HDTVClearArt...), languages),
 		SeasonPoster: chooseSeasonImage(parsed.SeasonPoster, season, languages),
 	}, nil
+}
+
+func (c *Client) redact(value string) string {
+	apiKey := strings.TrimSpace(c.apiKey)
+	if apiKey == "" {
+		return value
+	}
+	value = strings.ReplaceAll(value, apiKey, "<redacted>")
+	value = strings.ReplaceAll(value, url.QueryEscape(apiKey), "<redacted>")
+	return value
 }
 
 func chooseImage(images []imageItem, languages []string) string {

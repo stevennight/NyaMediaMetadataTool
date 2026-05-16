@@ -355,14 +355,17 @@ export function App() {
   const [rescanTarget, setRescanTarget] = useState('');
   const [rescanStrategy, setRescanStrategy] = useState<RescanStrategy>('missing');
   const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([]);
   const [checkingTools, setCheckingTools] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [cancelingTasks, setCancelingTasks] = useState(false);
+  const [retryingTasks, setRetryingTasks] = useState(false);
   const [notice, setNotice] = useState('');
   const [rescanning, setRescanning] = useState(false);
   const [error, setError] = useState<string>('');
   const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
+  const lastTaskSelectionIndexRef = useRef<number | null>(null);
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
 
   useEffect(() => {
@@ -434,11 +437,14 @@ export function App() {
       setTasks(value);
       setTaskTotal(value.length);
       setTaskPage(1);
+      setSelectedTaskIds((ids) => ids.filter((id) => value.some((task) => task.id === id)));
       return;
     }
-    setTasks(asArray<Task>(value?.items));
+    const items = asArray<Task>(value?.items);
+    setTasks(items);
     setTaskTotal(value?.total ?? 0);
     setTaskPage(value?.page ?? 1);
+    setSelectedTaskIds((ids) => ids.filter((id) => items.some((task) => task.id === id)));
   }
 
   async function loadTasks(page = taskPage, status = taskStatusFilter) {
@@ -901,6 +907,64 @@ export function App() {
     });
   }
 
+  function toggleTaskSelection(id: number, checked: boolean, shiftKey = false) {
+    const index = tasks.findIndex((task) => task.id === id);
+    setSelectedTaskIds((ids) => {
+      if (shiftKey && lastTaskSelectionIndexRef.current !== null && index >= 0) {
+        const start = lastTaskSelectionIndexRef.current;
+        if (start >= 0) {
+          const [from, to] = start < index ? [start, index] : [index, start];
+          const range = tasks.slice(from, to + 1).map((task) => task.id);
+          return checked ? [...new Set([...ids, ...range])] : ids.filter((item) => !range.includes(item));
+        }
+      }
+      return checked ? [...new Set([...ids, id])] : ids.filter((item) => item !== id);
+    });
+    if (index >= 0) lastTaskSelectionIndexRef.current = index;
+  }
+
+  function handleTaskRowClick(event: ReactMouseEvent<HTMLTableRowElement>, task: Task, index: number) {
+    const target = event.target as HTMLElement;
+    if (target.closest('input, button, select, textarea, a')) return;
+    const selected = selectedTaskIds.includes(task.id);
+    if (event.shiftKey && lastTaskSelectionIndexRef.current !== null) {
+      const [from, to] = lastTaskSelectionIndexRef.current < index ? [lastTaskSelectionIndexRef.current, index] : [index, lastTaskSelectionIndexRef.current];
+      const range = tasks.slice(from, to + 1).map((entry) => entry.id);
+      setSelectedTaskIds((ids) => selected ? ids.filter((id) => !range.includes(id)) : [...new Set([...ids, ...range])]);
+      return;
+    }
+    setSelectedTaskIds((ids) => selected ? ids.filter((id) => id !== task.id) : [...new Set([...ids, task.id])]);
+    lastTaskSelectionIndexRef.current = index;
+  }
+
+  async function retrySelectedTasks() {
+    if (!selectedTaskIds.length) {
+      setError('请先勾选要重试的任务');
+      return;
+    }
+    setRetryingTasks(true);
+    setError('');
+    try {
+      const response = await fetch('/api/tasks/retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedTaskIds })
+      });
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const result = await response.json();
+      setNotice(`已重新排队 ${result.count ?? 0} 个任务。`);
+      setSelectedTaskIds([]);
+      await loadTasks(taskPage);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '重试任务失败');
+    } finally {
+      setRetryingTasks(false);
+    }
+  }
+
   async function cancelActiveTasks() {
     if (!window.confirm('确定取消所有待执行和执行中的任务吗？')) return;
     setCancelingTasks(true);
@@ -1202,7 +1266,7 @@ export function App() {
 
         {activePage === 'tasks' && (
         <section className="page-grid task-page-grid">
-          <Card title="任务列表" action={<button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button>}>
+          <Card title="任务列表" action={<div className="inline-actions"><button className="secondary" onClick={() => void retrySelectedTasks()} disabled={retryingTasks || selectedTaskIds.length === 0}>{retryingTasks ? '重试中' : `重试选中${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button></div>}>
             <div className="task-status-tabs" role="tablist" aria-label="任务状态过滤">
               {taskStatusFilters.map((status) => (
                 <button className={taskStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} role="tab" aria-selected={taskStatusFilter === status.value} onClick={() => selectTaskStatusFilter(status.value)}>
@@ -1223,26 +1287,30 @@ export function App() {
               <table className="task-table">
                 <thead>
                   <tr>
+                    <th><input type="checkbox" aria-label="选择当前页任务" checked={tasks.length > 0 && tasks.every((task) => selectedTaskIds.includes(task.id))} onChange={(event) => setSelectedTaskIds(event.target.checked ? tasks.map((task) => task.id) : [])} /></th>
                     <th>ID</th>
                     <th>状态</th>
                     <th>类型</th>
                     <th>路径</th>
                     <th>创建时间</th>
                     <th>错误</th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {tasks.length ? tasks.map((task) => (
-                    <tr key={task.id} onClick={() => loadTaskDetail(task.id)}>
+                  {tasks.length ? tasks.map((task, index) => (
+                    <tr key={task.id} className={selectedTaskIds.includes(task.id) ? 'selected' : ''} onClick={(event) => handleTaskRowClick(event, task, index)}>
+                      <td><input type="checkbox" aria-label={`选择任务 ${task.id}`} checked={selectedTaskIds.includes(task.id)} onChange={(event) => toggleTaskSelection(task.id, event.target.checked, (event.nativeEvent as MouseEvent).shiftKey)} /></td>
                       <td>#{task.id}</td>
                       <td><span className={taskStatusPillClass(task.status)}>{task.status}</span></td>
                       <td>{task.type}</td>
                       <td className="path-cell">{task.mediaPath || '-'}</td>
                       <td>{formatStoredTime(task.createdAt, displayTimezone)}</td>
                       <td className="path-cell">{task.errorSummary || '-'}</td>
+                      <td><button className="secondary" type="button" onClick={() => void loadTaskDetail(task.id)}>详情</button></td>
                     </tr>
                   )) : (
-                    <tr><td colSpan={6} className="empty-cell">暂无任务。</td></tr>
+                    <tr><td colSpan={8} className="empty-cell">暂无任务。</td></tr>
                   )}
                 </tbody>
               </table>

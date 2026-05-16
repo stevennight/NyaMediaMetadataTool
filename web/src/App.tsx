@@ -306,6 +306,20 @@ function taskStatusPillClass(status: string) {
   }
 }
 
+function logLevelPillClass(level: string) {
+  switch (level) {
+    case 'error':
+      return 'pill bad';
+    case 'warning':
+    case 'warn':
+      return 'pill warn';
+    case 'debug':
+      return 'pill pending';
+    default:
+      return 'pill ok';
+  }
+}
+
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -1389,10 +1403,13 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
         <h3>日志</h3>
         {asArray<TaskLog>(props.detail.logs).length ? asArray<TaskLog>(props.detail.logs).map((log) => (
           <div className="log-line" key={log.id}>
-            <span className={`pill ${log.level === 'error' ? 'bad' : 'ok'}`}>{log.level}</span>
-            <div>
-              <strong>{log.message}</strong>
-              <small>{log.detail || formatStoredTime(log.createdAt, props.timezone)}</small>
+            <span className={logLevelPillClass(log.level)}>{log.level}</span>
+            <div className="log-body">
+              <div className="log-meta">
+                <strong>{log.message}</strong>
+                <time>{formatStoredTime(log.createdAt, props.timezone)}</time>
+              </div>
+              {log.detail && <pre>{log.detail}</pre>}
             </div>
           </div>
         )) : <p className="muted">暂无日志。</p>}

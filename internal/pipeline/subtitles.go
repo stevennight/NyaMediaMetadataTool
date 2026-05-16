@@ -79,10 +79,10 @@ func listSubtitleStreams(ctx context.Context, cfg config.Config, mediaPath strin
 
 	runCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(runCtx, cfg.Tools.FFprobe, "-v", "quiet", "-print_format", "json", "-show_streams", mediaPath)
-	output, err := cmd.Output()
+	cmd := exec.CommandContext(runCtx, cfg.Tools.FFprobe, "-v", "error", "-print_format", "json", "-show_streams", mediaPath)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list subtitle streams: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 
 	var parsed ffprobeStreams

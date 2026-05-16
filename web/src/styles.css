@@ -796,21 +796,54 @@ h3 {
 
 .log-line {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
   padding: 10px 0;
   border-top: 1px solid rgba(120, 113, 108, 0.16);
 }
 
-.log-line strong,
-.log-line small {
-  display: block;
+.log-line .pill {
+  align-self: start;
+  justify-self: start;
+  width: 68px;
+  min-height: 0;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.log-body {
+  min-width: 0;
+}
+
+.log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: baseline;
+}
+
+.log-meta strong {
   overflow-wrap: anywhere;
 }
 
-.log-line small {
+.log-meta time {
   color: #78716c;
-  margin-top: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.log-line pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(28, 25, 23, 0.05);
+  color: #57534e;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .form-row {

@@ -297,6 +297,26 @@ button:disabled {
   margin-bottom: 18px;
 }
 
+.task-status-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.status-tab {
+  padding: 8px 14px;
+  color: #57534e;
+  background: rgba(245, 245, 244, 0.82);
+  border-color: rgba(120, 113, 108, 0.18);
+}
+
+.status-tab.active {
+  color: #1f2937;
+  background: rgba(251, 191, 36, 0.22);
+  border-color: rgba(217, 119, 6, 0.42);
+}
+
 .task-filters label {
   display: grid;
   gap: 6px;
@@ -874,6 +894,21 @@ h3 {
 .pill.bad {
   background: #fee2e2;
   color: #991b1b;
+}
+
+.pill.warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.pill.running {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.pill.pending {
+  background: #e5e7eb;
+  color: #4b5563;
 }
 
 .error-card {

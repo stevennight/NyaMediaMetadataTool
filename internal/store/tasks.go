@@ -43,6 +43,7 @@ type TaskListFilters struct {
 	Page     int
 	PageSize int
 	Path     string
+	Status   string
 	From     string
 	To       string
 }
@@ -133,6 +134,10 @@ func buildTaskWhere(filters TaskListFilters) (string, []any) {
 	if path := strings.TrimSpace(filters.Path); path != "" {
 		clauses = append(clauses, "media_files.path LIKE ?")
 		args = append(args, "%"+path+"%")
+	}
+	if status := strings.TrimSpace(filters.Status); status != "" && status != "all" {
+		clauses = append(clauses, "tasks.status = ?")
+		args = append(args, status)
 	}
 	if from := strings.TrimSpace(filters.From); from != "" {
 		clauses = append(clauses, "tasks.created_at >= ?")

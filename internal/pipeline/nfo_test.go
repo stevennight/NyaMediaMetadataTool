@@ -32,6 +32,39 @@ func TestParseEpisodeInfoSupportsFourDigitEpisodes(t *testing.T) {
 	}
 }
 
+func TestParseEpisodeInfoReadsTMDBIDFromParentDirectory(t *testing.T) {
+	t.Parallel()
+
+	info, ok := parseEpisodeInfo(`D:\Media\K (2012) [tmdbid-12345]\Season 1\K - S01E01.mkv`)
+	if !ok {
+		t.Fatal("expected episode info to parse")
+	}
+	if info.TMDBShowID != 12345 {
+		t.Fatalf("unexpected tmdb show id: %d", info.TMDBShowID)
+	}
+}
+
+func TestParseEpisodeInfoReadsYearFromParentDirectory(t *testing.T) {
+	t.Parallel()
+
+	info, ok := parseEpisodeInfo(`D:\Media\K (2012)\Season 1\K - S01E01.mkv`)
+	if !ok {
+		t.Fatal("expected episode info to parse")
+	}
+	if info.Year != "2012" {
+		t.Fatalf("unexpected year: %s", info.Year)
+	}
+}
+
+func TestCleanTMDBQueryRemovesDirectoryID(t *testing.T) {
+	t.Parallel()
+
+	got := cleanTMDBQuery("K (2012) [tmdbid-12345]")
+	if got != "K" {
+		t.Fatalf("unexpected cleaned query: %s", got)
+	}
+}
+
 func TestParseEpisodeInfoRejectsPartialFourDigitEpisode(t *testing.T) {
 	t.Parallel()
 

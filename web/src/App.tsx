@@ -152,6 +152,7 @@ type BatchEpisodeMode = 'keep' | 'offset' | 'sequence';
 type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'rename';
+type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
 
 const pagePaths: Record<PageKey, string> = {
   dashboard: '/',
@@ -212,6 +213,15 @@ const regionOptions: RegionOption[] = [
 ];
 
 const timeZoneOptions = ['Asia/Shanghai', 'Asia/Tokyo', 'UTC', 'America/Los_Angeles', 'America/New_York', 'Europe/London'];
+const taskStatusFilters: { value: TaskStatusFilter; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'pending', label: 'Pending' },
+  { value: 'running', label: 'Running' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'canceled', label: 'Canceled' }
+];
+const taskListRefreshIntervalMs = 5000;
 const defaultRenameTemplate = '{show} - S{season:00}E{episode:00} - {title}';
 const renamePlaceholders = ['{show}', '{season:00}', '{episode:00}', '{title}', '{year}'];
 const renamePreferencesKey = 'nya.rename.preferences';
@@ -279,6 +289,23 @@ function getRenameTargetEditorValue(item: RenamePreviewItem) {
   return item.renderedTarget || item.newPath || item.newName || '';
 }
 
+function taskStatusPillClass(status: string) {
+  switch (status) {
+    case 'completed':
+      return 'pill ok';
+    case 'failed':
+      return 'pill bad';
+    case 'canceled':
+      return 'pill warn';
+    case 'running':
+      return 'pill running';
+    case 'pending':
+      return 'pill pending';
+    default:
+      return 'pill';
+  }
+}
+
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -287,6 +314,7 @@ export function App() {
   const [taskTotal, setTaskTotal] = useState(0);
   const [taskPage, setTaskPage] = useState(1);
   const [taskPageSize] = useState(20);
+  const [taskStatusFilter, setTaskStatusFilter] = useState<TaskStatusFilter>('all');
   const [taskPathFilter, setTaskPathFilter] = useState('');
   const [taskFromFilter, setTaskFromFilter] = useState('');
   const [taskToFilter, setTaskToFilter] = useState('');
@@ -413,9 +441,10 @@ export function App() {
     setTaskPage(value?.page ?? 1);
   }
 
-  async function loadTasks(page = taskPage) {
+  async function loadTasks(page = taskPage, status = taskStatusFilter) {
     const params = new URLSearchParams({ page: String(page), pageSize: String(taskPageSize) });
     if (taskPathFilter.trim()) params.set('path', taskPathFilter.trim());
+    if (status !== 'all') params.set('status', status);
     if (taskFromFilter) params.set('from', zonedInputToUTC(taskFromFilter, displayTimezone, false));
     if (taskToFilter) params.set('to', zonedInputToUTC(taskToFilter, displayTimezone, true));
     const response = await fetch(`/api/tasks?${params.toString()}`);
@@ -426,11 +455,25 @@ export function App() {
     applyTaskList(await response.json());
   }
 
+  useEffect(() => {
+    if (activePage !== 'tasks') return;
+    const interval = window.setInterval(() => {
+      void loadTasks(taskPage, taskStatusFilter);
+    }, taskListRefreshIntervalMs);
+    return () => window.clearInterval(interval);
+  }, [activePage, taskPage, taskStatusFilter, taskPageSize, taskPathFilter, taskFromFilter, taskToFilter, displayTimezone]);
+
   function resetTaskFilters() {
+    setTaskStatusFilter('all');
     setTaskPathFilter('');
     setTaskFromFilter('');
     setTaskToFilter('');
     void loadTasksWithoutFilters();
+  }
+
+  function selectTaskStatusFilter(status: TaskStatusFilter) {
+    setTaskStatusFilter(status);
+    void loadTasks(1, status);
   }
 
   async function loadTasksWithoutFilters() {
@@ -1160,6 +1203,13 @@ export function App() {
         {activePage === 'tasks' && (
         <section className="page-grid task-page-grid">
           <Card title="任务列表" action={<button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button>}>
+            <div className="task-status-tabs" role="tablist" aria-label="任务状态过滤">
+              {taskStatusFilters.map((status) => (
+                <button className={taskStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} role="tab" aria-selected={taskStatusFilter === status.value} onClick={() => selectTaskStatusFilter(status.value)}>
+                  {status.label}
+                </button>
+              ))}
+            </div>
             <div className="task-filters">
               <label>路径<input value={taskPathFilter} onChange={(event) => setTaskPathFilter(event.target.value)} placeholder="输入路径关键字" /></label>
               <label>开始时间（{displayTimezone}）<input type="datetime-local" value={taskFromFilter} onChange={(event) => setTaskFromFilter(event.target.value)} /></label>
@@ -1185,7 +1235,7 @@ export function App() {
                   {tasks.length ? tasks.map((task) => (
                     <tr key={task.id} onClick={() => loadTaskDetail(task.id)}>
                       <td>#{task.id}</td>
-                      <td><span className={`pill ${task.status === 'completed' ? 'ok' : task.status === 'failed' || task.status === 'canceled' ? 'bad' : ''}`}>{task.status}</span></td>
+                      <td><span className={taskStatusPillClass(task.status)}>{task.status}</span></td>
                       <td>{task.type}</td>
                       <td className="path-cell">{task.mediaPath || '-'}</td>
                       <td>{formatStoredTime(task.createdAt, displayTimezone)}</td>

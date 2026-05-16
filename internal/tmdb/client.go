@@ -245,12 +245,20 @@ func (c *Client) SearchTV(ctx context.Context, query string) ([]SearchResult, er
 }
 
 func (c *Client) FindEpisode(ctx context.Context, showQuery string, season int, episode int) (Episode, error) {
+	return c.findEpisode(ctx, showQuery, "", season, episode)
+}
+
+func (c *Client) FindEpisodeByYear(ctx context.Context, showQuery string, year string, season int, episode int) (Episode, error) {
+	return c.findEpisode(ctx, showQuery, year, season, episode)
+}
+
+func (c *Client) findEpisode(ctx context.Context, showQuery string, year string, season int, episode int) (Episode, error) {
 	showQuery = strings.TrimSpace(showQuery)
 	if showQuery == "" {
 		return Episode{}, errors.New("tmdb show query is empty")
 	}
 
-	show, err := c.searchTV(ctx, showQuery)
+	show, err := c.searchTV(ctx, showQuery, year)
 	if err != nil {
 		return Episode{}, err
 	}
@@ -327,7 +335,7 @@ func (c *Client) FindEpisodeStrictTitle(ctx context.Context, showQuery string, s
 		return Episode{}, errors.New("tmdb show query is empty")
 	}
 
-	show, err := c.searchTV(ctx, showQuery)
+	show, err := c.searchTV(ctx, showQuery, "")
 	if err != nil {
 		return Episode{}, err
 	}
@@ -384,12 +392,20 @@ func (c *Client) episodeFromDetails(ctx context.Context, showID int, showName st
 }
 
 func (c *Client) FindShowAndSeason(ctx context.Context, showQuery string, season int) (Show, Season, error) {
+	return c.findShowAndSeason(ctx, showQuery, "", season)
+}
+
+func (c *Client) FindShowAndSeasonByYear(ctx context.Context, showQuery string, year string, season int) (Show, Season, error) {
+	return c.findShowAndSeason(ctx, showQuery, year, season)
+}
+
+func (c *Client) findShowAndSeason(ctx context.Context, showQuery string, year string, season int) (Show, Season, error) {
 	showQuery = strings.TrimSpace(showQuery)
 	if showQuery == "" {
 		return Show{}, Season{}, errors.New("tmdb show query is empty")
 	}
 
-	showMatch, err := c.searchTV(ctx, showQuery)
+	showMatch, err := c.searchTV(ctx, showQuery, year)
 	if err != nil {
 		return Show{}, Season{}, err
 	}
@@ -401,18 +417,33 @@ func (c *Client) FindShowAndSeason(ctx context.Context, showQuery string, season
 	if err != nil {
 		return Show{}, Season{}, err
 	}
-	seasonDetail, err := c.getSeasonWithFallback(ctx, showMatch.ID, season)
+	return c.showAndSeasonFromDetails(ctx, showMatch.ID, firstNonEmpty(showMatch.Name, showMatch.OriginalName), showMatch.FirstAirDate, showDetail, season)
+}
+
+func (c *Client) FindShowAndSeasonByShowID(ctx context.Context, showID int, season int) (Show, Season, error) {
+	if showID == 0 {
+		return Show{}, Season{}, errors.New("tmdb show id is empty")
+	}
+	showDetail, err := c.getShowWithFallback(ctx, showID)
+	if err != nil {
+		return Show{}, Season{}, err
+	}
+	return c.showAndSeasonFromDetails(ctx, showID, "", "", showDetail, season)
+}
+
+func (c *Client) showAndSeasonFromDetails(ctx context.Context, showID int, fallbackName string, fallbackFirstAirDate string, showDetail showResponse, season int) (Show, Season, error) {
+	seasonDetail, err := c.getSeasonWithFallback(ctx, showID, season)
 	if err != nil {
 		return Show{}, Season{}, err
 	}
 	var showCredits episodeCredits
 	var seasonCredits episodeCredits
 	if c.people {
-		showCredits, err = c.getShowCredits(ctx, showMatch.ID)
+		showCredits, err = c.getShowCredits(ctx, showID)
 		if err != nil {
 			return Show{}, Season{}, err
 		}
-		seasonCredits, err = c.getSeasonCredits(ctx, showMatch.ID, season)
+		seasonCredits, err = c.getSeasonCredits(ctx, showID, season)
 		if err != nil {
 			return Show{}, Season{}, err
 		}
@@ -427,10 +458,10 @@ func (c *Client) FindShowAndSeason(ctx context.Context, showQuery string, season
 
 	return Show{
 			ID:               showDetail.ID,
-			Name:             firstNonEmpty(showDetail.Name, showDetail.OriginalName, showMatch.Name, showMatch.OriginalName),
+			Name:             firstNonEmpty(showDetail.Name, showDetail.OriginalName, fallbackName),
 			OriginalLanguage: showDetail.OriginalLanguage,
 			Overview:         showDetail.Overview,
-			FirstAirDate:     showDetail.FirstAirDate,
+			FirstAirDate:     firstNonEmpty(showDetail.FirstAirDate, fallbackFirstAirDate),
 			Status:           showDetail.Status,
 			VoteAverage:      showDetail.VoteAverage,
 			Genres:           genres,
@@ -451,7 +482,26 @@ func (c *Client) FindShowAndSeasonImages(ctx context.Context, showQuery string, 
 	if err != nil {
 		return Show{}, Season{}, err
 	}
+	return c.showAndSeasonImages(ctx, show, seasonDetail, season, preferOriginalLanguagePoster)
+}
 
+func (c *Client) FindShowAndSeasonImagesByYear(ctx context.Context, showQuery string, year string, season int, preferOriginalLanguagePoster bool) (Show, Season, error) {
+	show, seasonDetail, err := c.FindShowAndSeasonByYear(ctx, showQuery, year, season)
+	if err != nil {
+		return Show{}, Season{}, err
+	}
+	return c.showAndSeasonImages(ctx, show, seasonDetail, season, preferOriginalLanguagePoster)
+}
+
+func (c *Client) FindShowAndSeasonImagesByShowID(ctx context.Context, showID int, season int, preferOriginalLanguagePoster bool) (Show, Season, error) {
+	show, seasonDetail, err := c.FindShowAndSeasonByShowID(ctx, showID, season)
+	if err != nil {
+		return Show{}, Season{}, err
+	}
+	return c.showAndSeasonImages(ctx, show, seasonDetail, season, preferOriginalLanguagePoster)
+}
+
+func (c *Client) showAndSeasonImages(ctx context.Context, show Show, seasonDetail Season, season int, preferOriginalLanguagePoster bool) (Show, Season, error) {
 	languagePriority := c.imageLanguagePriority(show.OriginalLanguage, preferOriginalLanguagePoster)
 	showImages, err := c.getShowImages(ctx, show.ID, languagePriority)
 	if err != nil {
@@ -470,10 +520,17 @@ func (c *Client) FindShowAndSeasonImages(ctx context.Context, showQuery string, 
 	return show, seasonDetail, nil
 }
 
-func (c *Client) searchTV(ctx context.Context, query string) (tvSearchResult, error) {
+func (c *Client) searchTV(ctx context.Context, query string, year string) (tvSearchResult, error) {
+	params := url.Values{"query": {query}}
+	if strings.TrimSpace(year) != "" {
+		params.Set("first_air_date_year", strings.TrimSpace(year))
+	}
 	var parsed searchTVResponse
-	if err := c.get(ctx, c.language, "/search/tv", url.Values{"query": {query}}, &parsed); err != nil {
+	if err := c.get(ctx, c.language, "/search/tv", params, &parsed); err != nil {
 		return tvSearchResult{}, err
+	}
+	if len(parsed.Results) == 0 && strings.TrimSpace(year) != "" {
+		return c.searchTV(ctx, query, "")
 	}
 	if len(parsed.Results) == 0 {
 		return tvSearchResult{}, nil

@@ -24,12 +24,16 @@ import (
 
 var episodePattern = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,4})\b`)
 var seasonDirPattern = regexp.MustCompile(`(?i)^(season\s*\d{1,2}|s\d{1,2}|第\s*\d{1,2}\s*季)$`)
+var tmdbIDPattern = regexp.MustCompile(`(?i)[\[{(]\s*tmdb(?:id)?\s*[-=: ]\s*(\d+)\s*[\]})]`)
+var directoryYearPattern = regexp.MustCompile(`[\[{(]\s*(?:19|20)\d{2}\s*[\]})]`)
 
 type episodeInfo struct {
-	Season  int
-	Episode int
-	Title   string
-	Show    string
+	Season     int
+	Episode    int
+	Title      string
+	Show       string
+	Year       string
+	TMDBShowID int
 }
 
 type NFOResult struct {
@@ -256,7 +260,7 @@ func parseEpisodeInfo(path string) (episodeInfo, bool) {
 	if err != nil {
 		return episodeInfo{}, false
 	}
-	return episodeInfo{Season: season, Episode: episode, Title: name, Show: parseShowName(path, name, match[0])}, true
+	return episodeInfo{Season: season, Episode: episode, Title: name, Show: parseShowName(path, name, match[0]), Year: parseDirectoryYearFromPath(path), TMDBShowID: parseTMDBShowIDFromPath(path)}, true
 }
 
 func parseShowName(path string, fileTitle string, episodeToken string) string {
@@ -276,11 +280,75 @@ func parseShowName(path string, fileTitle string, episodeToken string) string {
 
 func cleanTMDBQuery(value string) string {
 	value = strings.TrimSpace(value)
+	value = tmdbIDPattern.ReplaceAllString(value, "")
+	value = directoryYearPattern.ReplaceAllString(value, "")
 	value = strings.Trim(value, " .-_[]()")
 	value = strings.ReplaceAll(value, ".", " ")
 	value = strings.ReplaceAll(value, "_", " ")
 	value = strings.ReplaceAll(value, "-", " ")
+	value = strings.NewReplacer("(", " ", ")", " ", "[", " ", "]", " ", "{", " ", "}", " ").Replace(value)
 	return strings.Join(strings.Fields(value), " ")
+}
+
+func parseTMDBShowIDFromPath(path string) int {
+	for dir := filepath.Dir(path); dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
+		match := tmdbIDPattern.FindStringSubmatch(filepath.Base(dir))
+		if len(match) == 2 {
+			id, err := strconv.Atoi(match[1])
+			if err == nil && id > 0 {
+				return id
+			}
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			break
+		}
+	}
+	return 0
+}
+
+func parseDirectoryYearFromPath(path string) string {
+	for dir := filepath.Dir(path); dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
+		match := directoryYearPattern.FindStringSubmatch(filepath.Base(dir))
+		if len(match) > 0 {
+			return strings.Trim(match[0], " []{}()")
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			break
+		}
+	}
+	return ""
+}
+
+func findTMDBEpisode(ctx context.Context, client *tmdb.Client, episode episodeInfo) (tmdb.Episode, error) {
+	if episode.TMDBShowID > 0 {
+		return client.FindEpisodeByShowID(ctx, episode.TMDBShowID, episode.Season, episode.Episode)
+	}
+	if episode.Year != "" {
+		return client.FindEpisodeByYear(ctx, episode.Show, episode.Year, episode.Season, episode.Episode)
+	}
+	return client.FindEpisode(ctx, episode.Show, episode.Season, episode.Episode)
+}
+
+func findTMDBShowAndSeason(ctx context.Context, client *tmdb.Client, episode episodeInfo) (tmdb.Show, tmdb.Season, error) {
+	if episode.TMDBShowID > 0 {
+		return client.FindShowAndSeasonByShowID(ctx, episode.TMDBShowID, episode.Season)
+	}
+	if episode.Year != "" {
+		return client.FindShowAndSeasonByYear(ctx, episode.Show, episode.Year, episode.Season)
+	}
+	return client.FindShowAndSeason(ctx, episode.Show, episode.Season)
+}
+
+func findTMDBShowAndSeasonImages(ctx context.Context, client *tmdb.Client, episode episodeInfo, preferOriginalLanguagePoster bool) (tmdb.Show, tmdb.Season, error) {
+	if episode.TMDBShowID > 0 {
+		return client.FindShowAndSeasonImagesByShowID(ctx, episode.TMDBShowID, episode.Season, preferOriginalLanguagePoster)
+	}
+	if episode.Year != "" {
+		return client.FindShowAndSeasonImagesByYear(ctx, episode.Show, episode.Year, episode.Season, preferOriginalLanguagePoster)
+	}
+	return client.FindShowAndSeasonImages(ctx, episode.Show, episode.Season, preferOriginalLanguagePoster)
 }
 
 func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInfo, doc *episodeNFO, result *NFOResult) {
@@ -290,7 +358,7 @@ func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInf
 		result.TMDBDetail = err.Error()
 		return
 	}
-	detail, err := client.FindEpisode(ctx, episode.Show, episode.Season, episode.Episode)
+	detail, err := findTMDBEpisode(ctx, client, episode)
 	if err != nil {
 		result.TMDBStatus = "failed"
 		result.TMDBDetail = err.Error()
@@ -353,7 +421,7 @@ func applyTMDBShowAndSeason(ctx context.Context, cfg config.Config, episode epis
 	if err != nil {
 		return
 	}
-	show, season, err := client.FindShowAndSeason(ctx, episode.Show, episode.Season)
+	show, season, err := findTMDBShowAndSeason(ctx, client, episode)
 	if err != nil {
 		if result.TMDBDetail == "" {
 			result.TMDBDetail = "show/season failed: " + err.Error()
@@ -383,7 +451,7 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 	if err != nil {
 		return
 	}
-	show, season, err := client.FindShowAndSeasonImages(ctx, episode.Show, episode.Season, cfg.Scraping.PreferOriginalLanguagePoster)
+	show, season, err := findTMDBShowAndSeasonImages(ctx, client, episode, cfg.Scraping.PreferOriginalLanguagePoster)
 	if err != nil {
 		if result.TMDBDetail == "" {
 			result.TMDBDetail = "show/season images failed: " + err.Error()

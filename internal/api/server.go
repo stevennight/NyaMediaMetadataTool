@@ -149,6 +149,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		Page:     page,
 		PageSize: pageSize,
 		Path:     r.URL.Query().Get("path"),
+		Status:   r.URL.Query().Get("status"),
 		From:     r.URL.Query().Get("from"),
 		To:       r.URL.Query().Get("to"),
 	}

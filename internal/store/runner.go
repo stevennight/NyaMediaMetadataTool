@@ -258,20 +258,48 @@ WHERE id = ?
 	return err
 }
 
-func (s *Store) ClaimScanScope(ctx context.Context, scanRunID string, scopeType string, scopeKey string) (bool, error) {
+func (s *Store) ClaimScanScope(ctx context.Context, scanRunID string, scopeType string, scopeKey string, taskID int64) (bool, error) {
 	if scanRunID == "" || scopeType == "" || scopeKey == "" {
 		return true, nil
 	}
-	result, err := s.db.ExecContext(ctx, `
-INSERT OR IGNORE INTO scan_scopes (scan_run_id, scope_type, scope_key)
-VALUES (?, ?, ?)
-`, scanRunID, scopeType, scopeKey)
+	_, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO scan_scopes (scan_run_id, scope_type, scope_key, task_id)
+VALUES (?, ?, ?, ?)
+`, scanRunID, scopeType, scopeKey, taskID)
 	if err != nil {
 		return false, err
 	}
-	rows, err := result.RowsAffected()
+	var owner int64
+	err = s.db.QueryRowContext(ctx, `
+SELECT task_id
+FROM scan_scopes
+WHERE scan_run_id = ? AND scope_type = ? AND scope_key = ?
+`, scanRunID, scopeType, scopeKey).Scan(&owner)
 	if err != nil {
 		return false, err
 	}
-	return rows > 0, nil
+	return owner == taskID, nil
+}
+
+func (s *Store) MarkTaskStageSucceeded(ctx context.Context, taskID int64, stage string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO task_stage_successes (task_id, stage)
+VALUES (?, ?)
+`, taskID, stage)
+	return err
+}
+
+func (s *Store) HasTaskStageSucceeded(ctx context.Context, taskID int64, stage string) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS(
+  SELECT 1
+  FROM task_stage_successes
+  WHERE task_id = ? AND stage = ?
+)
+`, taskID, stage).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
 }

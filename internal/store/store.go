@@ -63,7 +63,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureTaskOverwriteColumn(ctx); err != nil {
 		return err
 	}
-	return s.ensureTaskScanRunColumn(ctx)
+	if err := s.ensureTaskScanRunColumn(ctx); err != nil {
+		return err
+	}
+	return s.ensureScanScopeTaskColumn(ctx)
 }
 
 func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
@@ -74,8 +77,16 @@ func (s *Store) ensureTaskScanRunColumn(ctx context.Context) error {
 	return s.ensureTaskColumn(ctx, "scan_run_id", `ALTER TABLE tasks ADD COLUMN scan_run_id TEXT NOT NULL DEFAULT ''`)
 }
 
+func (s *Store) ensureScanScopeTaskColumn(ctx context.Context) error {
+	return s.ensureColumn(ctx, "scan_scopes", "task_id", `ALTER TABLE scan_scopes ADD COLUMN task_id INTEGER NOT NULL DEFAULT 0`)
+}
+
 func (s *Store) ensureTaskColumn(ctx context.Context, column string, statement string) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(tasks)`)
+	return s.ensureColumn(ctx, "tasks", column, statement)
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table string, column string, statement string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
 		return err
 	}
@@ -150,8 +161,18 @@ CREATE TABLE IF NOT EXISTS scan_scopes (
   scan_run_id TEXT NOT NULL,
   scope_type TEXT NOT NULL,
   scope_key TEXT NOT NULL,
+  task_id INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(scan_run_id, scope_type, scope_key)
+);
+
+CREATE TABLE IF NOT EXISTS task_stage_successes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  stage TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(task_id, stage),
+  FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS task_logs (

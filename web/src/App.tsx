@@ -17,6 +17,7 @@ type AppConfig = {
   };
   processing: {
     extensions: string[];
+    episodePatterns: string[];
     concurrency: number;
     bifWidth: number;
     bifInterval: number;
@@ -108,6 +109,7 @@ type RenamePreviewItem = {
   newPath: string;
   renderedTarget: string;
   show: string;
+  showOriginal: string;
   title: string;
   season: number;
   episode: number;
@@ -120,6 +122,7 @@ type RenamePreviewItem = {
   conflict: boolean;
   sanitizedTitle: string;
   manualName: boolean;
+  releaseGroup: string;
 };
 
 type TMDBSearchResult = {
@@ -237,7 +240,16 @@ const taskStatusFilters: { value: TaskStatusFilter; label: string }[] = [
 ];
 const taskListRefreshIntervalMs = 5000;
 const defaultRenameTemplate = '{show} - S{season:00}E{episode:00} - {title}';
-const renamePlaceholders = ['{show}', '{season:00}', '{episode:00}', '{title}', '{year}'];
+const renamePlaceholders = [
+  '{show}',
+  '{showOriginal}',
+  '{title}',
+  '{releaseGroup}',
+  '{tmid}',
+  '{season}',
+  '{episode}',
+  '{year}'
+];
 const renamePreferencesKey = 'nya.rename.preferences';
 const renameTemplateHistoryLimit = 20;
 
@@ -1049,6 +1061,7 @@ export function App() {
   }
 
   const extensionInput = config?.processing.extensions?.join('\n') ?? '';
+  const episodePatternInput = config?.processing.episodePatterns?.join('\n') ?? '';
 
   return (
     <main className="app-shell">
@@ -1083,6 +1096,7 @@ export function App() {
             <Row label="数据库" value={config?.database.path ?? '-'} />
             <Row label="并发数" value={String(config?.processing.concurrency ?? '-')} />
             <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
+            <Row label="自定义集数正则" value={config?.processing.episodePatterns?.length ? `${config.processing.episodePatterns.length} 条` : '未设置'} />
             <Row label="TMDB 地址" value={config?.scraping.tmdbBaseUrl ?? '-'} />
             <Row label="字幕提取" value={config?.processing.enableSubtitles ? '开启' : '关闭'} />
             <Row label="MediaInfo" value={config?.processing.enableMediaInfo ? '开启' : '关闭'} />
@@ -1121,6 +1135,7 @@ export function App() {
                   <label>mkvextract<input value={config.tools.mkvextract} onChange={(event) => updateConfig((draft) => { draft.tools.mkvextract = event.target.value; })} /></label>
                   <label>mediainfo<input value={config.tools.mediainfo} onChange={(event) => updateConfig((draft) => { draft.tools.mediainfo = event.target.value; })} /></label>
                   <label className="extensions-field">扩展名<textarea value={extensionInput} onChange={(event) => updateConfig((draft) => { draft.processing.extensions = normalizeExtensions(event.target.value); })} placeholder={commonVideoExtensions.join('\n')} rows={8} /><small>每行一个后缀，或用逗号分隔，例如 `.mkv`、`.mp4`、`.rmvb`。</small></label>
+                  <label className="extensions-field">自定义集数正则<textarea value={episodePatternInput} onChange={(event) => updateConfig((draft) => { draft.processing.episodePatterns = normalizeLines(event.target.value); })} placeholder={'可选。每行一条，例如：(?i)^.+?-(?P<episode>\\d{2})$'} rows={4} /><small>默认已识别 S01E01、1x01、`标题 - 01 [参数]`、`01.mkv` 等；仅默认不够时填写。命名捕获组可用 `season` / `episode`，还能在模板里使用 `releaseGroup`。</small></label>
                   <label>并发数<input type="number" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
                   <label>BIF 宽度<input type="number" value={config.processing.bifWidth} onChange={(event) => updateConfig((draft) => { draft.processing.bifWidth = Number(event.target.value); })} /></label>
                   <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
@@ -1200,7 +1215,7 @@ export function App() {
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <Toggle label="缺少 NFO 时查询 TMDB" checked={renameUseTmdb} onChange={setRenameUseTmdb} />
             </div>
-            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。模板可填写文件名或完整路径；{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
+            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
           </Card>
 
           <Card title="重命名预览">
@@ -1607,7 +1622,11 @@ function RenameTemplateEditorModal(props: { value: string; placeholders: string[
           <span>插入占位符：</span>
           {props.placeholders.map((placeholder) => <button className="secondary" type="button" key={placeholder} onClick={() => insertPlaceholder(placeholder)}>{placeholder}</button>)}
         </div>
-        <p className="muted">可填写文件名、相对路径或完整路径；{'{season:00}'} / {'{episode:000}'} 可控制补零位数。</p>
+        <div className="muted template-help">
+          <p>可填写文件名、相对路径或完整路径。</p>
+          <p>{'{show:zh-CN}'} / {'{title:ja-JP}'} 这类语言标识可按语言取剧名/集标题。</p>
+          <p>{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。</p>
+        </div>
         <div className="inline-actions modal-actions">
           <button onClick={props.onClose}>完成</button>
         </div>
@@ -1833,6 +1852,18 @@ function normalizeExtensions(value: string): string[] {
     if (seen.has(normalized)) continue;
     seen.add(normalized);
     result.push(normalized);
+  }
+  return result;
+}
+
+function normalizeLines(value: string): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const part of value.split(/\n/)) {
+    const line = part.trim();
+    if (!line || seen.has(line)) continue;
+    seen.add(line);
+    result.push(line);
   }
   return result;
 }

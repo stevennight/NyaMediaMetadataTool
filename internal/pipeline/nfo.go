@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/episodeparse"
 	"NyaMediaMetadataTool/internal/fanart"
 	"NyaMediaMetadataTool/internal/store"
 	"NyaMediaMetadataTool/internal/tmdb"
@@ -26,14 +27,17 @@ var episodePattern = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,4})\b`)
 var seasonDirPattern = regexp.MustCompile(`(?i)^(season\s*\d{1,2}|s\d{1,2}|第\s*\d{1,2}\s*季)$`)
 var tmdbIDPattern = regexp.MustCompile(`(?i)[\[{(]\s*(?:tmdb(?:id)?|tmid)\s*[-=: ]\s*(\d+)\s*[\]})]`)
 var directoryYearPattern = regexp.MustCompile(`[\[{(]\s*(?:19|20)\d{2}\s*[\]})]`)
+var leadingReleaseGroupPattern = regexp.MustCompile(`^\s*\[[^\]]+\]\s*`)
+var trailingMediaTagPattern = regexp.MustCompile(`(?i)\s*[\[{(][^\]})]*(?:\d{3,4}\s*[x×]\s*\d{3,4}|\d{3,4}p|x264|x265|h\.?(?:264|265)|hevc|avc|aac|flac|opus|mkv|mp4|sub|chs|cht|jap)[^\]})]*[\]})]\s*$`)
 
 type episodeInfo struct {
-	Season     int
-	Episode    int
-	Title      string
-	Show       string
-	Year       string
-	TMDBShowID int
+	Season       int
+	Episode      int
+	Title        string
+	Show         string
+	ReleaseGroup string
+	Year         string
+	TMDBShowID   int
 }
 
 type NFOResult struct {
@@ -185,7 +189,7 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 		return NFOResult{}, nil
 	}
 
-	episode, ok := parseEpisodeInfo(media.Path)
+	episode, ok := parseEpisodeInfo(media.Path, cfg)
 	if !ok {
 		return NFOResult{}, nil
 	}
@@ -229,7 +233,7 @@ func GenerateSeriesNFO(ctx context.Context, cfg config.Config, media store.Media
 	if !cfg.Processing.EnableNFO {
 		return SeriesResult{}, nil
 	}
-	episode, ok := parseEpisodeInfo(media.Path)
+	episode, ok := parseEpisodeInfo(media.Path, cfg)
 	if !ok {
 		return SeriesResult{}, nil
 	}
@@ -239,7 +243,7 @@ func GenerateSeriesNFO(ctx context.Context, cfg config.Config, media store.Media
 }
 
 func GenerateSeriesImages(ctx context.Context, cfg config.Config, media store.MediaFile) (ImageResult, error) {
-	episode, ok := parseEpisodeInfo(media.Path)
+	episode, ok := parseEpisodeInfo(media.Path, cfg)
 	if !ok {
 		return ImageResult{}, nil
 	}
@@ -248,22 +252,22 @@ func GenerateSeriesImages(ctx context.Context, cfg config.Config, media store.Me
 	return ImageResult{Images: result.Images}, nil
 }
 
-func parseEpisodeInfo(path string) (episodeInfo, bool) {
+func parseEpisodeInfo(path string, cfg config.Config) (episodeInfo, bool) {
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	match := episodePattern.FindStringSubmatch(name)
-	if len(match) != 3 {
-		return episodeInfo{}, false
-	}
-	season, err := strconv.Atoi(match[1])
-	if err != nil {
-		return episodeInfo{}, false
-	}
-	episode, err := strconv.Atoi(match[2])
-	if err != nil {
+	parsed, ok := episodeparse.Parse(name, cfg.Processing.EpisodePatterns)
+	if !ok {
 		return episodeInfo{}, false
 	}
 	showDir := showDirectory(path)
-	return episodeInfo{Season: season, Episode: episode, Title: name, Show: parseShowName(path, name, match[0]), Year: parseDirectoryYearFromPath(showDir), TMDBShowID: parseTMDBShowIDFromPath(showDir)}, true
+	return episodeInfo{Season: parsed.Season, Episode: parsed.Episode, Title: name, Show: parseShowName(path, name, parsed.Token), ReleaseGroup: parseReleaseGroup(name), Year: parseDirectoryYearFromPath(showDir), TMDBShowID: parseTMDBShowIDFromPath(showDir)}, true
+}
+
+func parseReleaseGroup(fileTitle string) string {
+	match := leadingReleaseGroupPattern.FindStringSubmatch(fileTitle)
+	if len(match) == 0 {
+		return ""
+	}
+	return strings.Trim(match[0], " []")
 }
 
 func parseShowName(path string, fileTitle string, episodeToken string) string {
@@ -283,6 +287,14 @@ func parseShowName(path string, fileTitle string, episodeToken string) string {
 
 func cleanTMDBQuery(value string) string {
 	value = strings.TrimSpace(value)
+	value = leadingReleaseGroupPattern.ReplaceAllString(value, "")
+	for {
+		cleaned := trailingMediaTagPattern.ReplaceAllString(value, "")
+		if cleaned == value {
+			break
+		}
+		value = strings.TrimSpace(cleaned)
+	}
 	value = tmdbIDPattern.ReplaceAllString(value, "")
 	value = directoryYearPattern.ReplaceAllString(value, "")
 	value = strings.Trim(value, " .-_[]()")

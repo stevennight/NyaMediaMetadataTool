@@ -31,6 +31,7 @@ type Episode struct {
 	ShowID           int
 	EpisodeID        int
 	ShowName         string
+	ShowOriginalName string
 	ShowFirstAirDate string
 	Title            string
 	Overview         string
@@ -40,6 +41,11 @@ type Episode struct {
 	EpisodeGroup     string
 	Actors           []Actor
 	Crew             []CrewMember
+}
+
+type LocalizedEpisodeText struct {
+	ShowName string
+	Title    string
 }
 
 type Show struct {
@@ -282,6 +288,7 @@ func (c *Client) findEpisode(ctx context.Context, showQuery string, year string,
 		ShowID:           show.ID,
 		EpisodeID:        episodeDetail.ID,
 		ShowName:         firstNonEmpty(show.Name, show.OriginalName),
+		ShowOriginalName: show.OriginalName,
 		ShowFirstAirDate: show.FirstAirDate,
 		Title:            episodeDetail.Name,
 		Overview:         episodeDetail.Overview,
@@ -318,6 +325,7 @@ func (c *Client) FindEpisodeByShowID(ctx context.Context, showID int, season int
 		ShowID:           showID,
 		EpisodeID:        episodeDetail.ID,
 		ShowName:         firstNonEmpty(showDetail.Name, showDetail.OriginalName),
+		ShowOriginalName: showDetail.OriginalName,
 		ShowFirstAirDate: showDetail.FirstAirDate,
 		Title:            episodeDetail.Name,
 		Overview:         episodeDetail.Overview,
@@ -327,6 +335,18 @@ func (c *Client) FindEpisodeByShowID(ctx context.Context, showID int, season int
 		Actors:           credits.Actors,
 		Crew:             credits.Crew,
 	}, nil
+}
+
+func (c *Client) GetLocalizedEpisodeText(ctx context.Context, showID int, season int, episode int, language string) (LocalizedEpisodeText, error) {
+	showDetail, err := c.getShow(ctx, language, showID)
+	if err != nil {
+		return LocalizedEpisodeText{}, err
+	}
+	episodeDetail, err := c.getEpisode(ctx, language, showID, season, episode)
+	if err != nil {
+		return LocalizedEpisodeText{}, err
+	}
+	return LocalizedEpisodeText{ShowName: strings.TrimSpace(showDetail.Name), Title: strings.TrimSpace(episodeDetail.Name)}, nil
 }
 
 func (c *Client) FindEpisodeStrictTitle(ctx context.Context, showQuery string, season int, episode int) (Episode, error) {
@@ -380,6 +400,7 @@ func (c *Client) episodeFromDetails(ctx context.Context, showID int, showName st
 		ShowID:           showID,
 		EpisodeID:        detail.ID,
 		ShowName:         showName,
+		ShowOriginalName: showName,
 		ShowFirstAirDate: showFirstAirDate,
 		Title:            detail.Name,
 		Overview:         detail.Overview,

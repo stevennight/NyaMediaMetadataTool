@@ -101,6 +101,10 @@ h1 {
   color: #78716c;
 }
 
+.template-help p {
+  margin: 4px 0;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

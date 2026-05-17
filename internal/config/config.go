@@ -36,6 +36,7 @@ type ToolsConfig struct {
 
 type ProcessingConfig struct {
 	Extensions          []string      `json:"extensions" yaml:"extensions"`
+	EpisodePatterns     []string      `json:"episodePatterns" yaml:"episodePatterns"`
 	Concurrency         int           `json:"concurrency" yaml:"concurrency"`
 	StableDelay         time.Duration `json:"stableDelay" yaml:"stableDelay"`
 	StableChecks        int           `json:"stableChecks" yaml:"stableChecks"`

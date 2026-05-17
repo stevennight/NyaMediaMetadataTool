@@ -3,12 +3,14 @@ package pipeline
 import (
 	"strings"
 	"testing"
+
+	"NyaMediaMetadataTool/internal/config"
 )
 
 func TestParseEpisodeInfo(t *testing.T) {
 	t.Parallel()
 
-	info, ok := parseEpisodeInfo(`D:\Media\MAO - S01E03 - Episode.mkv`)
+	info, ok := parseEpisodeInfo(`D:\Media\MAO - S01E03 - Episode.mkv`, config.Default())
 	if !ok {
 		t.Fatal("expected episode info to parse")
 	}
@@ -23,7 +25,7 @@ func TestParseEpisodeInfo(t *testing.T) {
 func TestParseEpisodeInfoSupportsFourDigitEpisodes(t *testing.T) {
 	t.Parallel()
 
-	info, ok := parseEpisodeInfo(`D:\Media\名探偵コナン - S01E1201 - 第1201話.mkv`)
+	info, ok := parseEpisodeInfo(`D:\Media\名探偵コナン - S01E1201 - 第1201話.mkv`, config.Default())
 	if !ok {
 		t.Fatal("expected episode info to parse")
 	}
@@ -35,7 +37,7 @@ func TestParseEpisodeInfoSupportsFourDigitEpisodes(t *testing.T) {
 func TestParseEpisodeInfoReadsTMDBIDFromParentDirectory(t *testing.T) {
 	t.Parallel()
 
-	info, ok := parseEpisodeInfo(`D:\Media\K (2012) [tmdbid-12345]\Season 1\K - S01E01.mkv`)
+	info, ok := parseEpisodeInfo(`D:\Media\K (2012) [tmdbid-12345]\Season 1\K - S01E01.mkv`, config.Default())
 	if !ok {
 		t.Fatal("expected episode info to parse")
 	}
@@ -47,7 +49,7 @@ func TestParseEpisodeInfoReadsTMDBIDFromParentDirectory(t *testing.T) {
 func TestParseEpisodeInfoReadsTMIDFromShowDirectory(t *testing.T) {
 	t.Parallel()
 
-	info, ok := parseEpisodeInfo(`D:\Media\K (2012) [tmid-12345]\Season 1\S01E01.mkv`)
+	info, ok := parseEpisodeInfo(`D:\Media\K (2012) [tmid-12345]\Season 1\S01E01.mkv`, config.Default())
 	if !ok {
 		t.Fatal("expected episode info to parse")
 	}
@@ -62,7 +64,7 @@ func TestParseEpisodeInfoReadsTMIDFromShowDirectory(t *testing.T) {
 func TestParseEpisodeInfoIgnoresTMDBIDOutsideShowDirectory(t *testing.T) {
 	t.Parallel()
 
-	info, ok := parseEpisodeInfo(`D:\Media [tmdbid-999]\K (2012)\Season 1\K - S01E01.mkv`)
+	info, ok := parseEpisodeInfo(`D:\Media [tmdbid-999]\K (2012)\Season 1\K - S01E01.mkv`, config.Default())
 	if !ok {
 		t.Fatal("expected episode info to parse")
 	}
@@ -74,7 +76,7 @@ func TestParseEpisodeInfoIgnoresTMDBIDOutsideShowDirectory(t *testing.T) {
 func TestParseEpisodeInfoReadsYearFromParentDirectory(t *testing.T) {
 	t.Parallel()
 
-	info, ok := parseEpisodeInfo(`D:\Media\K (2012)\Season 1\K - S01E01.mkv`)
+	info, ok := parseEpisodeInfo(`D:\Media\K (2012)\Season 1\K - S01E01.mkv`, config.Default())
 	if !ok {
 		t.Fatal("expected episode info to parse")
 	}
@@ -95,15 +97,41 @@ func TestCleanTMDBQueryRemovesDirectoryID(t *testing.T) {
 func TestParseEpisodeInfoRejectsPartialFourDigitEpisode(t *testing.T) {
 	t.Parallel()
 
-	if _, ok := parseEpisodeInfo(`D:\Media\名探偵コナン - S01E1201Extra.mkv`); ok {
+	if _, ok := parseEpisodeInfo(`D:\Media\名探偵コナン - S01E1201Extra.mkv`, config.Default()); ok {
 		t.Fatal("expected episode token without boundary to be ignored")
+	}
+}
+
+func TestParseEpisodeInfoSupportsNumericEpisodeOnly(t *testing.T) {
+	t.Parallel()
+
+	info, ok := parseEpisodeInfo(`D:\Media\[Kamigami] Sword Art Online II - 01 [1920x1080 x264 AAC Sub(Chs,Cht,Jap)].mkv`, config.Default())
+	if !ok {
+		t.Fatal("expected episode info to parse")
+	}
+	if info.Episode != 1 {
+		t.Fatalf("unexpected episode: %+v", info)
+	}
+}
+
+func TestParseEpisodeInfoSupportsCustomRegex(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Processing.EpisodePatterns = []string{`(?i)^.+?-(?P<episode>\d{2})$`}
+	info, ok := parseEpisodeInfo(`D:\Media\Anime_Title-12.mkv`, cfg)
+	if !ok {
+		t.Fatal("expected episode info to parse")
+	}
+	if info.Episode != 12 || info.Season != 1 {
+		t.Fatalf("unexpected episode info: %+v", info)
 	}
 }
 
 func TestParseEpisodeInfoRejectsNonEpisode(t *testing.T) {
 	t.Parallel()
 
-	if _, ok := parseEpisodeInfo(`D:\Media\Movie 2024.mkv`); ok {
+	if _, ok := parseEpisodeInfo(`D:\Media\Movie 2024.mkv`, config.Default()); ok {
 		t.Fatal("expected movie file to be ignored")
 	}
 }

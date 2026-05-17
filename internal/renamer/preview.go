@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/episodeparse"
 	"NyaMediaMetadataTool/internal/tmdb"
 )
 
@@ -25,7 +26,9 @@ var episodePattern = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,4})\b`)
 var seasonDirPattern = regexp.MustCompile(`(?i)^(season\s*\d{1,2}|s\d{1,2}|第\s*\d{1,2}\s*季)$`)
 var tmdbIDPattern = regexp.MustCompile(`(?i)[\[{(]\s*(?:tmdb(?:id)?|tmid)\s*[-=: ]\s*(\d+)\s*[\]})]`)
 var directoryYearPattern = regexp.MustCompile(`[\[{(]\s*(?:19|20)\d{2}\s*[\]})]`)
-var placeholderPattern = regexp.MustCompile(`\{([a-z]+)(?::([^}]+))?\}`)
+var leadingReleaseGroupPattern = regexp.MustCompile(`^\s*\[[^\]]+\]\s*`)
+var trailingMediaTagPattern = regexp.MustCompile(`(?i)\s*[\[{(][^\]})]*(?:\d{3,4}\s*[x×]\s*\d{3,4}|\d{3,4}p|x264|x265|h\.?(?:264|265)|hevc|avc|aac|flac|opus|mkv|mp4|sub|chs|cht|jap)[^\]})]*[\]})]\s*$`)
+var placeholderPattern = regexp.MustCompile(`\{([A-Za-z]+)(?::([^}]+))?\}`)
 var reservedNamePattern = regexp.MustCompile(`(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$`)
 
 const ignoreFileName = ".ignore"
@@ -56,24 +59,28 @@ type PreviewResult struct {
 }
 
 type PreviewItem struct {
-	Path           string `json:"path"`
-	CurrentName    string `json:"currentName"`
-	NewName        string `json:"newName"`
-	NewPath        string `json:"newPath"`
-	RenderedTarget string `json:"renderedTarget"`
-	Show           string `json:"show"`
-	Title          string `json:"title"`
-	Season         int    `json:"season"`
-	Episode        int    `json:"episode"`
-	Year           string `json:"year"`
-	TMDBShowID     int    `json:"tmdbShowId"`
-	TMDBEpisodeID  int    `json:"tmdbEpisodeId"`
-	Source         string `json:"source"`
-	Status         string `json:"status"`
-	Message        string `json:"message"`
-	Conflict       bool   `json:"conflict"`
-	SanitizedTitle string `json:"sanitizedTitle"`
-	ManualName     bool   `json:"manualName"`
+	Path            string `json:"path"`
+	CurrentName     string `json:"currentName"`
+	NewName         string `json:"newName"`
+	NewPath         string `json:"newPath"`
+	RenderedTarget  string `json:"renderedTarget"`
+	Show            string `json:"show"`
+	ShowOriginal    string `json:"showOriginal"`
+	ReleaseGroup    string `json:"releaseGroup"`
+	Title           string `json:"title"`
+	Season          int    `json:"season"`
+	Episode         int    `json:"episode"`
+	Year            string `json:"year"`
+	TMDBShowID      int    `json:"tmdbShowId"`
+	TMDBEpisodeID   int    `json:"tmdbEpisodeId"`
+	Source          string `json:"source"`
+	Status          string `json:"status"`
+	Message         string `json:"message"`
+	Conflict        bool   `json:"conflict"`
+	SanitizedTitle  string `json:"sanitizedTitle"`
+	ManualName      bool   `json:"manualName"`
+	showByLanguage  map[string]string
+	titleByLanguage map[string]string
 }
 
 type PreviewItemRequest struct {
@@ -333,6 +340,7 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 			item.Message = err.Error()
 		} else {
 			item.Show = firstNonEmpty(episode.ShowName, item.Show)
+			item.ShowOriginal = episode.ShowOriginalName
 			item.Title = episode.Title
 			item.Year = yearFromDate(firstNonEmpty(episode.ShowFirstAirDate, episode.AirDate))
 			item.TMDBShowID = episode.ShowID
@@ -341,6 +349,7 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 			item.Status = "ok"
 			item.Message = ""
 		}
+		applyLocalizedTemplateValues(ctx, client, template, &item)
 	}
 
 	finalizeItem(path, template, &item)
@@ -546,11 +555,11 @@ func updateRenamedNFOReferences(path string, oldBase string, newBase string) {
 }
 
 func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path string, template string) PreviewItem {
-	parsed, ok := parseEpisode(path)
-	item := PreviewItem{Path: path, CurrentName: filepath.Base(path), Show: parsed.show, Year: parsed.year, TMDBShowID: parsed.tmdbShowID, Season: parsed.season, Episode: parsed.episode, Source: "filename", Status: "ok"}
+	parsed, ok := parseEpisode(path, cfg)
+	item := PreviewItem{Path: path, CurrentName: filepath.Base(path), Show: parsed.show, ReleaseGroup: parsed.releaseGroup, Year: parsed.year, TMDBShowID: parsed.tmdbShowID, Season: parsed.season, Episode: parsed.episode, Source: "filename", Status: "ok"}
 	if !ok {
 		item.Status = "warning"
-		item.Message = "无法从文件名解析 SxxEyy"
+		item.Message = "无法从文件名解析集数"
 		return item
 	}
 
@@ -576,16 +585,21 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 		if episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Year, item.Season, item.Episode); err == nil {
 			if !matchedNFO {
 				item.Show = firstNonEmpty(episode.ShowName, item.Show)
+				item.ShowOriginal = episode.ShowOriginalName
 				item.Title = episode.Title
 				item.Source = "tmdb"
 			}
 			item.Year = yearFromDate(firstNonEmpty(episode.ShowFirstAirDate, episode.AirDate))
 			item.TMDBShowID = episode.ShowID
 			item.TMDBEpisodeID = episode.EpisodeID
+			if strings.TrimSpace(item.ShowOriginal) == "" {
+				item.ShowOriginal = episode.ShowOriginalName
+			}
 		} else if !matchedNFO {
 			item.Status = "warning"
 			item.Message = err.Error()
 		}
+		applyLocalizedTemplateValues(ctx, client, template, &item)
 	}
 
 	finalizeItem(path, template, &item)
@@ -689,33 +703,35 @@ func applyConflict(path string, item *PreviewItem) {
 }
 
 type parsedEpisode struct {
-	show       string
-	year       string
-	tmdbShowID int
-	season     int
-	episode    int
+	show         string
+	releaseGroup string
+	year         string
+	tmdbShowID   int
+	season       int
+	episode      int
 }
 
-func parseEpisode(path string) (parsedEpisode, bool) {
+func parseEpisode(path string, cfg config.Config) (parsedEpisode, bool) {
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	match := episodePattern.FindStringSubmatch(name)
-	if len(match) != 3 {
-		return parsedEpisode{}, false
-	}
-	season, err := strconv.Atoi(match[1])
-	if err != nil {
-		return parsedEpisode{}, false
-	}
-	episode, err := strconv.Atoi(match[2])
-	if err != nil {
+	parsed, ok := episodeparse.Parse(name, cfg.Processing.EpisodePatterns)
+	if !ok {
 		return parsedEpisode{}, false
 	}
 	showDir := showDirectory(path)
-	show := parseShowName(path, name, match[0])
+	releaseGroup := parseReleaseGroup(name)
+	show := parseShowName(path, name, parsed.Token)
 	if show == "" {
 		show = cleanTMDBQuery(filepath.Base(showDir))
 	}
-	return parsedEpisode{show: show, year: parseDirectoryYearFromPath(showDir), tmdbShowID: parseTMDBShowIDFromPath(showDir), season: season, episode: episode}, true
+	return parsedEpisode{show: show, releaseGroup: releaseGroup, year: parseDirectoryYearFromPath(showDir), tmdbShowID: parseTMDBShowIDFromPath(showDir), season: parsed.Season, episode: parsed.Episode}, true
+}
+
+func parseReleaseGroup(fileTitle string) string {
+	match := leadingReleaseGroupPattern.FindStringSubmatch(fileTitle)
+	if len(match) == 0 {
+		return ""
+	}
+	return strings.Trim(match[0], " []")
 }
 
 func parseShowName(path string, fileTitle string, episodeToken string) string {
@@ -789,18 +805,27 @@ func normalizeLanguage(language string) string {
 
 func applyTemplate(template string, item PreviewItem) string {
 	values := map[string]string{
-		"show":    item.Show,
-		"season":  strconv.Itoa(item.Season),
-		"episode": strconv.Itoa(item.Episode),
-		"title":   item.Title,
-		"year":    item.Year,
+		"show":         item.Show,
+		"showOriginal": item.ShowOriginal,
+		"releaseGroup": item.ReleaseGroup,
+		"tmid":         positiveIntString(item.TMDBShowID),
+		"tmdbShowId":   positiveIntString(item.TMDBShowID),
+		"season":       strconv.Itoa(item.Season),
+		"episode":      strconv.Itoa(item.Episode),
+		"title":        item.Title,
+		"year":         item.Year,
 	}
 	return placeholderPattern.ReplaceAllStringFunc(template, func(match string) string {
 		parts := placeholderPattern.FindStringSubmatch(match)
 		if len(parts) < 2 {
 			return ""
 		}
-		value := values[parts[1]]
+		key := parts[1]
+		format := ""
+		if len(parts) >= 3 {
+			format = strings.TrimSpace(parts[2])
+		}
+		value := localizedPlaceholderValue(key, format, item, values)
 		if len(parts) >= 3 && strings.Trim(parts[2], "0") == "" && strings.TrimSpace(parts[2]) != "" {
 			if number, err := strconv.Atoi(value); err == nil {
 				return leftPad(strconv.Itoa(number), len(parts[2]))
@@ -808,6 +833,90 @@ func applyTemplate(template string, item PreviewItem) string {
 		}
 		return value
 	})
+}
+
+func localizedPlaceholderValue(key string, format string, item PreviewItem, values map[string]string) string {
+	if format != "" && strings.Trim(format, "0") != "" {
+		switch key {
+		case "show":
+			if item.showByLanguage != nil {
+				return firstNonEmpty(item.showByLanguage[languageKey(format)], values[key])
+			}
+		case "title":
+			if item.titleByLanguage != nil {
+				return firstNonEmpty(item.titleByLanguage[languageKey(format)], values[key])
+			}
+		}
+	}
+	return values[key]
+}
+
+func applyLocalizedTemplateValues(ctx context.Context, client *tmdb.Client, template string, item *PreviewItem) {
+	if client == nil || item.TMDBShowID <= 0 {
+		return
+	}
+	languages := templateLanguages(template)
+	if len(languages) == 0 {
+		return
+	}
+	if item.showByLanguage == nil {
+		item.showByLanguage = map[string]string{}
+	}
+	if item.titleByLanguage == nil {
+		item.titleByLanguage = map[string]string{}
+	}
+	for _, language := range languages {
+		key := languageKey(language)
+		if item.showByLanguage[key] != "" && item.titleByLanguage[key] != "" {
+			continue
+		}
+		localized, err := client.GetLocalizedEpisodeText(ctx, item.TMDBShowID, item.Season, item.Episode, language)
+		if err != nil {
+			continue
+		}
+		if localized.ShowName != "" {
+			item.showByLanguage[key] = localized.ShowName
+		}
+		if localized.Title != "" {
+			item.titleByLanguage[key] = localized.Title
+		}
+	}
+}
+
+func templateLanguages(template string) []string {
+	seen := map[string]struct{}{}
+	result := []string{}
+	for _, match := range placeholderPattern.FindAllStringSubmatch(template, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		name := match[1]
+		language := strings.TrimSpace(match[2])
+		if language == "" || strings.Trim(language, "0") == "" {
+			continue
+		}
+		if name != "show" && name != "title" {
+			continue
+		}
+		key := languageKey(language)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, language)
+	}
+	return result
+}
+
+func languageKey(language string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(language), "_", "-"))
+}
+
+func positiveIntString(value int) string {
+	if value <= 0 {
+		return ""
+	}
+	return strconv.Itoa(value)
 }
 
 func sanitizeFilenamePart(value string) string {
@@ -855,6 +964,14 @@ func cleanQuery(value string) string {
 
 func cleanTMDBQuery(value string) string {
 	value = strings.TrimSpace(value)
+	value = leadingReleaseGroupPattern.ReplaceAllString(value, "")
+	for {
+		cleaned := trailingMediaTagPattern.ReplaceAllString(value, "")
+		if cleaned == value {
+			break
+		}
+		value = strings.TrimSpace(cleaned)
+	}
 	value = tmdbIDPattern.ReplaceAllString(value, "")
 	value = directoryYearPattern.ReplaceAllString(value, "")
 	value = strings.NewReplacer("(", " ", ")", " ", "[", " ", "]", " ", "{", " ", "}", " ").Replace(value)

@@ -163,10 +163,10 @@ func (c *Config) applyDefaults() {
 		c.Scraping.Region = "CN"
 	}
 	if c.Scraping.TMDBBaseURL == "" {
-		c.Scraping.TMDBBaseURL = "https://api.themoviedb.org/3"
+		c.Scraping.TMDBBaseURL = "https://api.themoviedb.org"
 	}
 	if c.Scraping.TMDBImageBaseURL == "" {
-		c.Scraping.TMDBImageBaseURL = "https://image.tmdb.org/t/p/original"
+		c.Scraping.TMDBImageBaseURL = "https://image.tmdb.org"
 	}
 	if c.Scraping.TMDBRequestTimeoutSeconds <= 0 {
 		c.Scraping.TMDBRequestTimeoutSeconds = 15
@@ -175,6 +175,6 @@ func (c *Config) applyDefaults() {
 		c.Scraping.ImageSources = []string{"tmdb", "tvdb", "fanart"}
 	}
 	if c.Scraping.FanartBaseURL == "" {
-		c.Scraping.FanartBaseURL = "https://webservice.fanart.tv/v3"
+		c.Scraping.FanartBaseURL = "https://webservice.fanart.tv"
 	}
 }

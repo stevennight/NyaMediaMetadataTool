@@ -58,10 +58,11 @@ func NewClient(cfg config.ScrapingConfig) (*Client, error) {
 	if strings.TrimSpace(cfg.FanartAPIKey) == "" {
 		return nil, ErrDisabled
 	}
-	baseURL := strings.TrimRight(strings.TrimSpace(cfg.FanartBaseURL), "/")
-	if baseURL == "" {
-		baseURL = "https://webservice.fanart.tv/v3"
+	baseURLPrefix := strings.TrimRight(strings.TrimSpace(cfg.FanartBaseURL), "/")
+	if baseURLPrefix == "" {
+		baseURLPrefix = "https://webservice.fanart.tv"
 	}
+	baseURL := baseURLPrefix + "/v3"
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if strings.TrimSpace(cfg.Proxy) != "" {
 		proxyURL, err := url.Parse(cfg.Proxy)

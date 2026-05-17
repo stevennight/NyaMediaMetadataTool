@@ -55,11 +55,11 @@ scraping:
     - tvdb
     - fanart
   fanartApiKey: ""
-  fanartBaseUrl: https://webservice.fanart.tv/v3
+  fanartBaseUrl: https://webservice.fanart.tv
   tmdbApiKey: ""
   tmdbToken: ""
-  tmdbBaseUrl: https://api.themoviedb.org/3
-  tmdbImageBaseUrl: https://image.tmdb.org/t/p/original
+  tmdbBaseUrl: https://api.themoviedb.org
+  tmdbImageBaseUrl: https://image.tmdb.org
   tmdbRequestTimeoutSeconds: 15
   language: zh-CN
   fallbackLanguages:

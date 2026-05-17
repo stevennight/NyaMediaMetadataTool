@@ -188,14 +188,16 @@ func NewClient(cfg config.ScrapingConfig) (*Client, error) {
 		return nil, ErrDisabled
 	}
 
-	baseURL := strings.TrimRight(strings.TrimSpace(cfg.TMDBBaseURL), "/")
-	if baseURL == "" {
-		baseURL = "https://api.themoviedb.org/3"
+	baseURLPrefix := strings.TrimRight(strings.TrimSpace(cfg.TMDBBaseURL), "/")
+	if baseURLPrefix == "" {
+		baseURLPrefix = "https://api.themoviedb.org"
 	}
-	imageDownloadURL := strings.TrimRight(strings.TrimSpace(cfg.TMDBImageBaseURL), "/")
-	if imageDownloadURL == "" {
-		imageDownloadURL = officialTMDBImageURL
+	baseURL := baseURLPrefix + "/3"
+	imageDownloadURLPrefix := strings.TrimRight(strings.TrimSpace(cfg.TMDBImageBaseURL), "/")
+	if imageDownloadURLPrefix == "" {
+		imageDownloadURLPrefix = "https://image.tmdb.org"
 	}
+	imageDownloadURL := imageDownloadURLPrefix + "/t/p/original"
 	requestTimeout := cfg.TMDBRequestTimeoutSeconds
 	if requestTimeout <= 0 {
 		requestTimeout = 15

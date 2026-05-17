@@ -244,6 +244,7 @@ const taskStatusFilters: { value: TaskStatusFilter; label: string }[] = [
   { value: 'canceled', label: 'Canceled' }
 ];
 const taskListRefreshIntervalMs = 5000;
+const taskDetailRefreshIntervalMs = 5000;
 const defaultRenameTemplate = '{show} - S{season:00}E{episode:00} - {title}';
 const renamePlaceholders = [
   '{show}',
@@ -367,6 +368,14 @@ function logLevelPillClass(level: string) {
     default:
       return 'pill ok';
   }
+}
+
+function normalizeTaskDetail(detail: TaskDetail) {
+  return {
+    ...detail,
+    logs: asArray<TaskLog>(detail.logs),
+    artifacts: asArray<Artifact>(detail.artifacts)
+  };
 }
 
 export function App() {
@@ -543,6 +552,26 @@ export function App() {
     }, taskListRefreshIntervalMs);
     return () => window.clearInterval(interval);
   }, [activePage, taskPage, taskStatusFilter, taskPageSize, taskPathFilter, taskFromFilter, taskToFilter, displayTimezone]);
+
+  useEffect(() => {
+    if (!selectedTask) return;
+    const taskId = selectedTask.task.id;
+    let active = true;
+    const interval = window.setInterval(async () => {
+      try {
+        const detail = await fetchTaskDetail(taskId);
+        if (active) {
+          setSelectedTask((current) => current?.task.id === taskId ? detail : current);
+        }
+      } catch {
+        // Keep the current dialog content if a background refresh fails.
+      }
+    }, taskDetailRefreshIntervalMs);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [selectedTask?.task.id]);
 
   function resetTaskFilters() {
     setTaskStatusFilter('all');
@@ -1009,19 +1038,21 @@ export function App() {
     setRescanOpen(true);
   }
 
-  async function loadTaskDetail(id: number) {
-    setError('');
+  async function fetchTaskDetail(id: number) {
     const response = await fetch(`/api/tasks/${id}`);
     if (!response.ok) {
-      setError(await response.text());
-      return;
+      throw new Error(await response.text());
     }
-    const detail = await response.json();
-    setSelectedTask({
-      ...detail,
-      logs: asArray<TaskLog>(detail.logs),
-      artifacts: asArray<Artifact>(detail.artifacts)
-    });
+    return normalizeTaskDetail(await response.json());
+  }
+
+  async function loadTaskDetail(id: number) {
+    setError('');
+    try {
+      setSelectedTask(await fetchTaskDetail(id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载任务详情失败');
+    }
   }
 
   function toggleTaskSelection(id: number, checked: boolean, shiftKey = false) {
@@ -1236,11 +1267,11 @@ export function App() {
                 <section className="settings-section settings-section-wide">
                   <h3>刮削</h3>
                   <label>Fanart API Key<input type="password" value={config.scraping.fanartApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartApiKey = event.target.value; })} placeholder="用于 clearart/clearlogo" /></label>
-                  <label>Fanart 地址<input value={config.scraping.fanartBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartBaseUrl = event.target.value; })} placeholder="https://webservice.fanart.tv/v3" /></label>
+                  <label>Fanart 地址<input value={config.scraping.fanartBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartBaseUrl = event.target.value; })} placeholder="https://webservice.fanart.tv" /><small>程序会自动追加 `/v3`，这里只填前缀，支持子目录。</small></label>
                   <label>TMDB Token<input type="password" value={config.scraping.tmdbToken} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbToken = event.target.value; })} placeholder="Bearer token" /></label>
                   <label>TMDB API Key<input value={config.scraping.tmdbApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbApiKey = event.target.value; })} placeholder="可选，优先使用 Token" /></label>
-                  <label>TMDB 地址<input value={config.scraping.tmdbBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbBaseUrl = event.target.value; })} placeholder="https://api.themoviedb.org/3" /></label>
-                  <label>TMDB 图片下载地址<input value={config.scraping.tmdbImageBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbImageBaseUrl = event.target.value; })} placeholder="https://image.tmdb.org/t/p/original" /><small>仅用于下载本地图片；NFO 中写入的 TMDB 图片 URL 仍使用官方地址。</small></label>
+                  <label>TMDB 地址<input value={config.scraping.tmdbBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbBaseUrl = event.target.value; })} placeholder="https://api.themoviedb.org" /><small>程序会自动追加 `/3`，这里只填前缀，支持子目录。</small></label>
+                  <label>TMDB 图片下载地址<input value={config.scraping.tmdbImageBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbImageBaseUrl = event.target.value; })} placeholder="https://image.tmdb.org" /><small>程序会自动追加 `/t/p/original`，这里只填前缀，支持子目录。NFO 仍写官方地址。</small></label>
                   <label>TMDB 接口超时秒<input type="number" min="3" max="60" value={config.scraping.tmdbRequestTimeoutSeconds} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbRequestTimeoutSeconds = Number(event.target.value); })} /><small>只影响 TMDB API 请求，不影响图片下载。</small></label>
                   <label>TMDB 代理<input value={config.scraping.proxy} onChange={(event) => updateConfig((draft) => { draft.scraping.proxy = event.target.value; })} placeholder="http://127.0.0.1:7890" /></label>
                   <SelectField label="刮削语言" value={config.scraping.language} options={languageOptions} onChange={(value) => updateConfig((draft) => { draft.scraping.language = value; })} />
@@ -1505,6 +1536,7 @@ function ArtifactRow(props: { artifact: Artifact; timezone: string }) {
 }
 
 function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose: () => void }) {
+  const logs = [...asArray<TaskLog>(props.detail.logs)].reverse();
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
       <section className="modal-card" onClick={(event) => event.stopPropagation()}>
@@ -1522,7 +1554,7 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
         {props.detail.task.finishedAt && <Row label="结束时间" value={formatStoredTime(props.detail.task.finishedAt, props.timezone)} />}
         {props.detail.task.errorSummary && <Row label="错误" value={props.detail.task.errorSummary} />}
         <h3>日志</h3>
-        {asArray<TaskLog>(props.detail.logs).length ? asArray<TaskLog>(props.detail.logs).map((log) => (
+        {logs.length ? logs.map((log) => (
           <div className="log-line" key={log.id}>
             <span className={logLevelPillClass(log.level)}>{log.level}</span>
             <div className="log-body">

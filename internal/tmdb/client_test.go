@@ -47,8 +47,8 @@ func TestImageDownloadURLDoesNotChangeNFOImageURL(t *testing.T) {
 	client, err := NewClient(config.ScrapingConfig{
 		EnableTMDB:        true,
 		TMDBAPIKey:        "test",
-		TMDBImageBaseURL:  "https://tmdb-image-cache.example/original",
-		TMDBBaseURL:       "https://api.example/3",
+		TMDBImageBaseURL:  "https://tmdb-image-cache.example/cache",
+		TMDBBaseURL:       "https://api.example/tmdb",
 		FallbackLanguages: nil,
 	})
 	if err != nil {
@@ -58,8 +58,20 @@ func TestImageDownloadURLDoesNotChangeNFOImageURL(t *testing.T) {
 	if got := client.ImageURL("/poster.jpg"); !strings.HasPrefix(got, officialTMDBImageURL) {
 		t.Fatalf("expected official image URL for NFO, got %q", got)
 	}
-	if got := client.DownloadImageURL("/poster.jpg"); got != "https://tmdb-image-cache.example/original/poster.jpg" {
+	if got := client.DownloadImageURL("/poster.jpg"); got != "https://tmdb-image-cache.example/cache/t/p/original/poster.jpg" {
 		t.Fatalf("unexpected download URL: %q", got)
+	}
+}
+
+func TestTMDBBaseURLPrefixAppendsAPIVersion(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewClient(config.ScrapingConfig{EnableTMDB: true, TMDBAPIKey: "test", TMDBBaseURL: "https://api.example/tmdb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.baseURL != "https://api.example/tmdb/3" {
+		t.Fatalf("unexpected base URL: %q", client.baseURL)
 	}
 }
 

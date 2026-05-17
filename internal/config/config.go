@@ -66,6 +66,8 @@ type ScrapingConfig struct {
 	TMDBAPIKey                   string   `json:"tmdbApiKey" yaml:"tmdbApiKey"`
 	TMDBToken                    string   `json:"tmdbToken" yaml:"tmdbToken"`
 	TMDBBaseURL                  string   `json:"tmdbBaseUrl" yaml:"tmdbBaseUrl"`
+	TMDBImageBaseURL             string   `json:"tmdbImageBaseUrl" yaml:"tmdbImageBaseUrl"`
+	TMDBRequestTimeoutSeconds    int      `json:"tmdbRequestTimeoutSeconds" yaml:"tmdbRequestTimeoutSeconds"`
 	Language                     string   `json:"language" yaml:"language"`
 	FallbackLanguages            []string `json:"fallbackLanguages" yaml:"fallbackLanguages"`
 	Region                       string   `json:"region" yaml:"region"`
@@ -162,6 +164,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Scraping.TMDBBaseURL == "" {
 		c.Scraping.TMDBBaseURL = "https://api.themoviedb.org/3"
+	}
+	if c.Scraping.TMDBImageBaseURL == "" {
+		c.Scraping.TMDBImageBaseURL = "https://image.tmdb.org/t/p/original"
+	}
+	if c.Scraping.TMDBRequestTimeoutSeconds <= 0 {
+		c.Scraping.TMDBRequestTimeoutSeconds = 15
 	}
 	if c.Scraping.ImageSources == nil {
 		c.Scraping.ImageSources = []string{"tmdb", "tvdb", "fanart"}

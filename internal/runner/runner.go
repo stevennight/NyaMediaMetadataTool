@@ -189,11 +189,13 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate nfo", "")
 	nfoResult, err := r.generateNFO(ctx, task, cfg, media)
 	if err != nil {
+		r.addProcessLogs(ctx, task.ID, nfoResult.TMDBLogs)
 		if nfoResult.TMDBStatus != "" {
 			_ = r.store.AddTaskLog(ctx, task.ID, tmdbLogLevel(nfoResult.TMDBStatus), "tmdb "+nfoResult.TMDBStatus, tmdbLogDetail(nfoResult))
 		}
 		return err
 	}
+	r.addProcessLogs(ctx, task.ID, nfoResult.TMDBLogs)
 	if nfoResult.Path != "" {
 		if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "nfo", nfoResult.Path, "generated"); err != nil {
 			return err
@@ -223,6 +225,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate series nfo", "")
 	seriesResult, err := r.generateSeriesNFO(ctx, task, cfg, media)
+	r.addProcessLogs(ctx, task.ID, seriesResult.Logs)
 	if err != nil {
 		return err
 	}
@@ -246,6 +249,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate series images", "")
 	imageResult, err := r.generateSeriesImages(ctx, task, cfg, media)
+	r.addProcessLogs(ctx, task.ID, imageResult.Logs)
 	if err != nil {
 		return err
 	}
@@ -391,6 +395,16 @@ func hasFailedImage(images []pipeline.ImageArtifact) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func (r *Runner) addProcessLogs(ctx context.Context, taskID int64, logs []pipeline.ProcessLog) {
+	for _, log := range logs {
+		level := strings.TrimSpace(log.Level)
+		if level == "" {
+			level = "info"
+		}
+		_ = r.store.AddTaskLog(ctx, taskID, level, log.Message, log.Detail)
+	}
 }
 
 func (r *Runner) scanScopeClaim(scanRunID string, taskID int64) pipeline.SeriesScopeClaimFunc {

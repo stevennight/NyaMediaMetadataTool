@@ -47,21 +47,30 @@ type NFOResult struct {
 	SeasonNFOPath string
 	Images        []ImageArtifact
 	Failures      []string
+	TMDBLogs      []ProcessLog
 	TMDBStatus    string
 	TMDBDetail    string
 	TMDBShowName  string
 	TMDBEpisode   string
 }
 
+type ProcessLog struct {
+	Level   string
+	Message string
+	Detail  string
+}
+
 type SeriesResult struct {
 	ShowNFOPath   string
 	SeasonNFOPath string
+	Logs          []ProcessLog
 }
 
 type SeriesScopeClaimFunc func(ctx context.Context, scopeType string, scopeKey string) (bool, error)
 
 type ImageResult struct {
 	Images []ImageArtifact
+	Logs   []ProcessLog
 }
 
 type ImageArtifact struct {
@@ -69,6 +78,21 @@ type ImageArtifact struct {
 	Path   string
 	Status string
 	Detail string
+}
+
+func (r *NFOResult) addLog(level string, message string, detail string) {
+	r.TMDBLogs = append(r.TMDBLogs, ProcessLog{Level: level, Message: message, Detail: detail})
+}
+
+func (r *NFOResult) addTimedLog(level string, message string, detail string, start time.Time) {
+	detail = strings.TrimSpace(detail)
+	elapsed := "elapsed=" + time.Since(start).Round(time.Millisecond).String()
+	if detail != "" {
+		detail += "; " + elapsed
+	} else {
+		detail = elapsed
+	}
+	r.addLog(level, message, detail)
 }
 
 type episodeNFO struct {
@@ -256,9 +280,9 @@ func GenerateSeriesNFOWithScopeClaim(ctx context.Context, cfg config.Config, med
 	}
 	applyTMDBShowAndSeasonScoped(ctx, cfg, episode, &result, allowShow, allowSeason)
 	if strings.HasPrefix(result.TMDBDetail, "show/season failed:") || strings.HasPrefix(result.TMDBDetail, "tvshow nfo failed:") || strings.HasPrefix(result.TMDBDetail, "season nfo failed:") {
-		return SeriesResult{ShowNFOPath: result.ShowNFOPath, SeasonNFOPath: result.SeasonNFOPath}, fmt.Errorf("tmdb failed: %s", result.TMDBDetail)
+		return SeriesResult{ShowNFOPath: result.ShowNFOPath, SeasonNFOPath: result.SeasonNFOPath, Logs: result.TMDBLogs}, fmt.Errorf("tmdb failed: %s", result.TMDBDetail)
 	}
-	return SeriesResult{ShowNFOPath: result.ShowNFOPath, SeasonNFOPath: result.SeasonNFOPath}, nil
+	return SeriesResult{ShowNFOPath: result.ShowNFOPath, SeasonNFOPath: result.SeasonNFOPath, Logs: result.TMDBLogs}, nil
 }
 
 func GenerateSeriesImages(ctx context.Context, cfg config.Config, media store.MediaFile) (ImageResult, error) {
@@ -280,9 +304,9 @@ func GenerateSeriesImagesWithScopeClaim(ctx context.Context, cfg config.Config, 
 	}
 	applyTMDBShowAndSeasonImagesScoped(ctx, cfg, episode, &result, allowShow, allowSeason)
 	if strings.HasPrefix(result.TMDBDetail, "show/season images failed:") {
-		return ImageResult{Images: result.Images}, fmt.Errorf("tmdb failed: %s", result.TMDBDetail)
+		return ImageResult{Images: result.Images, Logs: result.TMDBLogs}, fmt.Errorf("tmdb failed: %s", result.TMDBDetail)
 	}
-	return ImageResult{Images: result.Images}, nil
+	return ImageResult{Images: result.Images, Logs: result.TMDBLogs}, nil
 }
 
 func claimSeriesNFOScope(ctx context.Context, claim SeriesScopeClaimFunc, episodeNFOPath string, episode episodeInfo) (bool, bool, error) {
@@ -423,18 +447,22 @@ func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInf
 	if err != nil {
 		result.TMDBStatus = "disabled"
 		result.TMDBDetail = err.Error()
+		result.addLog("info", "tmdb episode disabled", err.Error())
 		return
 	}
+	start := time.Now()
 	detail, err := findTMDBEpisode(ctx, client, episode)
 	if err != nil {
 		result.TMDBStatus = "failed"
 		result.TMDBDetail = err.Error()
+		result.addTimedLog("error", "tmdb episode failed", err.Error(), start)
 		return
 	}
 
 	result.TMDBStatus = "matched"
 	result.TMDBShowName = detail.ShowName
 	result.TMDBEpisode = detail.Title
+	result.addTimedLog("info", "tmdb episode matched", strings.TrimSpace(detail.ShowName+" / "+detail.Title), start)
 
 	if detail.Title != "" {
 		doc.Title = detail.Title
@@ -457,7 +485,7 @@ func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInf
 		doc.UniqueID = append(doc.UniqueID, nfoUniqueID{Type: "tmdb_episode", Value: strconv.Itoa(detail.EpisodeID)})
 	}
 	if detail.StillPath != "" {
-		thumbPath, err := ensureEpisodeThumb(ctx, cfg, result.Path, client.ImageURL(detail.StillPath))
+		thumbPath, err := ensureEpisodeThumb(ctx, cfg, result.Path, client.DownloadImageURL(detail.StillPath))
 		if err == nil && thumbPath != "" {
 			result.ThumbPath = thumbPath
 			doc.Thumb = filepath.Base(thumbPath)
@@ -502,7 +530,7 @@ func ensureEpisodeThumbOnly(ctx context.Context, cfg config.Config, episode epis
 	if err != nil || detail.StillPath == "" {
 		return
 	}
-	thumbPath, err = ensureEpisodeThumb(ctx, cfg, result.Path, client.ImageURL(detail.StillPath))
+	thumbPath, err = ensureEpisodeThumb(ctx, cfg, result.Path, client.DownloadImageURL(detail.StillPath))
 	if err == nil && thumbPath != "" {
 		result.ThumbPath = thumbPath
 	} else if err != nil {
@@ -525,15 +553,19 @@ func applyTMDBShowAndSeasonScoped(ctx context.Context, cfg config.Config, episod
 
 	client, err := tmdb.NewClient(cfg.Scraping)
 	if err != nil {
+		result.addLog("info", "tmdb series nfo disabled", err.Error())
 		return
 	}
+	start := time.Now()
 	show, season, err := findTMDBShowAndSeason(ctx, client, episode)
 	if err != nil {
 		if result.TMDBDetail == "" {
 			result.TMDBDetail = "show/season failed: " + err.Error()
 		}
+		result.addTimedLog("error", "tmdb series nfo failed", err.Error(), start)
 		return
 	}
+	result.addTimedLog("info", "tmdb series nfo matched", strings.TrimSpace(show.Name+" / "+season.Name), start)
 
 	if writeShow {
 		if err := upsertTVShowNFO(showPath, cfg, client, show); err == nil {
@@ -579,15 +611,19 @@ func applyTMDBShowAndSeasonImagesScoped(ctx context.Context, cfg config.Config, 
 
 	client, err := tmdb.NewClient(cfg.Scraping)
 	if err != nil {
+		result.addLog("info", "tmdb series images disabled", err.Error())
 		return
 	}
+	start := time.Now()
 	show, season, err := findTMDBShowAndSeasonImages(ctx, client, episode, cfg.Scraping.PreferOriginalLanguagePoster)
 	if err != nil {
 		if result.TMDBDetail == "" {
 			result.TMDBDetail = "show/season images failed: " + err.Error()
 		}
+		result.addTimedLog("error", "tmdb series images failed", err.Error(), start)
 		return
 	}
+	result.addTimedLog("info", "tmdb series images matched", strings.TrimSpace(show.Name+" / "+season.Name), start)
 
 	fanartImages := fanart.TVImages{}
 	fanartDetail := "fanart not enabled"
@@ -606,11 +642,11 @@ func applyTMDBShowAndSeasonImagesScoped(ctx context.Context, cfg config.Config, 
 		fanartDetail = "fanart requires tvdb id"
 	}
 	urls := []string{
-		chooseImageSource(cfg, map[string]string{"tmdb": client.ImageURL(show.PosterPath), "fanart": fanartImages.Poster}),
-		chooseImageSource(cfg, map[string]string{"tmdb": client.ImageURL(show.BackdropPath), "fanart": fanartImages.Fanart}),
-		chooseImageSource(cfg, map[string]string{"tmdb": client.ImageURL(show.LogoPath), "fanart": fanartImages.ClearLogo}),
+		chooseImageSource(cfg, map[string]string{"tmdb": client.DownloadImageURL(show.PosterPath), "fanart": fanartImages.Poster}),
+		chooseImageSource(cfg, map[string]string{"tmdb": client.DownloadImageURL(show.BackdropPath), "fanart": fanartImages.Fanart}),
+		chooseImageSource(cfg, map[string]string{"tmdb": client.DownloadImageURL(show.LogoPath), "fanart": fanartImages.ClearLogo}),
 		chooseImageSource(cfg, map[string]string{"fanart": fanartImages.ClearArt}),
-		chooseImageSource(cfg, map[string]string{"tmdb": client.ImageURL(season.PosterPath), "fanart": fanartImages.SeasonPoster}),
+		chooseImageSource(cfg, map[string]string{"tmdb": client.DownloadImageURL(season.PosterPath), "fanart": fanartImages.SeasonPoster}),
 	}
 
 	for index, item := range downloads {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -37,6 +38,28 @@ func TestSearchTVRetriesUnexpectedEOFResponse(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("expected 2 attempts, got %d", got)
+	}
+}
+
+func TestImageDownloadURLDoesNotChangeNFOImageURL(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewClient(config.ScrapingConfig{
+		EnableTMDB:        true,
+		TMDBAPIKey:        "test",
+		TMDBImageBaseURL:  "https://tmdb-image-cache.example/original",
+		TMDBBaseURL:       "https://api.example/3",
+		FallbackLanguages: nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := client.ImageURL("/poster.jpg"); !strings.HasPrefix(got, officialTMDBImageURL) {
+		t.Fatalf("expected official image URL for NFO, got %q", got)
+	}
+	if got := client.DownloadImageURL("/poster.jpg"); got != "https://tmdb-image-cache.example/original/poster.jpg" {
+		t.Fatalf("unexpected download URL: %q", got)
 	}
 }
 

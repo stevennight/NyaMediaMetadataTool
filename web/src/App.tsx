@@ -42,6 +42,8 @@ type AppConfig = {
     tmdbApiKey: string;
     tmdbToken: string;
     tmdbBaseUrl: string;
+    tmdbImageBaseUrl: string;
+    tmdbRequestTimeoutSeconds: number;
     language: string;
     fallbackLanguages: string[];
     region: string;
@@ -1174,6 +1176,7 @@ export function App() {
             <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
             <Row label="自定义集数正则" value={config?.processing.episodePatterns?.length ? `${config.processing.episodePatterns.length} 条` : '未设置'} />
             <Row label="TMDB 地址" value={config?.scraping.tmdbBaseUrl ?? '-'} />
+            <Row label="TMDB 接口超时" value={`${config?.scraping.tmdbRequestTimeoutSeconds ?? '-'}s`} />
             <Row label="字幕提取" value={config?.processing.enableSubtitles ? '开启' : '关闭'} />
             <Row label="MediaInfo" value={config?.processing.enableMediaInfo ? '开启' : '关闭'} />
             <Row label="NFO" value={config?.processing.enableNfo ? '开启' : '关闭'} />
@@ -1237,6 +1240,8 @@ export function App() {
                   <label>TMDB Token<input type="password" value={config.scraping.tmdbToken} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbToken = event.target.value; })} placeholder="Bearer token" /></label>
                   <label>TMDB API Key<input value={config.scraping.tmdbApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbApiKey = event.target.value; })} placeholder="可选，优先使用 Token" /></label>
                   <label>TMDB 地址<input value={config.scraping.tmdbBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbBaseUrl = event.target.value; })} placeholder="https://api.themoviedb.org/3" /></label>
+                  <label>TMDB 图片下载地址<input value={config.scraping.tmdbImageBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbImageBaseUrl = event.target.value; })} placeholder="https://image.tmdb.org/t/p/original" /><small>仅用于下载本地图片；NFO 中写入的 TMDB 图片 URL 仍使用官方地址。</small></label>
+                  <label>TMDB 接口超时秒<input type="number" min="3" max="60" value={config.scraping.tmdbRequestTimeoutSeconds} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbRequestTimeoutSeconds = Number(event.target.value); })} /><small>只影响 TMDB API 请求，不影响图片下载。</small></label>
                   <label>TMDB 代理<input value={config.scraping.proxy} onChange={(event) => updateConfig((draft) => { draft.scraping.proxy = event.target.value; })} placeholder="http://127.0.0.1:7890" /></label>
                   <SelectField label="刮削语言" value={config.scraping.language} options={languageOptions} onChange={(value) => updateConfig((draft) => { draft.scraping.language = value; })} />
                   <LanguageMultiPicker label="备用语言顺序" values={config.scraping.fallbackLanguages ?? []} onChange={(values) => updateConfig((draft) => { draft.scraping.fallbackLanguages = values; })} />

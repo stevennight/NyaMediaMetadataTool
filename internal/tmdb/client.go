@@ -17,17 +17,19 @@ import (
 var ErrDisabled = errors.New("tmdb scraping is disabled")
 
 const tmdbRequestAttempts = 3
+const officialTMDBImageURL = "https://image.tmdb.org/t/p/original"
 
 type Client struct {
-	baseURL    string
-	imageURL   string
-	token      string
-	apiKey     string
-	language   string
-	languages  []string
-	region     string
-	people     bool
-	httpClient *http.Client
+	baseURL          string
+	imageURL         string
+	imageDownloadURL string
+	token            string
+	apiKey           string
+	language         string
+	languages        []string
+	region           string
+	people           bool
+	httpClient       *http.Client
 }
 
 type Episode struct {
@@ -190,6 +192,14 @@ func NewClient(cfg config.ScrapingConfig) (*Client, error) {
 	if baseURL == "" {
 		baseURL = "https://api.themoviedb.org/3"
 	}
+	imageDownloadURL := strings.TrimRight(strings.TrimSpace(cfg.TMDBImageBaseURL), "/")
+	if imageDownloadURL == "" {
+		imageDownloadURL = officialTMDBImageURL
+	}
+	requestTimeout := cfg.TMDBRequestTimeoutSeconds
+	if requestTimeout <= 0 {
+		requestTimeout = 15
+	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if strings.TrimSpace(cfg.Proxy) != "" {
@@ -201,11 +211,12 @@ func NewClient(cfg config.ScrapingConfig) (*Client, error) {
 	}
 
 	return &Client{
-		baseURL:  baseURL,
-		imageURL: "https://image.tmdb.org/t/p/original",
-		token:    strings.TrimSpace(cfg.TMDBToken),
-		apiKey:   strings.TrimSpace(cfg.TMDBAPIKey),
-		language: defaultString(cfg.Language, "zh-CN"),
+		baseURL:          baseURL,
+		imageURL:         officialTMDBImageURL,
+		imageDownloadURL: imageDownloadURL,
+		token:            strings.TrimSpace(cfg.TMDBToken),
+		apiKey:           strings.TrimSpace(cfg.TMDBAPIKey),
+		language:         defaultString(cfg.Language, "zh-CN"),
 		languages: languageOrder(
 			defaultString(cfg.Language, "zh-CN"),
 			cfg.FallbackLanguages,
@@ -213,7 +224,7 @@ func NewClient(cfg config.ScrapingConfig) (*Client, error) {
 		region: defaultString(cfg.Region, "CN"),
 		people: cfg.EnablePeople,
 		httpClient: &http.Client{
-			Timeout:   15 * time.Second,
+			Timeout:   time.Duration(requestTimeout) * time.Second,
 			Transport: transport,
 		},
 	}, nil
@@ -228,6 +239,17 @@ func (c *Client) ImageURL(path string) string {
 		return path
 	}
 	return c.imageURL + path
+}
+
+func (c *Client) DownloadImageURL(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
+	}
+	return c.imageDownloadURL + path
 }
 
 func (c *Client) SearchTV(ctx context.Context, query string) ([]SearchResult, error) {
@@ -798,12 +820,12 @@ func (c *Client) get(ctx context.Context, language string, path string, query ur
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			lastErr = err
+			lastErr = fmt.Errorf("tmdb request %s failed: %w", path, err)
 			continue
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			lastErr = fmt.Errorf("tmdb request failed: %s", resp.Status)
+			lastErr = fmt.Errorf("tmdb request %s failed: %s", path, resp.Status)
 			_ = resp.Body.Close()
 			if shouldRetryTMDBStatus(resp.StatusCode) {
 				continue
@@ -816,11 +838,11 @@ func (c *Client) get(ctx context.Context, language string, path string, query ur
 		if err == nil {
 			return nil
 		}
-		lastErr = err
+		lastErr = fmt.Errorf("tmdb decode %s failed: %w", path, err)
 		if shouldRetryTMDBDecode(err) {
 			continue
 		}
-		return err
+		return lastErr
 	}
 	return lastErr
 }

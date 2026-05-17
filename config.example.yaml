@@ -59,6 +59,8 @@ scraping:
   tmdbApiKey: ""
   tmdbToken: ""
   tmdbBaseUrl: https://api.themoviedb.org/3
+  tmdbImageBaseUrl: https://image.tmdb.org/t/p/original
+  tmdbRequestTimeoutSeconds: 15
   language: zh-CN
   fallbackLanguages:
     - zh-TW

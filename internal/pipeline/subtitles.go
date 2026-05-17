@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -80,14 +81,16 @@ func listSubtitleStreams(ctx context.Context, cfg config.Config, mediaPath strin
 	runCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, cfg.Tools.FFprobe, "-v", "error", "-print_format", "json", "-show_streams", mediaPath)
-	output, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("list subtitle streams: %w: %s", err, strings.TrimSpace(string(output)))
+		return nil, fmt.Errorf("list subtitle streams: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
 	var parsed ffprobeStreams
 	if err := json.Unmarshal(output, &parsed); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse ffprobe streams JSON: %w", err)
 	}
 
 	streams := make([]ffprobeStream, 0)

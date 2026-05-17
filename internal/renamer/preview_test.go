@@ -70,6 +70,17 @@ func TestPreviewSkipsChildOfIgnoredDirectory(t *testing.T) {
 	}
 }
 
+func TestPreviewWorkerCountRespectsLowConcurrency(t *testing.T) {
+	t.Parallel()
+
+	if got := previewWorkerCount(1); got != 1 {
+		t.Fatalf("previewWorkerCount(1) = %d, want 1", got)
+	}
+	if got := previewWorkerCount(9); got != 8 {
+		t.Fatalf("previewWorkerCount(9) = %d, want 8", got)
+	}
+}
+
 func TestParseEpisodeUsesShowDirectoryMetadata(t *testing.T) {
 	t.Parallel()
 

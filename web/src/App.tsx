@@ -29,6 +29,9 @@ type AppConfig = {
     enableBif: boolean;
     enableImageTakeover: boolean;
   };
+  renaming: {
+    concurrency: number;
+  };
   scraping: {
     enableTmdb: boolean;
     enablePeople: boolean;
@@ -254,7 +257,7 @@ const renamePreferencesKey = 'nya.rename.preferences';
 const renameTemplateHistoryLimit = 20;
 
 function previewWorkerCount(configured: number) {
-  if (configured < 4) return 4;
+  if (configured < 1) return 1;
   if (configured > 8) return 8;
   return configured;
 }
@@ -434,7 +437,7 @@ export function App() {
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const lastTaskSelectionIndexRef = useRef<number | null>(null);
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
-  const renameBatchConcurrency = previewWorkerCount(config?.processing.concurrency ?? 2);
+  const renameBatchConcurrency = previewWorkerCount(config?.renaming?.concurrency ?? 3);
   const renameErrorCount = renamePreview.filter((item) => item.status === 'error' || item.conflict).length;
   const renameWarningCount = renamePreview.filter((item) => item.status === 'warning').length;
 
@@ -1166,7 +1169,8 @@ export function App() {
             <Row label="监听地址" value={config?.server.addr ?? '-'} />
             <Row label="显示时区" value={displayTimezone} />
             <Row label="数据库" value={config?.database.path ?? '-'} />
-            <Row label="并发数" value={String(config?.processing.concurrency ?? '-')} />
+            <Row label="扫描处理并发" value={String(config?.processing.concurrency ?? '-')} />
+            <Row label="整理命名并发" value={String(config?.renaming?.concurrency ?? '-')} />
             <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
             <Row label="自定义集数正则" value={config?.processing.episodePatterns?.length ? `${config.processing.episodePatterns.length} 条` : '未设置'} />
             <Row label="TMDB 地址" value={config?.scraping.tmdbBaseUrl ?? '-'} />
@@ -1208,7 +1212,8 @@ export function App() {
                   <label>mediainfo<input value={config.tools.mediainfo} onChange={(event) => updateConfig((draft) => { draft.tools.mediainfo = event.target.value; })} /></label>
                   <label className="extensions-field">扩展名<textarea value={extensionInput} onChange={(event) => updateConfig((draft) => { draft.processing.extensions = normalizeExtensions(event.target.value); })} placeholder={commonVideoExtensions.join('\n')} rows={8} /><small>每行一个后缀，或用逗号分隔，例如 `.mkv`、`.mp4`、`.rmvb`。</small></label>
                   <label className="extensions-field">自定义集数正则<textarea value={episodePatternInput} onChange={(event) => updateConfig((draft) => { draft.processing.episodePatterns = normalizeLines(event.target.value); })} placeholder={'可选。每行一条，例如：(?i)^.+?-(?P<episode>\\d{2})$'} rows={4} /><small>默认已识别 S01E01、1x01、`标题 - 01 [参数]`、`01.mkv` 等；仅默认不够时填写。命名捕获组可用 `season` / `episode`，还能在模板里使用 `releaseGroup`。</small></label>
-                  <label>并发数<input type="number" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
+                  <label>扫描处理并发<input type="number" min="1" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
+                  <label>整理命名并发<input type="number" min="1" max="8" value={config.renaming?.concurrency ?? 3} onChange={(event) => updateConfig((draft) => { draft.renaming = { ...(draft.renaming ?? { concurrency: 3 }), concurrency: Number(event.target.value) }; })} /><small>用于生成预览、批量修正季集、批量应用剧集；设为 1 可降低 TMDB 风控风险。</small></label>
                   <label>BIF 宽度<input type="number" value={config.processing.bifWidth} onChange={(event) => updateConfig((draft) => { draft.processing.bifWidth = Number(event.target.value); })} /></label>
                   <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
                   <SelectField label="BIF 加速" value={config.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => updateConfig((draft) => { draft.processing.bifHwAccel = value; })} />

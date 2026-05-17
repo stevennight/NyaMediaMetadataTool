@@ -43,6 +43,9 @@ processing:
   enableBif: true
   enableImageTakeover: false
 
+renaming:
+  concurrency: 3
+
 scraping:
   enableTmdb: true
   enablePeople: true

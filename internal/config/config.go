@@ -14,6 +14,7 @@ type Config struct {
 	Database   DatabaseConfig   `json:"database" yaml:"database"`
 	Tools      ToolsConfig      `json:"tools" yaml:"tools"`
 	Processing ProcessingConfig `json:"processing" yaml:"processing"`
+	Renaming   RenamingConfig   `json:"renaming" yaml:"renaming"`
 	Scraping   ScrapingConfig   `json:"scraping" yaml:"scraping"`
 	WatchDirs  []WatchDir       `json:"-" yaml:"-"`
 }
@@ -49,6 +50,10 @@ type ProcessingConfig struct {
 	EnableNFO           bool          `json:"enableNfo" yaml:"enableNfo"`
 	EnableBIF           bool          `json:"enableBif" yaml:"enableBif"`
 	EnableImageTakeover bool          `json:"enableImageTakeover" yaml:"enableImageTakeover"`
+}
+
+type RenamingConfig struct {
+	Concurrency int `json:"concurrency" yaml:"concurrency"`
 }
 
 type ScrapingConfig struct {
@@ -124,6 +129,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Processing.Concurrency <= 0 {
 		c.Processing.Concurrency = 2
+	}
+	if c.Renaming.Concurrency <= 0 {
+		c.Renaming.Concurrency = 3
 	}
 	if c.Processing.StableDelay <= 0 {
 		c.Processing.StableDelay = 30 * time.Second

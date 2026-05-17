@@ -250,7 +250,7 @@ func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, e
 		item  PreviewItem
 	}
 
-	workers := previewWorkerCount(cfg.Processing.Concurrency)
+	workers := previewWorkerCount(cfg.Renaming.Concurrency)
 	jobs := make(chan previewJob)
 	results := make(chan previewResult)
 	var wg sync.WaitGroup
@@ -379,8 +379,8 @@ func Apply(historyPath string, input ApplyRequest) (ApplyResult, error) {
 }
 
 func previewWorkerCount(configured int) int {
-	if configured < 4 {
-		return 4
+	if configured < 1 {
+		return 1
 	}
 	if configured > 8 {
 		return 8

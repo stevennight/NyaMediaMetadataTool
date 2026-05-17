@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -169,5 +171,41 @@ func TestMergeActorsOverwrite(t *testing.T) {
 	got := mergeActors(existing, incoming, true)
 	if len(got) != 1 || got[0].Name != "B" {
 		t.Fatalf("unexpected actors after overwrite: %+v", got)
+	}
+}
+
+func TestApplyTMDBShowAndSeasonImagesSkipsNetworkWhenTargetsExist(t *testing.T) {
+	t.Parallel()
+
+	showDir := t.TempDir()
+	seasonDir := filepath.Join(showDir, "Season 1")
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NFOResult{Path: filepath.Join(seasonDir, "Show - S01E01.nfo")}
+	for _, item := range seriesImageArtifacts(showDir, seasonDir, 1) {
+		if err := os.WriteFile(item.Path, []byte("existing"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := config.Default()
+	cfg.Processing.EnableImageTakeover = true
+	cfg.Processing.OverwriteExisting = false
+	cfg.Scraping.EnableTMDB = true
+	cfg.Scraping.TMDBBaseURL = "http://127.0.0.1:1"
+	cfg.Scraping.TMDBAPIKey = "test"
+	cfg.Scraping.ImageSources = []string{"tmdb", "fanart"}
+
+	applyTMDBShowAndSeasonImages(t.Context(), cfg, episodeInfo{Season: 1}, &result)
+
+	if len(result.Images) != 5 {
+		t.Fatalf("expected 5 skipped images, got %d", len(result.Images))
+	}
+	for _, image := range result.Images {
+		if image.Status != "skipped" {
+			t.Fatalf("expected skipped image, got %+v", image)
+		}
 	}
 }

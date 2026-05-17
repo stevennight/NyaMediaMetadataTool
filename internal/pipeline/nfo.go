@@ -500,6 +500,16 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 	if !cfg.Processing.EnableImageTakeover || !imageSourceEnabled(cfg, "tmdb") {
 		return
 	}
+	showDir := showNFOBaseDir(result.Path)
+	seasonDir := filepath.Dir(result.Path)
+	downloads := seriesImageArtifacts(showDir, seasonDir, episode.Season)
+	if !cfg.Processing.OverwriteExisting && allImageArtifactsExist(downloads) {
+		for _, item := range downloads {
+			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: item.Path, Status: "skipped"})
+		}
+		return
+	}
+
 	client, err := tmdb.NewClient(cfg.Scraping)
 	if err != nil {
 		return
@@ -512,8 +522,6 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 		return
 	}
 
-	showDir := showNFOBaseDir(result.Path)
-	seasonDir := filepath.Dir(result.Path)
 	fanartImages := fanart.TVImages{}
 	fanartDetail := "fanart not enabled"
 	if imageSourceEnabled(cfg, "fanart") && show.TVDBID > 0 {
@@ -529,13 +537,6 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 		}
 	} else if imageSourceEnabled(cfg, "fanart") && show.TVDBID <= 0 {
 		fanartDetail = "fanart requires tvdb id"
-	}
-	downloads := []ImageArtifact{
-		{Type: "poster", Path: filepath.Join(showDir, "poster.jpg")},
-		{Type: "fanart", Path: filepath.Join(showDir, "fanart.jpg")},
-		{Type: "clearlogo", Path: filepath.Join(showDir, "clearlogo.png")},
-		{Type: "clearart", Path: filepath.Join(showDir, "clearart.png")},
-		{Type: "season-poster", Path: seasonPosterPath(showDir, seasonDir, episode.Season)},
 	}
 	urls := []string{
 		chooseImageSource(cfg, map[string]string{"tmdb": client.ImageURL(show.PosterPath), "fanart": fanartImages.Poster}),
@@ -564,6 +565,25 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: path, Status: status})
 		}
 	}
+}
+
+func seriesImageArtifacts(showDir string, seasonDir string, season int) []ImageArtifact {
+	return []ImageArtifact{
+		{Type: "poster", Path: filepath.Join(showDir, "poster.jpg")},
+		{Type: "fanart", Path: filepath.Join(showDir, "fanart.jpg")},
+		{Type: "clearlogo", Path: filepath.Join(showDir, "clearlogo.png")},
+		{Type: "clearart", Path: filepath.Join(showDir, "clearart.png")},
+		{Type: "season-poster", Path: seasonPosterPath(showDir, seasonDir, season)},
+	}
+}
+
+func allImageArtifactsExist(items []ImageArtifact) bool {
+	for _, item := range items {
+		if !fileExists(item.Path) {
+			return false
+		}
+	}
+	return true
 }
 
 func imageUnavailableDetail(imageType string, fanartDetail string) string {

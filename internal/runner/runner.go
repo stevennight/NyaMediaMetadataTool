@@ -189,6 +189,9 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate nfo", "")
 	nfoResult, err := r.generateNFO(ctx, task, cfg, media)
 	if err != nil {
+		if nfoResult.TMDBStatus != "" {
+			_ = r.store.AddTaskLog(ctx, task.ID, tmdbLogLevel(nfoResult.TMDBStatus), "tmdb "+nfoResult.TMDBStatus, tmdbLogDetail(nfoResult))
+		}
 		return err
 	}
 	if nfoResult.Path != "" {
@@ -313,7 +316,7 @@ func (r *Runner) generateNFO(ctx context.Context, task store.Task, cfg config.Co
 	}
 	result, err := pipeline.GenerateNFO(ctx, cfg, media)
 	if err != nil {
-		return pipeline.NFOResult{}, err
+		return result, err
 	}
 	return result, nil
 }

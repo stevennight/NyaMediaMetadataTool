@@ -224,6 +224,9 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 
 	result := NFOResult{Path: outputPath}
 	applyTMDBEpisode(ctx, cfg, episode, &doc, &result)
+	if result.TMDBStatus == "failed" {
+		return result, fmt.Errorf("tmdb failed: %s", result.TMDBDetail)
+	}
 
 	if err := writeXMLFile(outputPath, doc); err != nil {
 		return NFOResult{}, err
@@ -252,6 +255,9 @@ func GenerateSeriesNFOWithScopeClaim(ctx context.Context, cfg config.Config, med
 		return SeriesResult{}, nil
 	}
 	applyTMDBShowAndSeasonScoped(ctx, cfg, episode, &result, allowShow, allowSeason)
+	if strings.HasPrefix(result.TMDBDetail, "show/season failed:") || strings.HasPrefix(result.TMDBDetail, "tvshow nfo failed:") || strings.HasPrefix(result.TMDBDetail, "season nfo failed:") {
+		return SeriesResult{ShowNFOPath: result.ShowNFOPath, SeasonNFOPath: result.SeasonNFOPath}, fmt.Errorf("tmdb failed: %s", result.TMDBDetail)
+	}
 	return SeriesResult{ShowNFOPath: result.ShowNFOPath, SeasonNFOPath: result.SeasonNFOPath}, nil
 }
 
@@ -273,6 +279,9 @@ func GenerateSeriesImagesWithScopeClaim(ctx context.Context, cfg config.Config, 
 		return ImageResult{}, nil
 	}
 	applyTMDBShowAndSeasonImagesScoped(ctx, cfg, episode, &result, allowShow, allowSeason)
+	if strings.HasPrefix(result.TMDBDetail, "show/season images failed:") {
+		return ImageResult{Images: result.Images}, fmt.Errorf("tmdb failed: %s", result.TMDBDetail)
+	}
 	return ImageResult{Images: result.Images}, nil
 }
 

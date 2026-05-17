@@ -187,7 +187,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 			_ = r.store.AddTaskLog(ctx, task.ID, "info", "thumb generated", nfoResult.ThumbPath)
 		}
 		if nfoResult.TMDBStatus != "" {
-			_ = r.store.AddTaskLog(ctx, task.ID, "info", "tmdb "+nfoResult.TMDBStatus, tmdbLogDetail(nfoResult))
+			_ = r.store.AddTaskLog(ctx, task.ID, tmdbLogLevel(nfoResult.TMDBStatus), "tmdb "+nfoResult.TMDBStatus, tmdbLogDetail(nfoResult))
 		}
 		for _, failure := range nfoResult.Failures {
 			_ = r.store.AddTaskLog(ctx, task.ID, "error", "nfo artifact failed", failure)
@@ -241,6 +241,13 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 		return errors.New("artifact generation failed: " + strings.Join(failures, "; "))
 	}
 	return r.store.TouchMediaProcessed(ctx, media.ID)
+}
+
+func tmdbLogLevel(status string) string {
+	if status == "failed" {
+		return "error"
+	}
+	return "info"
 }
 
 func tmdbLogDetail(result pipeline.NFOResult) string {

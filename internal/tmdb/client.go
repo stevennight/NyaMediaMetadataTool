@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +15,8 @@ import (
 )
 
 var ErrDisabled = errors.New("tmdb scraping is disabled")
+
+const tmdbRequestAttempts = 3
 
 type Client struct {
 	baseURL    string
@@ -774,46 +777,60 @@ func (c *Client) get(ctx context.Context, language string, path string, query ur
 		requestURL += "?" + encoded
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		return err
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.doWithRetry(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("tmdb request failed: %s", resp.Status)
-	}
-	return json.NewDecoder(resp.Body).Decode(target)
-}
-
-func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < tmdbRequestAttempts; attempt++ {
 		if attempt > 0 {
 			select {
-			case <-req.Context().Done():
-				return nil, req.Context().Err()
+			case <-ctx.Done():
+				return ctx.Err()
 			case <-time.After(time.Duration(attempt) * 300 * time.Millisecond):
 			}
 		}
 
-		clone := req.Clone(req.Context())
-		resp, err := c.httpClient.Do(clone)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+		if err != nil {
+			return err
+		}
+		if c.token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("tmdb request failed: %s", resp.Status)
+			_ = resp.Body.Close()
+			if shouldRetryTMDBStatus(resp.StatusCode) {
+				continue
+			}
+			return lastErr
+		}
+
+		err = json.NewDecoder(resp.Body).Decode(target)
+		_ = resp.Body.Close()
 		if err == nil {
-			return resp, nil
+			return nil
 		}
 		lastErr = err
+		if shouldRetryTMDBDecode(err) {
+			continue
+		}
+		return err
 	}
-	return nil, lastErr
+	return lastErr
+}
+
+func shouldRetryTMDBStatus(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode >= 500
+}
+
+func shouldRetryTMDBDecode(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func languageOrder(primary string, fallback []string) []string {

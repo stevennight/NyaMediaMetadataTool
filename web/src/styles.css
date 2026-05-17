@@ -452,13 +452,35 @@ button:disabled {
 }
 
 .rename-match-bar {
+  position: sticky;
+  top: 12px;
+  z-index: 5;
   display: grid;
   gap: 10px;
-  margin-bottom: 14px;
+  margin: -8px -8px 14px;
+  padding: 8px;
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 251, 235, 0.94);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 12px 28px rgba(68, 64, 60, 0.08);
 }
 
 .rename-bulk-actions {
   justify-content: flex-start;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.rename-preview-stats {
+  color: #78716c;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.rename-match-bar .path-input {
+  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 
 .tmdb-results {

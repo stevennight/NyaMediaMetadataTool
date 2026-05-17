@@ -253,6 +253,23 @@ const renamePlaceholders = [
 const renamePreferencesKey = 'nya.rename.preferences';
 const renameTemplateHistoryLimit = 20;
 
+function previewWorkerCount(configured: number) {
+  if (configured < 4) return 4;
+  if (configured > 8) return 8;
+  return configured;
+}
+
+async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<void>) {
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+}
+
 type RenamePreferences = {
   path?: string;
   template?: string;
@@ -378,6 +395,7 @@ export function App() {
   const [selectedRenamePaths, setSelectedRenamePaths] = useState<string[]>([]);
   const [tmdbQuery, setTmdbQuery] = useState('');
   const [tmdbResults, setTmdbResults] = useState<TMDBSearchResult[]>([]);
+  const [tmdbResultsCollapsed, setTmdbResultsCollapsed] = useState(false);
   const [searchingTmdb, setSearchingTmdb] = useState(false);
   const [applyingTmdbShowId, setApplyingTmdbShowId] = useState<number | null>(null);
   const [tmdbApplyProgress, setTmdbApplyProgress] = useState(0);
@@ -416,6 +434,9 @@ export function App() {
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const lastTaskSelectionIndexRef = useRef<number | null>(null);
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
+  const renameBatchConcurrency = previewWorkerCount(config?.processing.concurrency ?? 2);
+  const renameErrorCount = renamePreview.filter((item) => item.status === 'error' || item.conflict).length;
+  const renameWarningCount = renamePreview.filter((item) => item.status === 'warning').length;
 
   useEffect(() => {
     async function load() {
@@ -689,8 +710,9 @@ export function App() {
       })
     });
     if (!response.ok) {
-      setError(await response.text());
-      return null;
+      const message = await response.text();
+      setError(message);
+      throw new Error(message);
     }
     return await response.json() as RenamePreviewItem;
   }
@@ -702,6 +724,8 @@ export function App() {
     try {
       const next = await previewAdjustedRenameItem(item, options);
       if (next) replaceRenameItem(next);
+    } catch (err) {
+      updateRenameItem(item.path, { status: 'error', message: err instanceof Error ? err.message : '重新预览失败' });
     } finally {
       recalculatingRenamePathsRef.current.delete(item.path);
       setRecalculatingRenamePaths(Array.from(recalculatingRenamePathsRef.current));
@@ -721,6 +745,7 @@ export function App() {
       }
       const result = await response.json();
       setTmdbResults(asArray<TMDBSearchResult>(result.items));
+      setTmdbResultsCollapsed(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : '搜索 TMDB 失败');
     } finally {
@@ -740,11 +765,17 @@ export function App() {
     setTmdbApplyProgress(0);
     setTmdbApplyTotal(targets.length);
     setError('');
+    let completed = 0;
     try {
-      for (let index = 0; index < targets.length; index++) {
-        setTmdbApplyProgress(index + 1);
-        await recalculateRenameItem({ ...targets[index], manualName: false }, { tmdbShowId: show.id, show: show.name || show.originalName, forceTmdb: true, keepManualName: false });
-      }
+      await runWithConcurrency(targets, renameBatchConcurrency, async (item) => {
+        try {
+          await recalculateRenameItem({ ...item, manualName: false }, { tmdbShowId: show.id, show: show.name || show.originalName, forceTmdb: true, keepManualName: false });
+        } finally {
+          completed++;
+          setTmdbApplyProgress(completed);
+        }
+      });
+      setTmdbResultsCollapsed(true);
     } finally {
       applyingTmdbShowRef.current = false;
       setApplyingTmdbShowId(null);
@@ -785,19 +816,25 @@ export function App() {
     setApplyingBatchEpisode(true);
     setBatchEpisodeProgress(0);
     setError('');
+    let completed = 0;
     try {
-      for (let index = 0; index < targets.length; index++) {
-        setBatchEpisodeProgress(index + 1);
-        const item = targets[index];
+      await runWithConcurrency(targets, renameBatchConcurrency, async (item, index) => {
         const episode = batchEpisodeMode === 'sequence'
           ? batchEpisodeStart + index
           : batchEpisodeMode === 'offset'
             ? item.episode + batchEpisodeOffset
             : item.episode;
         const adjusted = { ...item, season: batchSeason, episode: Math.max(0, episode), manualName: false };
-        const next = await previewAdjustedRenameItem(adjusted, { forceTmdb: true, keepManualName: false });
-        if (next) replaceRenameItem(next);
-      }
+        try {
+          const next = await previewAdjustedRenameItem(adjusted, { forceTmdb: true, keepManualName: false });
+          if (next) replaceRenameItem(next);
+        } catch (err) {
+          updateRenameItem(item.path, { status: 'error', message: err instanceof Error ? err.message : '重新预览失败' });
+        } finally {
+          completed++;
+          setBatchEpisodeProgress(completed);
+        }
+      });
       setBatchEpisodeOpen(false);
       setNotice(`已批量修正 ${targets.length} 个文件的季集并重新预览。`);
     } finally {
@@ -1261,12 +1298,14 @@ export function App() {
                 <button className="secondary" type="button" onClick={invertRenameSelection} disabled={!renamePreview.length}>反选</button>
                 <button className="secondary" type="button" onClick={openBatchEpisodeDialog} disabled={!selectedRenamePaths.length}>批量修正季集</button>
                 <button type="button" onClick={applySelectedRenames} disabled={applyingRename || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
+                <span className="rename-preview-stats">并发 {renameBatchConcurrency} · 错误 {renameErrorCount} · 警告 {renameWarningCount}</span>
               </div>
               <div className="path-input">
                 <input value={tmdbQuery} onChange={(event) => setTmdbQuery(event.target.value)} placeholder="搜索 TMDB 剧集，例如 Frieren" />
                 <button type="button" onClick={searchTmdbShows} disabled={searchingTmdb}>{searchingTmdb ? '搜索中' : '搜索剧集'}</button>
+                {tmdbResults.length ? <button className="secondary" type="button" onClick={() => setTmdbResultsCollapsed((value) => !value)}>{tmdbResultsCollapsed ? `展开结果 (${tmdbResults.length})` : '收起结果'}</button> : null}
               </div>
-              {tmdbResults.length ? (
+              {tmdbResults.length && !tmdbResultsCollapsed ? (
                 <div className="tmdb-results">
                   {tmdbResults.map((show) => (
                     <button type="button" key={show.id} onClick={() => applyTmdbShowToSelected(show)} disabled={applyingTmdbShowId !== null} title="套用到勾选项并按各自行季集重新获取标题">
@@ -1274,7 +1313,7 @@ export function App() {
                     </button>
                   ))}
                 </div>
-              ) : <p className="muted">勾选文件后搜索剧集，点击候选即可套用到选中项并重新预览。</p>}
+              ) : tmdbResults.length ? null : <p className="muted">勾选文件后搜索剧集，点击候选即可套用到选中项并重新预览。</p>}
             </div>
             <div className="task-table-wrap">
               <table className="task-table rename-table">

@@ -10,3 +10,4 @@ web/*.tsbuildinfo
 
 .env
 .env.*
+config.yaml

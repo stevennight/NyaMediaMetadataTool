@@ -377,6 +377,9 @@ export function App() {
   const [tmdbQuery, setTmdbQuery] = useState('');
   const [tmdbResults, setTmdbResults] = useState<TMDBSearchResult[]>([]);
   const [searchingTmdb, setSearchingTmdb] = useState(false);
+  const [applyingTmdbShowId, setApplyingTmdbShowId] = useState<number | null>(null);
+  const [tmdbApplyProgress, setTmdbApplyProgress] = useState(0);
+  const [tmdbApplyTotal, setTmdbApplyTotal] = useState(0);
   const [applyingRename, setApplyingRename] = useState(false);
   const [batchEpisodeOpen, setBatchEpisodeOpen] = useState(false);
   const [batchSeason, setBatchSeason] = useState(1);
@@ -384,6 +387,7 @@ export function App() {
   const [batchEpisodeOffset, setBatchEpisodeOffset] = useState(0);
   const [batchEpisodeStart, setBatchEpisodeStart] = useState(1);
   const [applyingBatchEpisode, setApplyingBatchEpisode] = useState(false);
+  const [batchEpisodeProgress, setBatchEpisodeProgress] = useState(0);
   const [targetPathEditor, setTargetPathEditor] = useState<{ path: string; value: string } | null>(null);
   const [renameTemplateEditorOpen, setRenameTemplateEditorOpen] = useState(false);
   const [previewingRename, setPreviewingRename] = useState(false);
@@ -404,6 +408,7 @@ export function App() {
   const [rescanning, setRescanning] = useState(false);
   const [error, setError] = useState<string>('');
   const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
+  const applyingTmdbShowRef = useRef(false);
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const lastTaskSelectionIndexRef = useRef<number | null>(null);
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
@@ -710,14 +715,27 @@ export function App() {
   }
 
   async function applyTmdbShowToSelected(show: TMDBSearchResult) {
+    if (applyingTmdbShowRef.current) return;
     const targets = renamePreview.filter((item) => selectedRenamePaths.includes(item.path));
     if (!targets.length) {
       setError('请先勾选要套用的文件');
       return;
     }
+    applyingTmdbShowRef.current = true;
+    setApplyingTmdbShowId(show.id);
+    setTmdbApplyProgress(0);
+    setTmdbApplyTotal(targets.length);
     setError('');
-    for (const item of targets) {
-      await recalculateRenameItem(item, { tmdbShowId: show.id, show: show.name || show.originalName, forceTmdb: true });
+    try {
+      for (let index = 0; index < targets.length; index++) {
+        setTmdbApplyProgress(index + 1);
+        await recalculateRenameItem(targets[index], { tmdbShowId: show.id, show: show.name || show.originalName, forceTmdb: true });
+      }
+    } finally {
+      applyingTmdbShowRef.current = false;
+      setApplyingTmdbShowId(null);
+      setTmdbApplyProgress(0);
+      setTmdbApplyTotal(0);
     }
   }
 
@@ -751,9 +769,11 @@ export function App() {
       return;
     }
     setApplyingBatchEpisode(true);
+    setBatchEpisodeProgress(0);
     setError('');
     try {
       for (let index = 0; index < targets.length; index++) {
+        setBatchEpisodeProgress(index + 1);
         const item = targets[index];
         const episode = batchEpisodeMode === 'sequence'
           ? batchEpisodeStart + index
@@ -768,6 +788,7 @@ export function App() {
       setNotice(`已批量修正 ${targets.length} 个文件的季集并重新预览。`);
     } finally {
       setApplyingBatchEpisode(false);
+      setBatchEpisodeProgress(0);
     }
   }
 
@@ -1233,8 +1254,8 @@ export function App() {
               {tmdbResults.length ? (
                 <div className="tmdb-results">
                   {tmdbResults.map((show) => (
-                    <button type="button" key={show.id} onClick={() => applyTmdbShowToSelected(show)} title="套用到勾选项并按各自行季集重新获取标题">
-                      {show.name || show.originalName} <small>{show.firstAirDate?.slice(0, 4) || '----'} · #{show.id}</small>
+                    <button type="button" key={show.id} onClick={() => applyTmdbShowToSelected(show)} disabled={applyingTmdbShowId !== null} title="套用到勾选项并按各自行季集重新获取标题">
+                      {applyingTmdbShowId === show.id ? `应用中 ${tmdbApplyProgress}/${tmdbApplyTotal}` : show.name || show.originalName} <small>{show.firstAirDate?.slice(0, 4) || '----'} · #{show.id}</small>
                     </button>
                   ))}
                 </div>
@@ -1378,7 +1399,7 @@ export function App() {
         </section>
       )}
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onBrowsePath={() => setDirectoryPicker({ title: '选择补扫目录', value: rescanTarget, onSelect: setRescanTarget })} onSubmit={() => void rescan()} />}
-      {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
+      {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} placeholders={renamePlaceholders} onChange={setRenameTemplate} onClose={() => setRenameTemplateEditorOpen(false)} />}
       {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
@@ -1523,6 +1544,7 @@ function BatchEpisodeModal(props: {
   offset: number;
   start: number;
   applying: boolean;
+  progress: number;
   onClose: () => void;
   onSeasonChange: (value: number) => void;
   onModeChange: (value: BatchEpisodeMode) => void;
@@ -1550,7 +1572,7 @@ function BatchEpisodeModal(props: {
         </div>
         <div className="inline-actions modal-actions">
           <button className="secondary" onClick={props.onClose}>取消</button>
-          <button onClick={props.onSubmit} disabled={props.applying}>{props.applying ? '应用中' : '应用并查 TMDB'}</button>
+          <button onClick={props.onSubmit} disabled={props.applying}>{props.applying ? `应用中 ${props.progress}/${props.count}` : '应用并查 TMDB'}</button>
         </div>
       </section>
     </div>

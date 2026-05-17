@@ -125,18 +125,27 @@ func extractSeasonEpisode(re *regexp.Regexp, match []string) (int, int, bool) {
 
 func parseNumericEpisode(name string) (Result, bool) {
 	name = trimTrailingMetadata(name)
-	match := numericEpisodePattern.FindStringSubmatch(name)
-	if len(match) != 2 {
+	match := numericEpisodePattern.FindStringSubmatchIndex(name)
+	if len(match) != 4 {
 		return Result{}, false
 	}
-	episode, err := strconv.Atoi(match[1])
+	start := match[2]
+	if start >= 2 && name[start-1] == '.' && isASCIIDigit(name[start-2]) {
+		return Result{}, false
+	}
+	episodeToken := name[match[2]:match[3]]
+	episode, err := strconv.Atoi(episodeToken)
 	if err != nil {
 		return Result{}, false
 	}
-	if len(match[1]) == 4 && episode >= 1900 && episode <= 2099 {
+	if len(episodeToken) == 4 && episode >= 1900 && episode <= 2099 {
 		return Result{}, false
 	}
-	return Result{Season: 1, Episode: episode, Token: match[1]}, true
+	return Result{Season: 1, Episode: episode, Token: episodeToken}, true
+}
+
+func isASCIIDigit(value byte) bool {
+	return value >= '0' && value <= '9'
 }
 
 func trimTrailingMetadata(name string) string {

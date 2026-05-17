@@ -2,6 +2,7 @@ package renamer
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,6 +99,27 @@ func TestParseEpisodeSupportsNumericEpisodeOnly(t *testing.T) {
 	}
 	if parsed.releaseGroup != "Kamigami" {
 		t.Fatalf("unexpected release group: %q", parsed.releaseGroup)
+	}
+}
+
+func TestParseEpisodeRejectsFractionalEpisodeAsNumericFallback(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(`D:\Media`, "[Kamigami] Sword Art Online II - 14.5 [1920x1080 x264 AAC].mkv")
+	if _, ok := parseEpisode(path, config.Default()); ok {
+		t.Fatal("expected fractional episode to be ignored")
+	}
+}
+
+func TestPreviewItemRequestAcceptsFractionalEpisodeInput(t *testing.T) {
+	t.Parallel()
+
+	var input PreviewItemRequest
+	if err := json.Unmarshal([]byte(`{"episode":14.5}`), &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.Episode == nil || !input.Episode.Fractional || input.Episode.Value != 14 {
+		t.Fatalf("unexpected episode input: %+v", input.Episode)
 	}
 }
 

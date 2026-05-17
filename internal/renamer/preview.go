@@ -2,6 +2,7 @@ package renamer
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"io/fs"
@@ -84,16 +85,39 @@ type PreviewItem struct {
 }
 
 type PreviewItemRequest struct {
-	Path       string `json:"path"`
-	Template   string `json:"template"`
-	UseTMDB    bool   `json:"useTmdb"`
-	Language   string `json:"language"`
-	Show       string `json:"show"`
-	Title      string `json:"title"`
-	Season     *int   `json:"season"`
-	Episode    *int   `json:"episode"`
-	TMDBShowID int    `json:"tmdbShowId"`
-	NewName    string `json:"newName"`
+	Path       string    `json:"path"`
+	Template   string    `json:"template"`
+	UseTMDB    bool      `json:"useTmdb"`
+	Language   string    `json:"language"`
+	Show       string    `json:"show"`
+	Title      string    `json:"title"`
+	Season     *inputInt `json:"season"`
+	Episode    *inputInt `json:"episode"`
+	TMDBShowID int       `json:"tmdbShowId"`
+	NewName    string    `json:"newName"`
+}
+
+type inputInt struct {
+	Value      int
+	Fractional bool
+}
+
+func (v *inputInt) UnmarshalJSON(data []byte) error {
+	var number json.Number
+	if err := json.Unmarshal(data, &number); err != nil {
+		return err
+	}
+	if integer, err := strconv.Atoi(number.String()); err == nil {
+		v.Value = integer
+		return nil
+	}
+	floatValue, err := strconv.ParseFloat(number.String(), 64)
+	if err != nil {
+		return err
+	}
+	v.Value = int(floatValue)
+	v.Fractional = true
+	return nil
 }
 
 type ApplyRequest struct {
@@ -323,17 +347,30 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 	if strings.TrimSpace(input.Title) != "" {
 		item.Title = strings.TrimSpace(input.Title)
 	}
-	if input.Season != nil && *input.Season >= 0 {
-		item.Season = *input.Season
+	invalidEpisodeInput := false
+	if input.Season != nil {
+		if input.Season.Fractional {
+			item.Status = "warning"
+			item.Message = "TMDB 不支持小数季数，请改成整数季/集后重试"
+			invalidEpisodeInput = true
+		} else if input.Season.Value >= 0 {
+			item.Season = input.Season.Value
+		}
 	}
-	if input.Episode != nil && *input.Episode >= 0 {
-		item.Episode = *input.Episode
+	if input.Episode != nil {
+		if input.Episode.Fractional {
+			item.Status = "warning"
+			item.Message = "TMDB 不支持小数集数，请改成整数季/集后重试"
+			invalidEpisodeInput = true
+		} else if input.Episode.Value >= 0 {
+			item.Episode = input.Episode.Value
+		}
 	}
 	if input.TMDBShowID > 0 {
 		item.TMDBShowID = input.TMDBShowID
 	}
 
-	if client != nil {
+	if client != nil && !invalidEpisodeInput {
 		episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Year, item.Season, item.Episode)
 		if err != nil {
 			item.Status = "warning"

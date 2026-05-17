@@ -131,9 +131,7 @@ func exportSubtitle(ctx context.Context, cfg config.Config, mediaPath string, st
 	}
 	args = append(args, outputPath)
 
-	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, cfg.Tools.FFmpeg, args...)
+	cmd := exec.CommandContext(ctx, cfg.Tools.FFmpeg, args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return subtitleArtifact{}, fmt.Errorf("extract subtitle stream %d: %w: %s", stream.Index, err, strings.TrimSpace(string(output)))
 	}

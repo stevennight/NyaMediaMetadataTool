@@ -162,7 +162,7 @@ type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
 type SelectOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'rename';
-type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'canceled';
+type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
 
 const pagePaths: Record<PageKey, string> = {
   dashboard: '/',
@@ -241,6 +241,7 @@ const taskStatusFilters: { value: TaskStatusFilter; label: string }[] = [
   { value: 'running', label: 'Running' },
   { value: 'completed', label: 'Completed' },
   { value: 'failed', label: 'Failed' },
+  { value: 'ignored', label: 'Ignored' },
   { value: 'canceled', label: 'Canceled' }
 ];
 const taskListRefreshIntervalMs = 5000;
@@ -345,6 +346,8 @@ function taskStatusPillClass(status: string) {
       return 'pill ok';
     case 'failed':
       return 'pill bad';
+    case 'ignored':
+      return 'pill ignored';
     case 'canceled':
       return 'pill warn';
     case 'running':
@@ -439,6 +442,7 @@ export function App() {
   const [savingConfig, setSavingConfig] = useState(false);
   const [cancelingTasks, setCancelingTasks] = useState(false);
   const [retryingTasks, setRetryingTasks] = useState(false);
+  const [ignoringTasks, setIgnoringTasks] = useState(false);
   const [notice, setNotice] = useState('');
   const [rescanning, setRescanning] = useState(false);
   const [error, setError] = useState<string>('');
@@ -1113,6 +1117,34 @@ export function App() {
     }
   }
 
+  async function ignoreSelectedTasks() {
+    if (!selectedTaskIds.length) {
+      setError('请先勾选要忽略的失败任务');
+      return;
+    }
+    setIgnoringTasks(true);
+    setError('');
+    try {
+      const response = await fetch('/api/tasks/ignore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedTaskIds })
+      });
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const result = await response.json();
+      setNotice(`已忽略 ${result.count ?? 0} 个失败任务。`);
+      setSelectedTaskIds([]);
+      await loadTasks(taskPage);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '忽略任务失败');
+    } finally {
+      setIgnoringTasks(false);
+    }
+  }
+
   async function cancelActiveTasks() {
     if (!window.confirm('确定取消所有待执行和执行中的任务吗？')) return;
     setCancelingTasks(true);
@@ -1432,7 +1464,7 @@ export function App() {
 
         {activePage === 'tasks' && (
         <section className="page-grid task-page-grid">
-          <Card title="任务列表" action={<div className="inline-actions"><button className="secondary" onClick={() => void retrySelectedTasks()} disabled={retryingTasks || selectedTaskIds.length === 0}>{retryingTasks ? '重试中' : `重试选中${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button></div>}>
+          <Card title="任务列表" action={<div className="inline-actions"><button className="secondary" onClick={() => void retrySelectedTasks()} disabled={retryingTasks || selectedTaskIds.length === 0}>{retryingTasks ? '重试中' : `重试选中${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="secondary" onClick={() => void ignoreSelectedTasks()} disabled={ignoringTasks || selectedTaskIds.length === 0}>{ignoringTasks ? '忽略中' : `忽略失败${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button></div>}>
             <div className="task-status-tabs" role="tablist" aria-label="任务状态过滤">
               {taskStatusFilters.map((status) => (
                 <button className={taskStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} role="tab" aria-selected={taskStatusFilter === status.value} onClick={() => selectTaskStatusFilter(status.value)}>

@@ -7,6 +7,67 @@ import (
 	"testing"
 )
 
+func TestIgnoreFailedTasksAndRetryIgnored(t *testing.T) {
+	t.Parallel()
+
+	st := openTestStore(t)
+	defer st.Close()
+
+	ctx := context.Background()
+	videoPath := filepath.Join(t.TempDir(), "Series - S01E01.mkv")
+	if err := os.WriteFile(videoPath, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(videoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaID, err := st.UpsertMediaFile(ctx, videoPath, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnqueueMediaTaskWithScanRun(ctx, mediaID, true, true, "scan-1"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := st.ClaimNextPendingTask(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FailTask(ctx, task.ID, "tmdb failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := st.IgnoreTasks(ctx, []int64{task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 ignored task, got %d", count)
+	}
+	ignored, err := st.ListTasksFiltered(ctx, TaskListFilters{Status: "ignored"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ignored.Items) != 1 || ignored.Items[0].Status != "ignored" || ignored.Items[0].ErrorSummary != "tmdb failed" {
+		t.Fatalf("expected ignored task with original error, got %+v", ignored.Items)
+	}
+
+	count, err = st.RetryTasks(ctx, []int64{task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 retried task, got %d", count)
+	}
+	retried, err := st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Status != "pending" || retried.ErrorSummary != "" {
+		t.Fatalf("expected pending retried task, got %+v", retried)
+	}
+}
+
 func TestClaimScanScopeAllowsOwningTaskRetry(t *testing.T) {
 	t.Parallel()
 

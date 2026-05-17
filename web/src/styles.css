@@ -1033,6 +1033,17 @@ h3 {
   color: #1f2937;
 }
 
+.config-form label textarea {
+  width: 100%;
+  color: #1f2937;
+  resize: vertical;
+}
+
+.extensions-field small {
+  color: #78716c;
+  line-height: 1.5;
+}
+
 .language-picker {
   display: grid;
   gap: 8px;

@@ -16,6 +16,20 @@ processing:
     - .mkv
     - .mp4
     - .ts
+    - .m2ts
+    - .mts
+    - .mov
+    - .m4v
+    - .avi
+    - .wmv
+    - .flv
+    - .webm
+    - .rmvb
+    - .rm
+    - .mpg
+    - .mpeg
+    - .vob
+    - .asf
   concurrency: 2
   stableDelay: 30s
   stableChecks: 2

@@ -140,7 +140,7 @@ func (c *Config) applyDefaults() {
 		c.Processing.BIFHWAccel = "cpu"
 	}
 	if len(c.Processing.Extensions) == 0 {
-		c.Processing.Extensions = []string{".mkv", ".mp4", ".ts"}
+		c.Processing.Extensions = []string{".mkv", ".mp4", ".ts", ".m2ts", ".mts", ".mov", ".m4v", ".avi", ".wmv", ".flv", ".webm", ".rmvb", ".rm", ".mpg", ".mpeg", ".vob", ".asf"}
 	}
 	if c.WatchDirs == nil {
 		c.WatchDirs = []WatchDir{}

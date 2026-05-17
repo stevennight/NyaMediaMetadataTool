@@ -258,6 +258,7 @@ type RenamePreferences = {
   template?: string;
   language?: string;
   useTmdb?: boolean;
+  releaseGroup?: string;
   templateHistory?: string[];
 };
 
@@ -363,6 +364,7 @@ export function App() {
   const [renamePath, setRenamePath] = useState(() => readRenamePreferences().path ?? '');
   const [renameTemplate, setRenameTemplate] = useState(() => readRenamePreferences().template ?? defaultRenameTemplate);
   const [renameUseTmdb, setRenameUseTmdb] = useState(() => readRenamePreferences().useTmdb ?? true);
+  const [renameReleaseGroup, setRenameReleaseGroup] = useState(() => readRenamePreferences().releaseGroup ?? '');
   const [renameLanguage, setRenameLanguage] = useState(() => readRenamePreferences().language ?? 'zh-CN');
   const [renameLanguageInitialized, setRenameLanguageInitialized] = useState(() => Boolean(readRenamePreferences().language));
   const [renameTemplateHistory, setRenameTemplateHistory] = useState(() => asArray<string>(readRenamePreferences().templateHistory).filter(Boolean));
@@ -380,6 +382,7 @@ export function App() {
   const [applyingTmdbShowId, setApplyingTmdbShowId] = useState<number | null>(null);
   const [tmdbApplyProgress, setTmdbApplyProgress] = useState(0);
   const [tmdbApplyTotal, setTmdbApplyTotal] = useState(0);
+  const [recalculatingRenamePaths, setRecalculatingRenamePaths] = useState<string[]>([]);
   const [applyingRename, setApplyingRename] = useState(false);
   const [batchEpisodeOpen, setBatchEpisodeOpen] = useState(false);
   const [batchSeason, setBatchSeason] = useState(1);
@@ -409,6 +412,7 @@ export function App() {
   const [error, setError] = useState<string>('');
   const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
   const applyingTmdbShowRef = useRef(false);
+  const recalculatingRenamePathsRef = useRef(new Set<string>());
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const lastTaskSelectionIndexRef = useRef<number | null>(null);
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
@@ -565,7 +569,7 @@ export function App() {
       const response = await fetch('/api/rename/preview/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, useTmdb: renameUseTmdb, language: renameLanguage })
+        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, useTmdb: renameUseTmdb, language: renameLanguage, releaseGroup: renameReleaseGroup.trim() })
       });
       if (!response.ok) {
         setError(await response.text());
@@ -608,6 +612,7 @@ export function App() {
       template,
       language: renameLanguage,
       useTmdb: renameUseTmdb,
+      releaseGroup: renameReleaseGroup.trim(),
       templateHistory: nextHistory
     });
   }
@@ -676,6 +681,7 @@ export function App() {
         language: renameLanguage,
         show: options.show ?? item.show,
         title: item.title,
+        releaseGroup: renameReleaseGroup.trim(),
         season: item.season,
         episode: item.episode,
         tmdbShowId: options.tmdbShowId ?? item.tmdbShowId,
@@ -690,8 +696,16 @@ export function App() {
   }
 
   async function recalculateRenameItem(item: RenamePreviewItem, options: { tmdbShowId?: number; show?: string; forceTmdb?: boolean; keepManualName?: boolean } = {}) {
-    const next = await previewAdjustedRenameItem(item, options);
-    if (next) replaceRenameItem(next);
+    if (recalculatingRenamePathsRef.current.has(item.path)) return;
+    recalculatingRenamePathsRef.current.add(item.path);
+    setRecalculatingRenamePaths(Array.from(recalculatingRenamePathsRef.current));
+    try {
+      const next = await previewAdjustedRenameItem(item, options);
+      if (next) replaceRenameItem(next);
+    } finally {
+      recalculatingRenamePathsRef.current.delete(item.path);
+      setRecalculatingRenamePaths(Array.from(recalculatingRenamePathsRef.current));
+    }
   }
 
   async function searchTmdbShows() {
@@ -729,7 +743,7 @@ export function App() {
     try {
       for (let index = 0; index < targets.length; index++) {
         setTmdbApplyProgress(index + 1);
-        await recalculateRenameItem(targets[index], { tmdbShowId: show.id, show: show.name || show.originalName, forceTmdb: true });
+        await recalculateRenameItem({ ...targets[index], manualName: false }, { tmdbShowId: show.id, show: show.name || show.originalName, forceTmdb: true, keepManualName: false });
       }
     } finally {
       applyingTmdbShowRef.current = false;
@@ -1234,6 +1248,7 @@ export function App() {
                 </div>
               </label>
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
+              <label>字幕组<input value={renameReleaseGroup} onChange={(event) => setRenameReleaseGroup(event.target.value)} placeholder="留空则从原文件名识别" /></label>
               <Toggle label="缺少 NFO 时查询 TMDB" checked={renameUseTmdb} onChange={setRenameUseTmdb} />
             </div>
             <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
@@ -1276,7 +1291,9 @@ export function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {renamePreview.length ? renamePreview.map((item, index) => (
+                  {renamePreview.length ? renamePreview.map((item, index) => {
+                    const recalculatingItem = recalculatingRenamePaths.includes(item.path);
+                    return (
                     <tr className={selectedRenamePaths.includes(item.path) ? 'rename-row selected' : 'rename-row'} key={item.path} onClick={(event) => handleRenameRowClick(event, item, index)} title="点击行选择，Shift+点击连续选择">
                       <td><span className={selectedRenamePaths.includes(item.path) ? 'rename-row-index selected' : 'rename-row-index'} aria-hidden="true"><strong>{index + 1}</strong></span></td>
                       <td><span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{item.status}</span></td>
@@ -1284,8 +1301,8 @@ export function App() {
                       <td className="rename-edit-cell">
                         <input value={item.show || ''} onChange={(event) => updateRenameItem(item.path, { show: event.target.value })} placeholder="剧名" />
                         <div className="rename-episode-edit">
-                          <input type="number" min="0" value={item.season ?? 0} onChange={(event) => updateRenameItem(item.path, { season: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem(item, { forceTmdb: true }); }} title="季，回车重新查 TMDB" />
-                          <input type="number" min="0" value={item.episode ?? 0} onChange={(event) => updateRenameItem(item.path, { episode: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem(item, { forceTmdb: true }); }} title="集，回车重新查 TMDB" />
+                          <input type="number" min="0" value={item.season ?? 0} onChange={(event) => updateRenameItem(item.path, { season: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false }); }} title="季，回车重新查 TMDB" />
+                          <input type="number" min="0" value={item.episode ?? 0} onChange={(event) => updateRenameItem(item.path, { episode: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false }); }} title="集，回车重新查 TMDB" />
                         </div>
                         <input value={item.title || ''} onChange={(event) => updateRenameItem(item.path, { title: event.target.value })} placeholder="标题" />
                         {item.tmdbShowId ? <small>TMDB #{item.tmdbShowId}</small> : null}
@@ -1299,12 +1316,13 @@ export function App() {
                       <td className="path-cell">{item.conflict ? '目标文件已存在' : item.message || '-'}</td>
                       <td>
                         <div className="inline-actions rename-row-actions">
-                          <button className="secondary" type="button" onClick={() => recalculateRenameItem({ ...item, manualName: false }, { keepManualName: false })}>按模板</button>
-                          <button type="button" onClick={() => recalculateRenameItem(item, { forceTmdb: true })}>查 TMDB</button>
+                          <button className="secondary" type="button" onClick={() => recalculateRenameItem({ ...item, manualName: false }, { keepManualName: false })} disabled={applyingTmdbShowId !== null || applyingBatchEpisode || recalculatingItem}>按模板</button>
+                          <button type="button" onClick={() => recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false })} disabled={applyingTmdbShowId !== null || applyingBatchEpisode || recalculatingItem}>{recalculatingItem ? '查询中' : '查 TMDB'}</button>
                         </div>
                       </td>
                     </tr>
-                  )) : (
+                  );
+                  }) : (
                     <tr><td colSpan={8} className="empty-cell">尚未生成预览。</td></tr>
                   )}
                 </tbody>

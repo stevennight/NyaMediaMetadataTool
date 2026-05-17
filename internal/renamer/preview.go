@@ -49,10 +49,11 @@ var sidecarExtensions = map[string]struct{}{
 }
 
 type PreviewRequest struct {
-	Path     string `json:"path"`
-	Template string `json:"template"`
-	UseTMDB  bool   `json:"useTmdb"`
-	Language string `json:"language"`
+	Path         string `json:"path"`
+	Template     string `json:"template"`
+	UseTMDB      bool   `json:"useTmdb"`
+	Language     string `json:"language"`
+	ReleaseGroup string `json:"releaseGroup"`
 }
 
 type PreviewResult struct {
@@ -85,16 +86,17 @@ type PreviewItem struct {
 }
 
 type PreviewItemRequest struct {
-	Path       string    `json:"path"`
-	Template   string    `json:"template"`
-	UseTMDB    bool      `json:"useTmdb"`
-	Language   string    `json:"language"`
-	Show       string    `json:"show"`
-	Title      string    `json:"title"`
-	Season     *inputInt `json:"season"`
-	Episode    *inputInt `json:"episode"`
-	TMDBShowID int       `json:"tmdbShowId"`
-	NewName    string    `json:"newName"`
+	Path         string    `json:"path"`
+	Template     string    `json:"template"`
+	UseTMDB      bool      `json:"useTmdb"`
+	Language     string    `json:"language"`
+	Show         string    `json:"show"`
+	Title        string    `json:"title"`
+	ReleaseGroup string    `json:"releaseGroup"`
+	Season       *inputInt `json:"season"`
+	Episode      *inputInt `json:"episode"`
+	TMDBShowID   int       `json:"tmdbShowId"`
+	NewName      string    `json:"newName"`
 }
 
 type inputInt struct {
@@ -270,6 +272,10 @@ func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, e
 				}
 
 				item := buildItem(ctx, cfg, client, job.path, template)
+				if releaseGroup := strings.TrimSpace(input.ReleaseGroup); releaseGroup != "" {
+					item.ReleaseGroup = releaseGroup
+					finalizeItem(job.path, template, &item)
+				}
 				select {
 				case <-ctx.Done():
 					setErr(ctx.Err())
@@ -346,6 +352,9 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 	}
 	if strings.TrimSpace(input.Title) != "" {
 		item.Title = strings.TrimSpace(input.Title)
+	}
+	if strings.TrimSpace(input.ReleaseGroup) != "" {
+		item.ReleaseGroup = strings.TrimSpace(input.ReleaseGroup)
 	}
 	invalidEpisodeInput := false
 	if input.Season != nil {
@@ -752,7 +761,8 @@ func parseEpisode(path string, cfg config.Config) (parsedEpisode, bool) {
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	parsed, ok := episodeparse.Parse(name, cfg.Processing.EpisodePatterns)
 	if !ok {
-		return parsedEpisode{}, false
+		showDir := showDirectory(path)
+		return parsedEpisode{releaseGroup: parseReleaseGroup(name), year: parseDirectoryYearFromPath(showDir), tmdbShowID: parseTMDBShowIDFromPath(showDir)}, false
 	}
 	showDir := showDirectory(path)
 	releaseGroup := parseReleaseGroup(name)

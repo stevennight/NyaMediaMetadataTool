@@ -111,6 +111,19 @@ func TestParseEpisodeRejectsFractionalEpisodeAsNumericFallback(t *testing.T) {
 	}
 }
 
+func TestParseEpisodeKeepsReleaseGroupWhenEpisodeDoesNotParse(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(`D:\Media`, "[Kamigami] Sword Art Online II - 14.5 [1920x1080 x264 AAC].mkv")
+	parsed, ok := parseEpisode(path, config.Default())
+	if ok {
+		t.Fatal("expected fractional episode to be ignored")
+	}
+	if parsed.releaseGroup != "Kamigami" {
+		t.Fatalf("releaseGroup = %q, want Kamigami", parsed.releaseGroup)
+	}
+}
+
 func TestPreviewItemRequestAcceptsFractionalEpisodeInput(t *testing.T) {
 	t.Parallel()
 
@@ -131,6 +144,78 @@ func TestApplyTemplateSupportsReleaseGroup(t *testing.T) {
 	want := "[Kamigami] 刀剑神域 / ソードアート・オンライン - 45782 - S01E01 - Episode 1"
 	if got != want {
 		t.Fatalf("applyTemplate() = %q, want %q", got, want)
+	}
+}
+
+func TestPreviewSingleKeepsInputReleaseGroup(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "Episode 14.5.mkv")
+	item, err := PreviewSingle(context.Background(), config.Default(), PreviewItemRequest{
+		Path:         path,
+		Template:     "{show} - S{season:00}E{episode:00} - {title} - {releaseGroup}",
+		Show:         "Show",
+		Title:        "Title",
+		ReleaseGroup: "Kamigami",
+		Season:       &inputInt{Value: 0},
+		Episode:      &inputInt{Value: 12},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.ReleaseGroup != "Kamigami" {
+		t.Fatalf("ReleaseGroup = %q, want Kamigami", item.ReleaseGroup)
+	}
+	if item.NewName != "Show - S00E12 - Title - Kamigami.mkv" {
+		t.Fatalf("NewName = %q, want release group in rendered name", item.NewName)
+	}
+}
+
+func TestPreviewUsesInputReleaseGroupOverride(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "[Original] Show - 01.mkv")
+	if err := os.WriteFile(path, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Preview(context.Background(), config.Default(), PreviewRequest{
+		Path:         path,
+		Template:     "{show} - S{season:00}E{episode:00} - {releaseGroup}",
+		ReleaseGroup: "Override",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(result.Items))
+	}
+	if result.Items[0].ReleaseGroup != "Override" {
+		t.Fatalf("ReleaseGroup = %q, want Override", result.Items[0].ReleaseGroup)
+	}
+	if result.Items[0].NewName != "Show - S01E01 - Override.mkv" {
+		t.Fatalf("NewName = %q, want release group override in rendered name", result.Items[0].NewName)
+	}
+}
+
+func TestPreviewSingleKeepsAbsoluteManualTarget(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "Episode 01.mkv")
+	manualTarget := filepath.Join(root, "Show", "Season 1", "Show - S01E01 - Title")
+	item, err := PreviewSingle(context.Background(), config.Default(), PreviewItemRequest{
+		Path:    path,
+		NewName: manualTarget,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.RenderedTarget != manualTarget {
+		t.Fatalf("RenderedTarget = %q, want %q", item.RenderedTarget, manualTarget)
+	}
+	if item.NewPath != manualTarget+".mkv" {
+		t.Fatalf("NewPath = %q, want %q", item.NewPath, manualTarget+".mkv")
 	}
 }
 

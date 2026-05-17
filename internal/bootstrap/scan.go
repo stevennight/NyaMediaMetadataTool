@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -19,6 +20,7 @@ type ScanOptions struct {
 	OverwriteExisting bool
 	Force             bool
 	MissingOnly       bool
+	ScanRunID         string
 }
 
 func SyncAndScan(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger) error {
@@ -33,6 +35,9 @@ func SyncAndScan(ctx context.Context, cfg config.Config, st *store.Store, logger
 func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, dir config.WatchDir, options ScanOptions) error {
 	if !dir.Enabled {
 		return nil
+	}
+	if options.ScanRunID == "" {
+		options.ScanRunID = newScanRunID()
 	}
 	if hasIgnoreFileInAncestors(dir.Path) {
 		return nil
@@ -77,7 +82,7 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 			return nil
 		}
 
-		if err := st.EnqueueMediaTaskWithOptions(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly); err != nil {
+		if err := st.EnqueueMediaTaskWithScanRun(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly, options.ScanRunID); err != nil {
 			logger.Warn("enqueue media task failed", "path", path, "error", err)
 		}
 		return nil
@@ -85,6 +90,9 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 }
 
 func ScanPath(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, path string, options ScanOptions) error {
+	if options.ScanRunID == "" {
+		options.ScanRunID = newScanRunID()
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -107,7 +115,11 @@ func ScanPath(ctx context.Context, cfg config.Config, st *store.Store, logger *s
 	if err != nil {
 		return err
 	}
-	return st.EnqueueMediaTaskWithOptions(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly)
+	return st.EnqueueMediaTaskWithScanRun(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly, options.ScanRunID)
+}
+
+func newScanRunID() string {
+	return fmt.Sprintf("scan-%d", time.Now().UTC().UnixNano())
 }
 
 func hasIgnoreFile(dir string) bool {

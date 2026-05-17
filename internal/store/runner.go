@@ -26,7 +26,7 @@ func (s *Store) ClaimNextPendingTask(ctx context.Context) (Task, error) {
 	var task Task
 	var mediaFileID sql.NullInt64
 	err = tx.QueryRowContext(ctx, `
-SELECT id, media_file_id, type, status, overwrite_existing, attempts, error_summary,
+SELECT id, media_file_id, type, status, overwrite_existing, scan_run_id, attempts, error_summary,
        COALESCE(started_at, ''), COALESCE(finished_at, ''), created_at, updated_at
 FROM tasks
 WHERE status = 'pending'
@@ -38,6 +38,7 @@ LIMIT 1
 		&task.Type,
 		&task.Status,
 		&task.OverwriteExisting,
+		&task.ScanRunID,
 		&task.Attempts,
 		&task.ErrorSummary,
 		&task.StartedAt,
@@ -255,4 +256,22 @@ SET last_processed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
 `, mediaFileID)
 	return err
+}
+
+func (s *Store) ClaimScanScope(ctx context.Context, scanRunID string, scopeType string, scopeKey string) (bool, error) {
+	if scanRunID == "" || scopeType == "" || scopeKey == "" {
+		return true, nil
+	}
+	result, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO scan_scopes (scan_run_id, scope_type, scope_key)
+VALUES (?, ?, ?)
+`, scanRunID, scopeType, scopeKey)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }

@@ -247,3 +247,60 @@ func TestScanPathMissingOnlyEnqueuesProcessedMedia(t *testing.T) {
 		t.Fatal("missing-only task should not overwrite existing outputs")
 	}
 }
+
+func TestScanWatchDirAssignsOneScanRunToDirectoryTasks(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	paths := []string{
+		filepath.Join(root, "Series", "Series - S01E01.mkv"),
+		filepath.Join(root, "Series", "Series - S01E02.mkv"),
+	}
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("demo"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		oldTime := time.Now().Add(-2 * time.Minute)
+		if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Processing.StableDelay = time.Second
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	if err := ScanWatchDir(context.Background(), cfg, st, logger, config.WatchDir{Path: root, Recursive: true, Enabled: true}, ScanOptions{OverwriteExisting: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	tasks, err := st.ListTasks(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	}
+	if tasks[0].ScanRunID == "" || tasks[1].ScanRunID == "" {
+		t.Fatal("expected scan run id on all tasks")
+	}
+	if tasks[0].ScanRunID != tasks[1].ScanRunID {
+		t.Fatalf("expected same scan run id, got %q and %q", tasks[0].ScanRunID, tasks[1].ScanRunID)
+	}
+	if !tasks[0].OverwriteExisting || !tasks[1].OverwriteExisting {
+		t.Fatal("expected overwrite strategy to be preserved on file tasks")
+	}
+}

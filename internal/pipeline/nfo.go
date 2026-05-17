@@ -58,6 +58,8 @@ type SeriesResult struct {
 	SeasonNFOPath string
 }
 
+type SeriesScopeClaimFunc func(ctx context.Context, scopeType string, scopeKey string) (bool, error)
+
 type ImageResult struct {
 	Images []ImageArtifact
 }
@@ -230,6 +232,10 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 }
 
 func GenerateSeriesNFO(ctx context.Context, cfg config.Config, media store.MediaFile) (SeriesResult, error) {
+	return GenerateSeriesNFOWithScopeClaim(ctx, cfg, media, nil)
+}
+
+func GenerateSeriesNFOWithScopeClaim(ctx context.Context, cfg config.Config, media store.MediaFile, claim SeriesScopeClaimFunc) (SeriesResult, error) {
 	if !cfg.Processing.EnableNFO {
 		return SeriesResult{}, nil
 	}
@@ -238,18 +244,59 @@ func GenerateSeriesNFO(ctx context.Context, cfg config.Config, media store.Media
 		return SeriesResult{}, nil
 	}
 	result := NFOResult{Path: strings.TrimSuffix(media.Path, filepath.Ext(media.Path)) + ".nfo"}
-	applyTMDBShowAndSeason(ctx, cfg, episode, &result)
+	allowShow, allowSeason, err := claimSeriesNFOScope(ctx, claim, result.Path, episode)
+	if err != nil {
+		return SeriesResult{}, err
+	}
+	if !allowShow && !allowSeason {
+		return SeriesResult{}, nil
+	}
+	applyTMDBShowAndSeasonScoped(ctx, cfg, episode, &result, allowShow, allowSeason)
 	return SeriesResult{ShowNFOPath: result.ShowNFOPath, SeasonNFOPath: result.SeasonNFOPath}, nil
 }
 
 func GenerateSeriesImages(ctx context.Context, cfg config.Config, media store.MediaFile) (ImageResult, error) {
+	return GenerateSeriesImagesWithScopeClaim(ctx, cfg, media, nil)
+}
+
+func GenerateSeriesImagesWithScopeClaim(ctx context.Context, cfg config.Config, media store.MediaFile, claim SeriesScopeClaimFunc) (ImageResult, error) {
 	episode, ok := parseEpisodeInfo(media.Path, cfg)
 	if !ok {
 		return ImageResult{}, nil
 	}
 	result := NFOResult{Path: strings.TrimSuffix(media.Path, filepath.Ext(media.Path)) + ".nfo"}
-	applyTMDBShowAndSeasonImages(ctx, cfg, episode, &result)
+	allowShow, allowSeason, err := claimSeriesImageScope(ctx, claim, result.Path, episode)
+	if err != nil {
+		return ImageResult{}, err
+	}
+	if !allowShow && !allowSeason {
+		return ImageResult{}, nil
+	}
+	applyTMDBShowAndSeasonImagesScoped(ctx, cfg, episode, &result, allowShow, allowSeason)
 	return ImageResult{Images: result.Images}, nil
+}
+
+func claimSeriesNFOScope(ctx context.Context, claim SeriesScopeClaimFunc, episodeNFOPath string, episode episodeInfo) (bool, bool, error) {
+	return claimSeriesScopes(ctx, claim, "tvshow-nfo", "season-nfo", episodeNFOPath, episode)
+}
+
+func claimSeriesImageScope(ctx context.Context, claim SeriesScopeClaimFunc, episodeNFOPath string, episode episodeInfo) (bool, bool, error) {
+	return claimSeriesScopes(ctx, claim, "tvshow-images", "season-images", episodeNFOPath, episode)
+}
+
+func claimSeriesScopes(ctx context.Context, claim SeriesScopeClaimFunc, showType string, seasonType string, episodeNFOPath string, episode episodeInfo) (bool, bool, error) {
+	if claim == nil {
+		return true, true, nil
+	}
+	showOK, err := claim(ctx, showType, filepath.Clean(showNFOBaseDir(episodeNFOPath)))
+	if err != nil {
+		return false, false, err
+	}
+	seasonOK, err := claim(ctx, seasonType, filepath.Clean(filepath.Dir(episodeNFOPath))+fmt.Sprintf("#S%02d", episode.Season))
+	if err != nil {
+		return false, false, err
+	}
+	return showOK, seasonOK, nil
 }
 
 func parseEpisodeInfo(path string, cfg config.Config) (episodeInfo, bool) {
@@ -455,10 +502,14 @@ func ensureEpisodeThumbOnly(ctx context.Context, cfg config.Config, episode epis
 }
 
 func applyTMDBShowAndSeason(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult) {
+	applyTMDBShowAndSeasonScoped(ctx, cfg, episode, result, true, true)
+}
+
+func applyTMDBShowAndSeasonScoped(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult, allowShow bool, allowSeason bool) {
 	showPath := filepath.Join(showNFOBaseDir(result.Path), "tvshow.nfo")
 	seasonPath := filepath.Join(filepath.Dir(result.Path), "season.nfo")
-	writeShow := cfg.Processing.OverwriteExisting || !fileExists(showPath)
-	writeSeason := cfg.Processing.OverwriteExisting || !fileExists(seasonPath)
+	writeShow := allowShow && (cfg.Processing.OverwriteExisting || !fileExists(showPath))
+	writeSeason := allowSeason && (cfg.Processing.OverwriteExisting || !fileExists(seasonPath))
 	if !writeShow && !writeSeason {
 		return
 	}
@@ -497,12 +548,19 @@ func fileExists(path string) bool {
 }
 
 func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult) {
+	applyTMDBShowAndSeasonImagesScoped(ctx, cfg, episode, result, true, true)
+}
+
+func applyTMDBShowAndSeasonImagesScoped(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult, allowShow bool, allowSeason bool) {
 	if !cfg.Processing.EnableImageTakeover || !imageSourceEnabled(cfg, "tmdb") {
 		return
 	}
 	showDir := showNFOBaseDir(result.Path)
 	seasonDir := filepath.Dir(result.Path)
 	downloads := seriesImageArtifacts(showDir, seasonDir, episode.Season)
+	if !allowShow && !allowSeason {
+		return
+	}
 	if !cfg.Processing.OverwriteExisting && allImageArtifactsExist(downloads) {
 		for _, item := range downloads {
 			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: item.Path, Status: "skipped"})
@@ -547,6 +605,11 @@ func applyTMDBShowAndSeasonImages(ctx context.Context, cfg config.Config, episod
 	}
 
 	for index, item := range downloads {
+		isSeasonImage := item.Type == "season-poster"
+		if (!allowShow && !isSeasonImage) || (!allowSeason && isSeasonImage) {
+			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: item.Path, Status: "skipped"})
+			continue
+		}
 		if strings.TrimSpace(urls[index]) == "" {
 			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: item.Path, Status: "unavailable", Detail: imageUnavailableDetail(item.Type, fanartDetail)})
 			continue

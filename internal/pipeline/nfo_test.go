@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,5 +208,46 @@ func TestApplyTMDBShowAndSeasonImagesSkipsNetworkWhenTargetsExist(t *testing.T) 
 		if image.Status != "skipped" {
 			t.Fatalf("expected skipped image, got %+v", image)
 		}
+	}
+}
+
+func TestClaimSeriesScopesDeduplicatesShowAndSeasonSeparately(t *testing.T) {
+	t.Parallel()
+
+	showDir := t.TempDir()
+	season1Path := filepath.Join(showDir, "Season 1", "Show - S01E01.nfo")
+	season2Path := filepath.Join(showDir, "Season 2", "Show - S02E01.nfo")
+	seen := map[string]struct{}{}
+	claim := func(_ context.Context, scopeType string, scopeKey string) (bool, error) {
+		key := scopeType + "\x00" + scopeKey
+		if _, ok := seen[key]; ok {
+			return false, nil
+		}
+		seen[key] = struct{}{}
+		return true, nil
+	}
+
+	showOK, seasonOK, err := claimSeriesNFOScope(t.Context(), claim, season1Path, episodeInfo{Season: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !showOK || !seasonOK {
+		t.Fatalf("expected first episode to claim show and season, got show=%v season=%v", showOK, seasonOK)
+	}
+
+	showOK, seasonOK, err = claimSeriesNFOScope(t.Context(), claim, season1Path, episodeInfo{Season: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if showOK || seasonOK {
+		t.Fatalf("expected duplicate season to skip both scopes, got show=%v season=%v", showOK, seasonOK)
+	}
+
+	showOK, seasonOK, err = claimSeriesNFOScope(t.Context(), claim, season2Path, episodeInfo{Season: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if showOK || !seasonOK {
+		t.Fatalf("expected new season to claim only season scope, got show=%v season=%v", showOK, seasonOK)
 	}
 }

@@ -198,7 +198,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	}
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate series nfo", "")
-	seriesResult, err := pipeline.GenerateSeriesNFO(ctx, cfg, media)
+	seriesResult, err := pipeline.GenerateSeriesNFOWithScopeClaim(ctx, cfg, media, r.scanScopeClaim(task.ScanRunID))
 	if err != nil {
 		return err
 	}
@@ -216,7 +216,7 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	}
 
 	_ = r.store.AddTaskLog(ctx, task.ID, "info", "generate series images", "")
-	imageResult, err := pipeline.GenerateSeriesImages(ctx, cfg, media)
+	imageResult, err := pipeline.GenerateSeriesImagesWithScopeClaim(ctx, cfg, media, r.scanScopeClaim(task.ScanRunID))
 	if err != nil {
 		return err
 	}
@@ -241,6 +241,12 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 		return errors.New("artifact generation failed: " + strings.Join(failures, "; "))
 	}
 	return r.store.TouchMediaProcessed(ctx, media.ID)
+}
+
+func (r *Runner) scanScopeClaim(scanRunID string) pipeline.SeriesScopeClaimFunc {
+	return func(ctx context.Context, scopeType string, scopeKey string) (bool, error) {
+		return r.store.ClaimScanScope(ctx, scanRunID, scopeType, scopeKey)
+	}
 }
 
 func tmdbLogLevel(status string) string {

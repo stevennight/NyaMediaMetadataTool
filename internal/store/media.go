@@ -39,9 +39,13 @@ func (s *Store) EnqueueMediaTaskWithOverwrite(ctx context.Context, mediaFileID i
 }
 
 func (s *Store) EnqueueMediaTaskWithOptions(ctx context.Context, mediaFileID int64, overwriteExisting bool, force bool) error {
+	return s.EnqueueMediaTaskWithScanRun(ctx, mediaFileID, overwriteExisting, force, "")
+}
+
+func (s *Store) EnqueueMediaTaskWithScanRun(ctx context.Context, mediaFileID int64, overwriteExisting bool, force bool, scanRunID string) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO tasks (media_file_id, type, status, overwrite_existing)
-SELECT ?, 'media_process', 'pending', ?
+INSERT INTO tasks (media_file_id, type, status, overwrite_existing, scan_run_id)
+SELECT ?, 'media_process', 'pending', ?, ?
 WHERE (? OR EXISTS (
   SELECT 1
   FROM media_files
@@ -53,7 +57,7 @@ AND NOT EXISTS (
   FROM tasks
   WHERE media_file_id = ? AND type = 'media_process' AND status IN ('pending', 'running')
 )
-	`, mediaFileID, boolToIntMedia(overwriteExisting), force, mediaFileID, mediaFileID)
+	`, mediaFileID, boolToIntMedia(overwriteExisting), scanRunID, force, mediaFileID, mediaFileID)
 	return err
 }
 

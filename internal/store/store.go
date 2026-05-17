@@ -60,10 +60,21 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.ensureTaskOverwriteColumn(ctx)
+	if err := s.ensureTaskOverwriteColumn(ctx); err != nil {
+		return err
+	}
+	return s.ensureTaskScanRunColumn(ctx)
 }
 
 func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
+	return s.ensureTaskColumn(ctx, "overwrite_existing", `ALTER TABLE tasks ADD COLUMN overwrite_existing INTEGER NOT NULL DEFAULT 0`)
+}
+
+func (s *Store) ensureTaskScanRunColumn(ctx context.Context) error {
+	return s.ensureTaskColumn(ctx, "scan_run_id", `ALTER TABLE tasks ADD COLUMN scan_run_id TEXT NOT NULL DEFAULT ''`)
+}
+
+func (s *Store) ensureTaskColumn(ctx context.Context, column string, statement string) error {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(tasks)`)
 	if err != nil {
 		return err
@@ -79,14 +90,14 @@ func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
 			return err
 		}
-		if name == "overwrite_existing" {
+		if name == column {
 			return rows.Err()
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN overwrite_existing INTEGER NOT NULL DEFAULT 0`)
+	_, err = s.db.ExecContext(ctx, statement)
 	return err
 }
 
@@ -121,6 +132,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   type TEXT NOT NULL,
   status TEXT NOT NULL,
   overwrite_existing INTEGER NOT NULL DEFAULT 0,
+  scan_run_id TEXT NOT NULL DEFAULT '',
   attempts INTEGER NOT NULL DEFAULT 0,
   error_summary TEXT NOT NULL DEFAULT '',
   started_at TEXT,
@@ -132,6 +144,15 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_media_file_id ON tasks(media_file_id);
+
+CREATE TABLE IF NOT EXISTS scan_scopes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_run_id TEXT NOT NULL,
+  scope_type TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(scan_run_id, scope_type, scope_key)
+);
 
 CREATE TABLE IF NOT EXISTS task_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

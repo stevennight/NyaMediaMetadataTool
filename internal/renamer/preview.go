@@ -99,6 +99,15 @@ type PreviewItemRequest struct {
 	NewName      string    `json:"newName"`
 }
 
+type previewOverrides struct {
+	Show         string
+	Title        string
+	ReleaseGroup string
+	Season       *inputInt
+	Episode      *inputInt
+	TMDBShowID   int
+}
+
 type inputInt struct {
 	Value      int
 	Fractional bool
@@ -271,11 +280,7 @@ func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, e
 				default:
 				}
 
-				item := buildItem(ctx, cfg, client, job.path, template)
-				if releaseGroup := strings.TrimSpace(input.ReleaseGroup); releaseGroup != "" {
-					item.ReleaseGroup = releaseGroup
-					finalizeItem(job.path, template, &item)
-				}
+				item := buildPreviewItem(ctx, cfg, client, job.path, template, previewOverrides{ReleaseGroup: input.ReleaseGroup})
 				select {
 				case <-ctx.Done():
 					setErr(ctx.Err())
@@ -346,59 +351,7 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 		client = nil
 	}
 
-	item := buildItem(ctx, cfg, nil, path, template)
-	if strings.TrimSpace(input.Show) != "" {
-		item.Show = strings.TrimSpace(input.Show)
-	}
-	if strings.TrimSpace(input.Title) != "" {
-		item.Title = strings.TrimSpace(input.Title)
-	}
-	if strings.TrimSpace(input.ReleaseGroup) != "" {
-		item.ReleaseGroup = strings.TrimSpace(input.ReleaseGroup)
-	}
-	invalidEpisodeInput := false
-	if input.Season != nil {
-		if input.Season.Fractional {
-			item.Status = "warning"
-			item.Message = "TMDB 不支持小数季数，请改成整数季/集后重试"
-			invalidEpisodeInput = true
-		} else if input.Season.Value >= 0 {
-			item.Season = input.Season.Value
-		}
-	}
-	if input.Episode != nil {
-		if input.Episode.Fractional {
-			item.Status = "warning"
-			item.Message = "TMDB 不支持小数集数，请改成整数季/集后重试"
-			invalidEpisodeInput = true
-		} else if input.Episode.Value >= 0 {
-			item.Episode = input.Episode.Value
-		}
-	}
-	if input.TMDBShowID > 0 {
-		item.TMDBShowID = input.TMDBShowID
-	}
-
-	if client != nil && !invalidEpisodeInput {
-		episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Year, item.Season, item.Episode)
-		if err != nil {
-			item.Status = "warning"
-			item.Message = err.Error()
-		} else {
-			item.Show = firstNonEmpty(episode.ShowName, item.Show)
-			item.ShowOriginal = episode.ShowOriginalName
-			item.Title = episode.Title
-			item.Year = yearFromDate(firstNonEmpty(episode.ShowFirstAirDate, episode.AirDate))
-			item.TMDBShowID = episode.ShowID
-			item.TMDBEpisodeID = episode.EpisodeID
-			item.Source = "tmdb"
-			item.Status = "ok"
-			item.Message = ""
-		}
-		applyLocalizedTemplateValues(ctx, client, template, &item)
-	}
-
-	finalizeItem(path, template, &item)
+	item := buildPreviewItem(ctx, cfg, client, path, template, previewOverrides{Show: input.Show, Title: input.Title, ReleaseGroup: input.ReleaseGroup, Season: input.Season, Episode: input.Episode, TMDBShowID: input.TMDBShowID})
 	if strings.TrimSpace(input.NewName) != "" {
 		item.RenderedTarget = strings.TrimSpace(input.NewName)
 		item.NewPath = targetPathFromTemplate(path, input.NewName)
@@ -600,48 +553,31 @@ func updateRenamedNFOReferences(path string, oldBase string, newBase string) {
 	_ = os.WriteFile(path, []byte(content), 0o644)
 }
 
-func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path string, template string) PreviewItem {
+func buildPreviewItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path string, template string, overrides previewOverrides) PreviewItem {
 	parsed, ok := parseEpisode(path, cfg)
 	item := PreviewItem{Path: path, CurrentName: filepath.Base(path), Show: parsed.show, ReleaseGroup: parsed.releaseGroup, Year: parsed.year, TMDBShowID: parsed.tmdbShowID, Season: parsed.season, Episode: parsed.episode, Source: "filename", Status: "ok"}
 	if !ok {
 		item.Status = "warning"
 		item.Message = "无法从文件名解析集数"
-		return item
 	}
-
-	matchedNFO := false
-	if nfo, ok := readEpisodeNFO(path); ok && nfoMatchesLanguage(nfo, cfg.Scraping.Language) {
-		matchedNFO = true
-		if strings.TrimSpace(nfo.ShowTitle) != "" {
-			item.Show = strings.TrimSpace(nfo.ShowTitle)
-		}
-		if strings.TrimSpace(nfo.Title) != "" {
-			item.Title = strings.TrimSpace(nfo.Title)
-		}
-		if nfo.Season > 0 {
-			item.Season = nfo.Season
-		}
-		if nfo.Episode > 0 {
-			item.Episode = nfo.Episode
-		}
-		item.Year = yearFromDate(firstNonEmpty(nfo.Premiered, nfo.Aired))
-		item.Source = "nfo"
+	applyPreviewOverrides(&item, overrides)
+	invalidEpisodeInput := applyEpisodeOverrides(&item, overrides)
+	if invalidEpisodeInput {
+		item.Status = "warning"
+		item.Message = "TMDB 不支持小数季数/集数，请改成整数季/集后重试"
 	}
-	if client != nil {
+	if client != nil && !invalidEpisodeInput {
 		if episode, err := findEpisode(ctx, client, item.TMDBShowID, item.Show, item.Year, item.Season, item.Episode); err == nil {
-			if !matchedNFO {
-				item.Show = firstNonEmpty(episode.ShowName, item.Show)
-				item.ShowOriginal = episode.ShowOriginalName
-				item.Title = episode.Title
-				item.Source = "tmdb"
-			}
+			item.Show = firstNonEmpty(episode.ShowName, item.Show)
+			item.ShowOriginal = episode.ShowOriginalName
+			item.Title = episode.Title
 			item.Year = yearFromDate(firstNonEmpty(episode.ShowFirstAirDate, episode.AirDate))
 			item.TMDBShowID = episode.ShowID
 			item.TMDBEpisodeID = episode.EpisodeID
-			if strings.TrimSpace(item.ShowOriginal) == "" {
-				item.ShowOriginal = episode.ShowOriginalName
-			}
-		} else if !matchedNFO {
+			item.Source = "tmdb"
+			item.Status = "ok"
+			item.Message = ""
+		} else {
 			item.Status = "warning"
 			item.Message = err.Error()
 		}
@@ -650,6 +586,40 @@ func buildItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path
 
 	finalizeItem(path, template, &item)
 	return item
+}
+
+func applyPreviewOverrides(item *PreviewItem, overrides previewOverrides) {
+	if strings.TrimSpace(overrides.Show) != "" {
+		item.Show = strings.TrimSpace(overrides.Show)
+	}
+	if strings.TrimSpace(overrides.Title) != "" {
+		item.Title = strings.TrimSpace(overrides.Title)
+	}
+	if strings.TrimSpace(overrides.ReleaseGroup) != "" {
+		item.ReleaseGroup = strings.TrimSpace(overrides.ReleaseGroup)
+	}
+	if overrides.TMDBShowID > 0 {
+		item.TMDBShowID = overrides.TMDBShowID
+	}
+}
+
+func applyEpisodeOverrides(item *PreviewItem, overrides previewOverrides) bool {
+	invalid := false
+	if overrides.Season != nil {
+		if overrides.Season.Fractional {
+			invalid = true
+		} else if overrides.Season.Value >= 0 {
+			item.Season = overrides.Season.Value
+		}
+	}
+	if overrides.Episode != nil {
+		if overrides.Episode.Fractional {
+			invalid = true
+		} else if overrides.Episode.Value >= 0 {
+			item.Episode = overrides.Episode.Value
+		}
+	}
+	return invalid
 }
 
 func findEpisode(ctx context.Context, client *tmdb.Client, tmdbShowID int, show string, year string, season int, episode int) (tmdb.Episode, error) {

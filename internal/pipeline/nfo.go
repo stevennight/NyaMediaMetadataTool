@@ -288,10 +288,6 @@ func hasThumbDownloadFailure(failures []string) bool {
 	return false
 }
 
-func GenerateSeriesNFO(ctx context.Context, cfg config.Config, media store.MediaFile) (SeriesResult, error) {
-	return GenerateSeriesNFOWithScopeClaim(ctx, cfg, media, nil)
-}
-
 func GenerateSeriesNFOWithScopeClaim(ctx context.Context, cfg config.Config, media store.MediaFile, claim SeriesScopeClaimFunc) (SeriesResult, error) {
 	if !cfg.Processing.EnableNFO {
 		return SeriesResult{}, nil
@@ -313,10 +309,6 @@ func GenerateSeriesNFOWithScopeClaim(ctx context.Context, cfg config.Config, med
 		return SeriesResult{ShowNFOPath: result.ShowNFOPath, SeasonNFOPath: result.SeasonNFOPath, Logs: result.TMDBLogs}, fmt.Errorf("tmdb failed: %s", result.TMDBDetail)
 	}
 	return SeriesResult{ShowNFOPath: result.ShowNFOPath, SeasonNFOPath: result.SeasonNFOPath, Logs: result.TMDBLogs}, nil
-}
-
-func GenerateSeriesImages(ctx context.Context, cfg config.Config, media store.MediaFile) (ImageResult, error) {
-	return GenerateSeriesImagesWithScopeClaim(ctx, cfg, media, nil)
 }
 
 func GenerateSeriesImagesWithScopeClaim(ctx context.Context, cfg config.Config, media store.MediaFile, claim SeriesScopeClaimFunc) (ImageResult, error) {
@@ -591,10 +583,6 @@ func ensureEpisodeThumbOnly(ctx context.Context, cfg config.Config, episode epis
 	if err != nil {
 		result.Failures = append(result.Failures, "thumb download failed: "+err.Error())
 	}
-}
-
-func applyTMDBShowAndSeason(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult) {
-	applyTMDBShowAndSeasonScoped(ctx, cfg, episode, result, true, true)
 }
 
 func applyTMDBShowAndSeasonScoped(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult, allowShow bool, allowSeason bool) {

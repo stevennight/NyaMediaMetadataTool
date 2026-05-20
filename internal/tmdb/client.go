@@ -15,6 +15,7 @@ import (
 )
 
 var ErrDisabled = errors.New("tmdb scraping is disabled")
+var ErrNotFound = errors.New("tmdb data not found")
 
 const tmdbRequestAttempts = 3
 const officialTMDBImageURL = "https://image.tmdb.org/t/p/original"
@@ -296,7 +297,7 @@ func (c *Client) findEpisode(ctx context.Context, showQuery string, year string,
 		return Episode{}, err
 	}
 	if show.ID == 0 {
-		return Episode{}, fmt.Errorf("tmdb tv show not found: %s", showQuery)
+		return Episode{}, fmt.Errorf("%w: tv show %s", ErrNotFound, showQuery)
 	}
 
 	episodeDetail, err := c.getEpisodeWithFallback(ctx, show.ID, season, episode)
@@ -608,7 +609,7 @@ func (c *Client) getEpisodeWithFallback(ctx context.Context, showID int, season 
 	if firstErr != nil {
 		return episodeResponse{}, firstErr
 	}
-	return episodeResponse{}, errors.New("tmdb episode not found")
+	return episodeResponse{}, fmt.Errorf("%w: episode", ErrNotFound)
 }
 
 func (c *Client) getShowWithFallback(ctx context.Context, showID int) (showResponse, error) {
@@ -831,6 +832,9 @@ func (c *Client) get(ctx context.Context, language string, path string, query ur
 			_ = resp.Body.Close()
 			if shouldRetryTMDBStatus(resp.StatusCode) {
 				continue
+			}
+			if resp.StatusCode == http.StatusNotFound {
+				return fmt.Errorf("%w: %s", ErrNotFound, path)
 			}
 			return lastErr
 		}

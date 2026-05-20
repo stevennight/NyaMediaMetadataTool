@@ -175,6 +175,32 @@ func TestMergeActorsOverwrite(t *testing.T) {
 	}
 }
 
+func TestShouldFallbackToVideoThumb(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		result NFOResult
+		want   bool
+	}{
+		{name: "episode not found", result: NFOResult{TMDBStatus: "not_found"}, want: true},
+		{name: "matched without still", result: NFOResult{TMDBStatus: "matched"}, want: true},
+		{name: "download failed", result: NFOResult{TMDBStatus: "matched", Failures: []string{"thumb download failed: 500"}}, want: false},
+		{name: "disabled", result: NFOResult{TMDBStatus: "disabled"}, want: false},
+		{name: "already has thumb", result: NFOResult{TMDBStatus: "not_found", ThumbPath: "episode-thumb.jpg"}, want: false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldFallbackToVideoThumb(tc.result); got != tc.want {
+				t.Fatalf("unexpected fallback decision: got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestApplyTMDBShowAndSeasonImagesSkipsNetworkWhenTargetsExist(t *testing.T) {
 	t.Parallel()
 

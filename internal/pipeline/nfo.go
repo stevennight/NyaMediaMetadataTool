@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -224,7 +226,7 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 	if !cfg.Processing.OverwriteExisting {
 		if _, err := os.Stat(outputPath); err == nil {
 			result := NFOResult{Path: outputPath, TMDBStatus: "skipped", TMDBDetail: "nfo already exists"}
-			ensureEpisodeThumbOnly(ctx, cfg, episode, &result)
+			ensureEpisodeThumbOnly(ctx, cfg, episode, media.Path, &result)
 			return result, nil
 		}
 	}
@@ -251,11 +253,39 @@ func GenerateNFO(ctx context.Context, cfg config.Config, media store.MediaFile) 
 	if result.TMDBStatus == "failed" {
 		return result, fmt.Errorf("tmdb failed: %s", result.TMDBDetail)
 	}
+	if shouldFallbackToVideoThumb(result) {
+		thumbPath, err := ensureEpisodeThumbFromVideo(ctx, cfg, outputPath, media.Path)
+		if err == nil && thumbPath != "" {
+			result.ThumbPath = thumbPath
+			doc.Thumb = filepath.Base(thumbPath)
+		} else if err != nil {
+			result.Failures = append(result.Failures, "thumb fallback failed: "+err.Error())
+		}
+	}
 
 	if err := writeXMLFile(outputPath, doc); err != nil {
 		return NFOResult{}, err
 	}
 	return result, nil
+}
+
+func shouldFallbackToVideoThumb(result NFOResult) bool {
+	if result.ThumbPath != "" {
+		return false
+	}
+	if result.TMDBStatus == "not_found" {
+		return true
+	}
+	return result.TMDBStatus == "matched" && !hasThumbDownloadFailure(result.Failures)
+}
+
+func hasThumbDownloadFailure(failures []string) bool {
+	for _, failure := range failures {
+		if strings.HasPrefix(failure, "thumb download failed:") {
+			return true
+		}
+	}
+	return false
 }
 
 func GenerateSeriesNFO(ctx context.Context, cfg config.Config, media store.MediaFile) (SeriesResult, error) {
@@ -453,6 +483,12 @@ func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInf
 	start := time.Now()
 	detail, err := findTMDBEpisode(ctx, client, episode)
 	if err != nil {
+		if errors.Is(err, tmdb.ErrNotFound) {
+			result.TMDBStatus = "not_found"
+			result.TMDBDetail = err.Error()
+			result.addTimedLog("info", "tmdb episode not found", err.Error(), start)
+			return
+		}
 		result.TMDBStatus = "failed"
 		result.TMDBDetail = err.Error()
 		result.addTimedLog("error", "tmdb episode failed", err.Error(), start)
@@ -515,7 +551,7 @@ func applyTMDBEpisode(ctx context.Context, cfg config.Config, episode episodeInf
 	}
 }
 
-func ensureEpisodeThumbOnly(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult) {
+func ensureEpisodeThumbOnly(ctx context.Context, cfg config.Config, episode episodeInfo, mediaPath string, result *NFOResult) {
 	thumbPath := strings.TrimSuffix(result.Path, filepath.Ext(result.Path)) + "-thumb.jpg"
 	if !cfg.Processing.OverwriteExisting && fileExists(thumbPath) {
 		result.ThumbPath = thumbPath
@@ -527,13 +563,32 @@ func ensureEpisodeThumbOnly(ctx context.Context, cfg config.Config, episode epis
 		return
 	}
 	detail, err := findTMDBEpisode(ctx, client, episode)
-	if err != nil || detail.StillPath == "" {
+	if err != nil {
+		if errors.Is(err, tmdb.ErrNotFound) {
+			thumbPath, err = ensureEpisodeThumbFromVideo(ctx, cfg, result.Path, mediaPath)
+			if err == nil && thumbPath != "" {
+				result.ThumbPath = thumbPath
+			} else if err != nil {
+				result.Failures = append(result.Failures, "thumb fallback failed: "+err.Error())
+			}
+		}
+		return
+	}
+	if detail.StillPath == "" {
+		thumbPath, err = ensureEpisodeThumbFromVideo(ctx, cfg, result.Path, mediaPath)
+		if err == nil && thumbPath != "" {
+			result.ThumbPath = thumbPath
+		} else if err != nil {
+			result.Failures = append(result.Failures, "thumb fallback failed: "+err.Error())
+		}
 		return
 	}
 	thumbPath, err = ensureEpisodeThumb(ctx, cfg, result.Path, client.DownloadImageURL(detail.StillPath))
 	if err == nil && thumbPath != "" {
 		result.ThumbPath = thumbPath
-	} else if err != nil {
+		return
+	}
+	if err != nil {
 		result.Failures = append(result.Failures, "thumb download failed: "+err.Error())
 	}
 }
@@ -997,6 +1052,55 @@ func ensureEpisodeThumb(ctx context.Context, cfg config.Config, nfoPath string, 
 	thumbPath := strings.TrimSuffix(nfoPath, filepath.Ext(nfoPath)) + "-thumb.jpg"
 	path, _, err := ensureImageFile(ctx, cfg, thumbPath, imageURL)
 	return path, err
+}
+
+func ensureEpisodeThumbFromVideo(ctx context.Context, cfg config.Config, nfoPath string, mediaPath string) (string, error) {
+	thumbPath := strings.TrimSuffix(nfoPath, filepath.Ext(nfoPath)) + "-thumb.jpg"
+	if !cfg.Processing.OverwriteExisting && fileExists(thumbPath) {
+		return thumbPath, nil
+	}
+	if strings.TrimSpace(cfg.Tools.FFmpeg) == "" {
+		return "", errors.New("ffmpeg is not configured")
+	}
+	if err := os.MkdirAll(filepath.Dir(thumbPath), 0o755); err != nil {
+		return "", err
+	}
+
+	duration, err := mediaDurationSeconds(ctx, cfg, mediaPath)
+	if err != nil {
+		return "", err
+	}
+	if duration <= 0 {
+		return "", errors.New("media duration is unknown")
+	}
+	seek := fmt.Sprintf("%.3f", duration*0.5)
+	args := []string{"-y", "-ss", seek, "-i", mediaPath, "-frames:v", "1", "-q:v", "3", thumbPath}
+	cmd := exec.CommandContext(ctx, cfg.Tools.FFmpeg, args...)
+	var stderrBuf bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ffmpeg screenshot failed at 50%% (%ss): %v: %s", seek, err, strings.TrimSpace(stderrBuf.String()))
+	}
+	if !fileExists(thumbPath) {
+		return "", errors.New("ffmpeg screenshot produced no file")
+	}
+	return thumbPath, nil
+}
+
+func mediaDurationSeconds(ctx context.Context, cfg config.Config, mediaPath string) (float64, error) {
+	if strings.TrimSpace(cfg.Tools.FFprobe) == "" {
+		return 0, errors.New("ffprobe is not configured")
+	}
+	output, err := runCommand(ctx, cfg.Tools.FFprobe, "-v", "quiet", "-print_format", "json", "-show_format", mediaPath)
+	if err != nil {
+		return 0, err
+	}
+	var parsed ffprobeNFOData
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		return 0, err
+	}
+	return strconv.ParseFloat(strings.TrimSpace(parsed.Format.Duration), 64)
 }
 
 func ensureImageFile(ctx context.Context, cfg config.Config, outputPath string, imageURL string) (string, string, error) {

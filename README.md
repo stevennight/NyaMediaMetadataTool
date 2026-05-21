@@ -446,3 +446,34 @@ go test ./...
 cd web
 npm run build
 ```
+
+## 12. 剧集一致性检查工具
+
+配套命令入口：`cmd/nyammdcheck`。
+
+示例：
+
+```bash
+go run ./cmd/nyammdcheck -config config.yaml -root "D:\\Media\\TV\\Example Show"
+```
+
+规则：
+
+- 扫描指定剧集根目录下的视频文件，Season 0 会跳过缺漏判断
+- 优先读取同名单集 `.nfo` 获取季度、集数、标题、简介、图片和 provider id，缺失时回退到文件名解析
+- 默认读取剧集根目录 `tvshow.nfo` 的 TMDB ID 查询 TMDB，并按 TMDB 该季真实集号判断缺漏；手动 `-tmdb-id` 优先级更高
+- TMDB 不可用时，才回退读取季度目录 `season.nfo` 的 `episodecount` 做总量级判断
+- 配置 Emby 参数后，会通过 Emby API 对比剧集、季度、单集的标题、简介、图片存在性、可用的 TMDB ID，以及单集文件名
+
+Emby 对比示例：
+
+```bash
+go run ./cmd/nyammdcheck -config config.yaml -root "D:\\Media\\TV\\Example Show" -emby-item-url "https://emby.example.com/web/index.html#!/item?id=662" -emby-api-key "你的APIKey"
+```
+
+可选参数：
+
+- `-tmdb-id`：手动指定 TMDB 剧集 ID，优先级高于 `tvshow.nfo`
+- `-emby-item-url`：Emby 剧集详情页地址，会自动解析服务地址和剧集 ItemId
+- `-json`：输出 JSON 报告
+- `-fail-on-issue`：发现缺漏、警告或 Emby 差异时以退出码 `2` 结束，便于脚本集成

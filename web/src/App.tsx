@@ -154,6 +154,51 @@ type RenameUndoCheckResult = { canUndo: boolean; batch: RenameHistoryBatch; item
 type DirectoryEntry = { name: string; path: string };
 type DirectoryList = { path: string; parent: string; entries: DirectoryEntry[] };
 
+type EmbyAPIKey = { id: number; title: string; note: string; createdAt?: string; updatedAt?: string };
+
+type AuditLocalEpisode = {
+  season: number;
+  episode: number;
+  path: string;
+  nfoPath?: string;
+  title?: string;
+  plot?: string;
+  thumb?: string;
+  hasImage: boolean;
+  providerIds?: Record<string, string>;
+};
+
+type AuditSeasonReport = {
+  season: number;
+  expectedCount?: number;
+  expectedSource?: string;
+  expectedEpisodes?: number[];
+  existingCount: number;
+  existingEpisodes: number[];
+  missingEpisodes?: number[];
+  note?: string;
+};
+
+type AuditComparisonIssue = {
+  severity: string;
+  season?: number;
+  episode?: number;
+  field: string;
+  local?: string;
+  emby?: string;
+  detail?: string;
+};
+
+type AuditReport = {
+  root: string;
+  showTitle?: string;
+  tmdbShowId?: number;
+  localEpisodes: AuditLocalEpisode[];
+  seasonReports: AuditSeasonReport[];
+  embyComparisons?: AuditComparisonIssue[];
+  warnings?: string[];
+};
+
 type RescanScope = 'all' | 'dir' | 'path';
 type RescanStrategy = 'missing' | 'force';
 type BatchEpisodeMode = 'keep' | 'offset' | 'sequence';
@@ -161,7 +206,7 @@ type BatchEpisodeMode = 'keep' | 'offset' | 'sequence';
 type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
 type SelectOption = { code: string; name: string };
-type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'rename';
+type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'rename' | 'audit';
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
 
 const pagePaths: Record<PageKey, string> = {
@@ -169,7 +214,8 @@ const pagePaths: Record<PageKey, string> = {
   settings: '/settings',
   watchDirs: '/watch-dirs',
   tasks: '/tasks',
-  rename: '/rename'
+  rename: '/rename',
+  audit: '/audit'
 };
 
 function pageFromPath(pathname: string): PageKey {
@@ -182,6 +228,8 @@ function pageFromPath(pathname: string): PageKey {
       return 'tasks';
     case '/rename':
       return 'rename';
+    case '/audit':
+      return 'audit';
     default:
       return 'dashboard';
   }
@@ -247,6 +295,7 @@ const taskStatusFilters: { value: TaskStatusFilter; label: string }[] = [
 const taskListRefreshIntervalMs = 5000;
 const taskDetailRefreshIntervalMs = 5000;
 const defaultRenameTemplate = '{show} - S{season:00}E{episode:00} - {title}';
+const auditPreferencesKey = 'nya.audit.preferences';
 const renamePlaceholders = [
   '{show}',
   '{showOriginal}',
@@ -286,6 +335,13 @@ type RenamePreferences = {
   templateHistory?: string[];
 };
 
+type AuditPreferences = {
+  root?: string;
+  tmdbId?: string;
+  embyItemUrl?: string;
+  embyApiKeyId?: string;
+};
+
 function readRenamePreferences(): RenamePreferences {
   try {
     const raw = window.localStorage.getItem(renamePreferencesKey);
@@ -300,6 +356,25 @@ function readRenamePreferences(): RenamePreferences {
 function writeRenamePreferences(value: RenamePreferences) {
   try {
     window.localStorage.setItem(renamePreferencesKey, JSON.stringify(value));
+  } catch {
+    // Ignore storage failures, for example private browsing quota limits.
+  }
+}
+
+function readAuditPreferences(): AuditPreferences {
+  try {
+    const raw = window.localStorage.getItem(auditPreferencesKey);
+    if (!raw) return {};
+    const value = JSON.parse(raw) as AuditPreferences;
+    return value && typeof value === 'object' ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAuditPreferences(value: AuditPreferences) {
+  try {
+    window.localStorage.setItem(auditPreferencesKey, JSON.stringify(value));
   } catch {
     // Ignore storage failures, for example private browsing quota limits.
   }
@@ -436,6 +511,17 @@ export function App() {
   const [rescanScope, setRescanScope] = useState<RescanScope>('all');
   const [rescanTarget, setRescanTarget] = useState('');
   const [rescanStrategy, setRescanStrategy] = useState<RescanStrategy>('missing');
+  const [auditRoot, setAuditRoot] = useState(() => readAuditPreferences().root ?? '');
+  const [auditTmdbId, setAuditTmdbId] = useState(() => readAuditPreferences().tmdbId ?? '');
+  const [auditEmbyItemUrl, setAuditEmbyItemUrl] = useState(() => readAuditPreferences().embyItemUrl ?? '');
+  const [auditEmbyApiKey, setAuditEmbyApiKey] = useState('');
+  const [auditEmbyAPIKeys, setAuditEmbyAPIKeys] = useState<EmbyAPIKey[]>([]);
+  const [auditSelectedEmbyKeyId, setAuditSelectedEmbyKeyId] = useState(() => readAuditPreferences().embyApiKeyId ?? '');
+  const [newEmbyKeyTitle, setNewEmbyKeyTitle] = useState('');
+  const [newEmbyKeyValue, setNewEmbyKeyValue] = useState('');
+  const [savingEmbyKey, setSavingEmbyKey] = useState(false);
+  const [auditReport, setAuditReport] = useState<AuditReport | null>(null);
+  const [auditingSeries, setAuditingSeries] = useState(false);
   const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null);
   const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([]);
   const [checkingTools, setCheckingTools] = useState(false);
@@ -474,6 +560,7 @@ export function App() {
         setWatchDirs(asArray<WatchDir>(await dirsResponse.json()));
         setArtifacts(asArray<Artifact>(await artifactsResponse.json()));
         await loadRenameHistory();
+        await loadEmbyAPIKeys();
       } catch (err) {
         setError(err instanceof Error ? err.message : '加载失败');
       }
@@ -495,6 +582,21 @@ export function App() {
       setLoadingRenameHistory(false);
     }
   }
+
+  async function loadEmbyAPIKeys() {
+    const response = await fetch('/api/emby-api-keys');
+    if (!response.ok) return;
+    setAuditEmbyAPIKeys(asArray<EmbyAPIKey>(await response.json()));
+  }
+
+  useEffect(() => {
+    writeAuditPreferences({
+      root: auditRoot,
+      tmdbId: auditTmdbId,
+      embyItemUrl: auditEmbyItemUrl,
+      embyApiKeyId: auditSelectedEmbyKeyId
+    });
+  }, [auditRoot, auditTmdbId, auditEmbyItemUrl, auditSelectedEmbyKeyId]);
 
   useEffect(() => {
     function handlePopState() {
@@ -1042,6 +1144,86 @@ export function App() {
     setRescanOpen(true);
   }
 
+  async function runSeriesAudit() {
+    if (!auditRoot.trim()) {
+      setError('请输入要核对的剧集根目录');
+      return;
+    }
+    setAuditingSeries(true);
+    setError('');
+    setNotice('');
+    try {
+      const response = await fetch('/api/audit/series', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          root: auditRoot.trim(),
+          tmdbShowId: Number(auditTmdbId) || 0,
+          embyItemUrl: auditEmbyItemUrl.trim(),
+          embyApiKey: auditEmbyApiKey.trim(),
+          embyApiKeyId: Number(auditSelectedEmbyKeyId) || 0,
+        })
+      });
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const report = await response.json() as AuditReport;
+      setAuditReport(report);
+      const missingCount = report.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0);
+      const diffCount = report.embyComparisons?.length ?? 0;
+      setNotice(`核对完成：缺失 ${missingCount} 集，Emby 差异 ${diffCount} 项。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '剧集核对失败');
+    } finally {
+      setAuditingSeries(false);
+    }
+  }
+
+  async function saveEmbyAPIKey() {
+    if (!newEmbyKeyTitle.trim() || !newEmbyKeyValue.trim()) {
+      setError('请输入 Emby API Key 标题和 Key');
+      return;
+    }
+    setSavingEmbyKey(true);
+    setError('');
+    try {
+      const response = await fetch('/api/emby-api-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newEmbyKeyTitle.trim(), apiKey: newEmbyKeyValue.trim() })
+      });
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const saved = await response.json() as EmbyAPIKey;
+      setNewEmbyKeyTitle('');
+      setNewEmbyKeyValue('');
+      await loadEmbyAPIKeys();
+      setAuditSelectedEmbyKeyId(String(saved.id));
+      setAuditEmbyApiKey('');
+      setNotice('Emby API Key 已保存。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存 Emby API Key 失败');
+    } finally {
+      setSavingEmbyKey(false);
+    }
+  }
+
+  async function deleteEmbyAPIKey(id: number) {
+    setError('');
+    const response = await fetch(`/api/emby-api-keys/${id}`, { method: 'DELETE' });
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+    setAuditEmbyAPIKeys((keys) => keys.filter((key) => key.id !== id));
+    if (auditSelectedEmbyKeyId === String(id)) {
+      setAuditSelectedEmbyKeyId('');
+    }
+  }
+
   async function fetchTaskDetail(id: number) {
     const response = await fetch(`/api/tasks/${id}`);
     if (!response.ok) {
@@ -1217,6 +1399,7 @@ export function App() {
           <TabButton active={activePage === 'watchDirs'} label="媒体目录" onClick={() => navigate('watchDirs')} />
           <TabButton active={activePage === 'tasks'} label="任务" onClick={() => navigate('tasks')} />
           <TabButton active={activePage === 'rename'} label="整理命名" onClick={() => navigate('rename')} />
+          <TabButton active={activePage === 'audit'} label="剧集核对" onClick={() => navigate('audit')} />
         </nav>
         <div className="service-mini">
           <span>服务状态</span>
@@ -1459,6 +1642,134 @@ export function App() {
               </div>
             )) : <p className="muted">暂无重命名历史。</p>}
           </Card>
+        </section>
+      )}
+
+        {activePage === 'audit' && (
+        <section className="page-grid audit-page-grid">
+          <Card title="剧集缺漏与 Emby 核对" action={<button onClick={runSeriesAudit} disabled={auditingSeries}>{auditingSeries ? '核对中' : '开始核对'}</button>}>
+            <div className="audit-controls">
+              <label>剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择剧集根目录', value: auditRoot, onSelect: setAuditRoot })}>选择</button></div></label>
+              <label>TMDB 剧集 ID<input value={auditTmdbId} onChange={(event) => setAuditTmdbId(event.target.value)} inputMode="numeric" placeholder="可选，优先于 tvshow.nfo" /></label>
+              <label>Emby 剧集页面 URL<input value={auditEmbyItemUrl} onChange={(event) => setAuditEmbyItemUrl(event.target.value)} placeholder="https://emby.example.com/web/index.html#!/item?id=662" /></label>
+              <label>Emby API Key<select value={auditSelectedEmbyKeyId} onChange={(event) => { setAuditSelectedEmbyKeyId(event.target.value); if (event.target.value) setAuditEmbyApiKey(''); }}><option value="">手动输入或不使用</option>{auditEmbyAPIKeys.map((key) => <option key={key.id} value={key.id}>{key.title}</option>)}</select></label>
+              <label>临时 API Key<input type="password" value={auditEmbyApiKey} onChange={(event) => { setAuditEmbyApiKey(event.target.value); if (event.target.value) setAuditSelectedEmbyKeyId(''); }} placeholder="可选，不保存" /></label>
+            </div>
+            <div className="audit-key-manager">
+              <label>保存 Key 标题<input value={newEmbyKeyTitle} onChange={(event) => setNewEmbyKeyTitle(event.target.value)} placeholder="例如：主 Emby" /></label>
+              <label>保存 API Key<input type="password" value={newEmbyKeyValue} onChange={(event) => setNewEmbyKeyValue(event.target.value)} placeholder="粘贴后点保存" /></label>
+              <button type="button" onClick={saveEmbyAPIKey} disabled={savingEmbyKey}>{savingEmbyKey ? '保存中' : '保存 Key'}</button>
+              {auditSelectedEmbyKeyId ? <button className="secondary" type="button" onClick={() => deleteEmbyAPIKey(Number(auditSelectedEmbyKeyId))}>删除选中 Key</button> : null}
+            </div>
+            <p className="muted">Season 0 不参与缺漏判断。默认使用剧集 `tvshow.nfo` 里的 TMDB ID 精确核对，手动填写 TMDB ID 时优先使用手动值；TMDB 不可用时才回退季度 `season.nfo` 的总集数。Emby 直接粘贴剧集详情页地址即可。</p>
+          </Card>
+
+          {auditReport && (
+            <>
+              <Card title="核对摘要">
+                <div className="audit-summary-grid">
+                  <div className="audit-stat"><span>剧集</span><strong>{auditReport.showTitle || '-'}</strong><small>{auditReport.tmdbShowId ? `TMDB #${auditReport.tmdbShowId}` : '未识别 TMDB ID'}</small></div>
+                  <div className="audit-stat"><span>本地单集</span><strong>{auditReport.localEpisodes.length}</strong><small>{auditReport.root}</small></div>
+                  <div className="audit-stat"><span>缺失集数</span><strong>{auditReport.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0)}</strong><small>{auditReport.seasonReports.length} 个季度</small></div>
+                  <div className="audit-stat"><span>Emby 差异</span><strong>{auditReport.embyComparisons?.length ?? 0}</strong><small>{auditReport.embyComparisons?.length ? '需要检查' : '未发现或未启用'}</small></div>
+                </div>
+              </Card>
+
+              <Card title="季度缺漏">
+                <div className="task-table-wrap">
+                  <table className="task-table audit-table">
+                    <thead>
+                      <tr>
+                        <th>季度</th>
+                        <th>已有</th>
+                        <th>期望</th>
+                        <th>来源</th>
+                        <th>缺失</th>
+                        <th>说明</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditReport.seasonReports.length ? auditReport.seasonReports.map((season) => (
+                        <tr key={season.season}>
+                          <td>S{String(season.season).padStart(2, '0')}</td>
+                          <td>{formatEpisodeList(season.existingEpisodes)}</td>
+                          <td>{season.expectedEpisodes?.length ? formatEpisodeList(season.expectedEpisodes) : season.expectedCount || '未知'}</td>
+                          <td>{season.expectedSource || '-'}</td>
+                          <td><span className={season.missingEpisodes?.length ? 'pill bad' : 'pill ok'}>{season.missingEpisodes?.length ? formatEpisodeList(season.missingEpisodes) : '无'}</span></td>
+                          <td className="path-cell">{season.note || '-'}</td>
+                        </tr>
+                      )) : <tr><td colSpan={6} className="empty-cell">未发现 Season 1+ 单集。</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+
+              <Card title="Emby 差异">
+                <p className="muted">这里只列出发现的问题；没有行表示当前对比项未发现差异。对比范围包括剧集、季度和单集的标题、简介、图片存在性，以及可用的 TMDB ID。</p>
+                <div className="task-table-wrap">
+                  <table className="task-table audit-table">
+                    <thead>
+                      <tr>
+                        <th>级别</th>
+                        <th>单集</th>
+                        <th>字段</th>
+                        <th>本地</th>
+                        <th>Emby</th>
+                        <th>说明</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditReport.embyComparisons?.length ? auditReport.embyComparisons.map((issue, index) => (
+                        <tr key={`${issue.season}-${issue.episode}-${issue.field}-${index}`}>
+                          <td><span className={issue.severity === 'error' ? 'pill bad' : 'pill'}>{issue.severity}</span></td>
+                          <td>{formatAuditIssueTarget(issue)}</td>
+                          <td>{issue.field}</td>
+                          <td className="path-cell">{issue.local || '-'}</td>
+                          <td className="path-cell">{issue.emby || '-'}</td>
+                          <td className="path-cell">{issue.detail || '-'}</td>
+                        </tr>
+                      )) : <tr><td colSpan={6} className="empty-cell">未配置 Emby 或未发现差异。</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+
+              <Card title="本地单集明细">
+                <div className="task-table-wrap">
+                  <table className="task-table audit-table audit-episodes-table">
+                    <thead>
+                      <tr>
+                        <th>单集</th>
+                        <th>标题</th>
+                        <th>图片</th>
+                        <th>TMDB</th>
+                        <th>视频</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditReport.localEpisodes.length ? auditReport.localEpisodes.map((episode) => (
+                        <tr key={episode.path}>
+                          <td>S{String(episode.season).padStart(2, '0')}E{String(episode.episode).padStart(2, '0')}</td>
+                          <td>{episode.title || '-'}</td>
+                          <td><span className={episode.hasImage ? 'pill ok' : 'pill'}>{episode.hasImage ? '有' : '无'}</span></td>
+                          <td>{episode.providerIds?.tmdb || '-'}</td>
+                          <td className="path-cell">{episode.path}</td>
+                        </tr>
+                      )) : <tr><td colSpan={5} className="empty-cell">未识别到本地单集。</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+
+              {auditReport.warnings?.length ? (
+                <Card title="警告">
+                  <div className="audit-warning-list">
+                    {auditReport.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+                  </div>
+                </Card>
+              ) : null}
+            </>
+          )}
         </section>
       )}
 
@@ -1993,6 +2304,22 @@ function LanguageMultiPicker(props: { label: string; values: string[]; onChange:
 
 function asArray<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
+}
+
+function formatEpisodeList(values: number[] | null | undefined): string {
+  const items = asArray(values);
+  if (!items.length) return '';
+  return items.join(', ');
+}
+
+function formatAuditIssueTarget(issue: AuditComparisonIssue): string {
+  if (issue.season && issue.episode) {
+    return `S${String(issue.season).padStart(2, '0')}E${String(issue.episode).padStart(2, '0')}`;
+  }
+  if (issue.season) {
+    return `S${String(issue.season).padStart(2, '0')}`;
+  }
+  return '剧集';
 }
 
 function normalizeExtensions(value: string): string[] {

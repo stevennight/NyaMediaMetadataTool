@@ -333,6 +333,96 @@ button:disabled {
   color: #1f2937;
 }
 
+.audit-page-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.audit-controls {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(150px, 0.3fr) minmax(320px, 1fr) minmax(220px, 0.55fr);
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+
+.audit-controls label {
+  display: grid;
+  gap: 6px;
+  color: #78716c;
+  font-size: 13px;
+}
+
+.audit-controls input {
+  width: 100%;
+}
+
+.audit-key-manager {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.4fr) minmax(260px, 0.8fr) auto auto;
+  gap: 12px;
+  align-items: end;
+  margin: 0 0 14px;
+}
+
+.audit-key-manager label {
+  display: grid;
+  gap: 6px;
+  color: #78716c;
+  font-size: 13px;
+}
+
+.audit-key-manager input {
+  width: 100%;
+}
+
+.audit-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.audit-stat {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 251, 235, 0.58);
+  padding: 16px;
+}
+
+.audit-stat span,
+.audit-stat small {
+  overflow-wrap: anywhere;
+  color: #78716c;
+}
+
+.audit-stat strong {
+  overflow-wrap: anywhere;
+  font-size: 24px;
+}
+
+.audit-table {
+  min-width: 900px;
+}
+
+.audit-episodes-table {
+  min-width: 1100px;
+}
+
+.audit-warning-list {
+  display: grid;
+  gap: 8px;
+}
+
+.audit-warning-list p {
+  margin: 0;
+  border-left: 4px solid #d97706;
+  border-radius: 12px;
+  background: rgba(245, 158, 11, 0.10);
+  padding: 10px 12px;
+}
+
 .filter-actions {
   display: flex;
   gap: 8px;
@@ -1192,6 +1282,9 @@ h3 {
   .task-page-grid,
   .settings-form,
   .task-filters,
+  .audit-controls,
+  .audit-key-manager,
+  .audit-summary-grid,
   .rename-controls,
   .rescan-modal-grid {
     grid-template-columns: 1fr;

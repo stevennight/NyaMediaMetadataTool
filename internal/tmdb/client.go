@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -79,14 +80,15 @@ type SearchResult struct {
 }
 
 type Season struct {
-	ID           int
-	Name         string
-	Overview     string
-	AirDate      string
-	SeasonNumber int
-	EpisodeCount int
-	PosterPath   string
-	Actors       []Actor
+	ID             int
+	Name           string
+	Overview       string
+	AirDate        string
+	SeasonNumber   int
+	EpisodeCount   int
+	EpisodeNumbers []int
+	PosterPath     string
+	Actors         []Actor
 }
 
 type Actor struct {
@@ -140,12 +142,16 @@ type genreResult struct {
 }
 
 type seasonResponse struct {
-	ID           int    `json:"id"`
-	Name         string `json:"name"`
-	Overview     string `json:"overview"`
-	AirDate      string `json:"air_date"`
-	SeasonNumber int    `json:"season_number"`
-	Episodes     []any  `json:"episodes"`
+	ID           int                     `json:"id"`
+	Name         string                  `json:"name"`
+	Overview     string                  `json:"overview"`
+	AirDate      string                  `json:"air_date"`
+	SeasonNumber int                     `json:"season_number"`
+	Episodes     []seasonEpisodeResponse `json:"episodes"`
+}
+
+type seasonEpisodeResponse struct {
+	EpisodeNumber int `json:"episode_number"`
 }
 
 type imageResponse struct {
@@ -516,13 +522,14 @@ func (c *Client) showAndSeasonFromDetails(ctx context.Context, showID int, fallb
 			Genres:           genres,
 			Actors:           showCredits.Actors,
 		}, Season{
-			ID:           seasonDetail.ID,
-			Name:         seasonDetail.Name,
-			Overview:     seasonDetail.Overview,
-			AirDate:      seasonDetail.AirDate,
-			SeasonNumber: seasonDetail.SeasonNumber,
-			EpisodeCount: len(seasonDetail.Episodes),
-			Actors:       seasonCredits.Actors,
+			ID:             seasonDetail.ID,
+			Name:           seasonDetail.Name,
+			Overview:       seasonDetail.Overview,
+			AirDate:        seasonDetail.AirDate,
+			SeasonNumber:   seasonDetail.SeasonNumber,
+			EpisodeCount:   len(seasonDetail.Episodes),
+			EpisodeNumbers: seasonEpisodeNumbers(seasonDetail.Episodes),
+			Actors:         seasonCredits.Actors,
 		}, nil
 }
 
@@ -953,6 +960,23 @@ func mergeSeason(target *seasonResponse, source seasonResponse) {
 	if len(target.Episodes) == 0 {
 		target.Episodes = source.Episodes
 	}
+}
+
+func seasonEpisodeNumbers(episodes []seasonEpisodeResponse) []int {
+	seen := map[int]struct{}{}
+	numbers := make([]int, 0, len(episodes))
+	for _, episode := range episodes {
+		if episode.EpisodeNumber <= 0 {
+			continue
+		}
+		if _, ok := seen[episode.EpisodeNumber]; ok {
+			continue
+		}
+		seen[episode.EpisodeNumber] = struct{}{}
+		numbers = append(numbers, episode.EpisodeNumber)
+	}
+	sort.Ints(numbers)
+	return numbers
 }
 
 func episodeComplete(episode episodeResponse) bool {

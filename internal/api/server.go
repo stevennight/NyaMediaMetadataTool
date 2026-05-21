@@ -13,6 +13,7 @@ import (
 
 	"NyaMediaMetadataTool/internal/bootstrap"
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/metadataaudit"
 	"NyaMediaMetadataTool/internal/renamer"
 	"NyaMediaMetadataTool/internal/store"
 	"NyaMediaMetadataTool/internal/tmdb"
@@ -63,11 +64,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/ignore", s.handleIgnoreTasks)
 	s.mux.HandleFunc("GET /api/tasks/", s.handleTaskDetail)
 	s.mux.HandleFunc("GET /api/artifacts", s.handleArtifacts)
+	s.mux.HandleFunc("GET /api/emby-api-keys", s.handleListEmbyAPIKeys)
+	s.mux.HandleFunc("POST /api/emby-api-keys", s.handleSaveEmbyAPIKey)
+	s.mux.HandleFunc("DELETE /api/emby-api-keys/", s.handleDeleteEmbyAPIKey)
 	s.mux.HandleFunc("GET /api/fs/directories", s.handleListDirectories)
 	s.mux.HandleFunc("POST /api/rename/preview", s.handleRenamePreview)
 	s.mux.HandleFunc("POST /api/rename/preview/stream", s.handleRenamePreviewStream)
 	s.mux.HandleFunc("POST /api/rename/preview/item", s.handleRenamePreviewItem)
 	s.mux.HandleFunc("POST /api/rename/apply", s.handleRenameApply)
+	s.mux.HandleFunc("POST /api/audit/series", s.handleSeriesAudit)
 	s.mux.HandleFunc("GET /api/rename/history", s.handleRenameHistory)
 	s.mux.HandleFunc("GET /api/rename/history/{id}/undo-check", s.handleRenameHistoryUndoCheck)
 	s.mux.HandleFunc("POST /api/rename/history/{id}/undo", s.handleRenameHistoryUndo)
@@ -245,6 +250,52 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, artifacts)
 }
 
+func (s *Server) handleListEmbyAPIKeys(w http.ResponseWriter, r *http.Request) {
+	keys, err := s.store.ListEmbyAPIKeys(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, keys)
+}
+
+func (s *Server) handleSaveEmbyAPIKey(w http.ResponseWriter, r *http.Request) {
+	var input store.EmbyAPIKey
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	input.Title = strings.TrimSpace(input.Title)
+	input.APIKey = strings.TrimSpace(input.APIKey)
+	if input.Title == "" || input.APIKey == "" {
+		writeError(w, http.StatusBadRequest, errors.New("title and apiKey are required"))
+		return
+	}
+	created, err := s.store.SaveEmbyAPIKey(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	created.APIKey = ""
+	writeJSON(w, http.StatusOK, created)
+}
+
+func (s *Server) handleDeleteEmbyAPIKey(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseIDFromPath(w, r, "/api/emby-api-keys/")
+	if !ok {
+		return
+	}
+	if err := s.store.DeleteEmbyAPIKey(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrEmbyAPIKeyNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleRenamePreview(w http.ResponseWriter, r *http.Request) {
 	var input renamer.PreviewRequest
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -318,6 +369,55 @@ func (s *Server) handleRenameApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleSeriesAudit(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Root         string `json:"root"`
+		TMDBShowID   int    `json:"tmdbShowId"`
+		EmbyItemURL  string `json:"embyItemUrl"`
+		EmbyURL      string `json:"embyUrl"`
+		EmbyAPIKey   string `json:"embyApiKey"`
+		EmbyAPIKeyID int64  `json:"embyApiKeyId"`
+		EmbySeriesID string `json:"embySeriesId"`
+	}
+	var input request
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	input.Root = strings.TrimSpace(input.Root)
+	if input.Root == "" {
+		writeError(w, http.StatusBadRequest, errors.New("root is required"))
+		return
+	}
+	embyAPIKey := strings.TrimSpace(input.EmbyAPIKey)
+	if embyAPIKey == "" && input.EmbyAPIKeyID > 0 {
+		storedKey, err := s.store.GetEmbyAPIKey(r.Context(), input.EmbyAPIKeyID)
+		if err != nil {
+			if errors.Is(err, store.ErrEmbyAPIKeyNotFound) {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		embyAPIKey = storedKey.APIKey
+	}
+	report, err := metadataaudit.Run(r.Context(), metadataaudit.Options{
+		Root:         input.Root,
+		Config:       s.snapshotConfig(),
+		TMDBShowID:   input.TMDBShowID,
+		EmbyItemURL:  input.EmbyItemURL,
+		EmbyURL:      input.EmbyURL,
+		EmbyAPIKey:   embyAPIKey,
+		EmbySeriesID: input.EmbySeriesID,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) handleRenameHistory(w http.ResponseWriter, r *http.Request) {

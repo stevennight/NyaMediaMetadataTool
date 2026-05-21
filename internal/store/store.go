@@ -66,7 +66,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureTaskScanRunColumn(ctx); err != nil {
 		return err
 	}
-	return s.ensureScanScopeTaskColumn(ctx)
+	if err := s.ensureScanScopeTaskColumn(ctx); err != nil {
+		return err
+	}
+	return s.ensureEmbyAPIKeyNoteColumn(ctx)
 }
 
 func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
@@ -79,6 +82,10 @@ func (s *Store) ensureTaskScanRunColumn(ctx context.Context) error {
 
 func (s *Store) ensureScanScopeTaskColumn(ctx context.Context) error {
 	return s.ensureColumn(ctx, "scan_scopes", "task_id", `ALTER TABLE scan_scopes ADD COLUMN task_id INTEGER NOT NULL DEFAULT 0`)
+}
+
+func (s *Store) ensureEmbyAPIKeyNoteColumn(ctx context.Context) error {
+	return s.ensureColumn(ctx, "emby_api_keys", "note", `ALTER TABLE emby_api_keys ADD COLUMN note TEXT NOT NULL DEFAULT ''`)
 }
 
 func (s *Store) ensureTaskColumn(ctx context.Context, column string, statement string) error {
@@ -220,5 +227,14 @@ CREATE TABLE IF NOT EXISTS scrape_cache (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(source, external_id, payload_type, request_key)
+);
+
+CREATE TABLE IF NOT EXISTS emby_api_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL UNIQUE,
+  api_key TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 `

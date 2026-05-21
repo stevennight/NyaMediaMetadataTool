@@ -195,6 +195,7 @@ type AuditReport = {
   tmdbShowId?: number;
   localEpisodes: AuditLocalEpisode[];
   seasonReports: AuditSeasonReport[];
+  artifactIssues?: AuditComparisonIssue[];
   embyComparisons?: AuditComparisonIssue[];
   warnings?: string[];
 };
@@ -1172,7 +1173,8 @@ export function App() {
       setAuditReport(report);
       const missingCount = report.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0);
       const diffCount = report.embyComparisons?.length ?? 0;
-      setNotice(`核对完成：缺失 ${missingCount} 集，差异/元数据缺失 ${diffCount} 项。`);
+      const artifactCount = report.artifactIssues?.length ?? 0;
+      setNotice(`核对完成：缺失 ${missingCount} 集，本地产物缺失 ${artifactCount} 项，差异/元数据缺失 ${diffCount} 项。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : '剧集核对失败');
     } finally {
@@ -1671,6 +1673,7 @@ export function App() {
                   <div className="audit-stat"><span>剧集</span><strong>{auditReport.showTitle || '-'}</strong><small>{auditReport.tmdbShowId ? `TMDB #${auditReport.tmdbShowId}` : '未识别 TMDB ID'}</small></div>
                   <div className="audit-stat"><span>本地单集</span><strong>{auditReport.localEpisodes.length}</strong><small>{auditReport.root}</small></div>
                   <div className="audit-stat"><span>缺失集数</span><strong>{auditReport.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0)}</strong><small>{auditReport.seasonReports.length} 个季度</small></div>
+                  <div className="audit-stat"><span>产物缺失</span><strong>{auditReport.artifactIssues?.length ?? 0}</strong><small>{auditReport.artifactIssues?.length ? '需要补齐' : '未发现'}</small></div>
                   <div className="audit-stat"><span>差异/缺失</span><strong>{auditReport.embyComparisons?.length ?? 0}</strong><small>{auditReport.embyComparisons?.length ? '需要检查' : '未发现或未启用'}</small></div>
                 </div>
               </Card>
@@ -1729,6 +1732,32 @@ export function App() {
                           <td className="path-cell">{issue.detail || '-'}</td>
                         </tr>
                       )) : <tr><td colSpan={6} className="empty-cell">未配置 Emby 或未发现差异。</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+
+              <Card title="本地产物缺失">
+                <p className="muted">检查剧集级图片、季度图片、单集 NFO、单集图片、`-mediainfo.json` 和 `-*.bif`。这里是本地文件存在性检查，不依赖 Emby。</p>
+                <div className="task-table-wrap">
+                  <table className="task-table audit-table">
+                    <thead>
+                      <tr>
+                        <th>级别</th>
+                        <th>对象</th>
+                        <th>产物</th>
+                        <th>说明</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditReport.artifactIssues?.length ? auditReport.artifactIssues.map((issue, index) => (
+                        <tr key={`${issue.season}-${issue.episode}-${issue.field}-${index}`}>
+                          <td><span className="pill">{issue.severity}</span></td>
+                          <td>{formatAuditIssueTarget(issue)}</td>
+                          <td>{issue.field}</td>
+                          <td className="path-cell">{issue.detail || '-'}</td>
+                        </tr>
+                      )) : <tr><td colSpan={4} className="empty-cell">未发现本地产物缺失。</td></tr>}
                     </tbody>
                   </table>
                 </div>

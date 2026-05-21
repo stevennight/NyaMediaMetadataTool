@@ -39,6 +39,7 @@ type Report struct {
 	LocalSeasons    []LocalSeason     `json:"localSeasons"`
 	LocalEpisodes   []LocalEpisode    `json:"localEpisodes"`
 	SeasonReports   []SeasonReport    `json:"seasonReports"`
+	ArtifactIssues  []ComparisonIssue `json:"artifactIssues,omitempty"`
 	EmbyComparisons []ComparisonIssue `json:"embyComparisons,omitempty"`
 	Warnings        []string          `json:"warnings,omitempty"`
 }
@@ -151,6 +152,7 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	report.LocalEpisodes = episodes
 	report.Warnings = append(report.Warnings, warnings...)
 	report.SeasonReports = buildSeasonReports(ctx, root, opts.Config, report.TMDBShowID, episodes, &report.Warnings)
+	report.ArtifactIssues = checkLocalArtifacts(root, report.LocalSeasons, episodes)
 
 	embyURL := strings.TrimSpace(opts.EmbyURL)
 	embySeriesID := strings.TrimSpace(opts.EmbySeriesID)
@@ -607,6 +609,88 @@ func directoryHasImage(dir string, stems []string) bool {
 		}
 	}
 	return false
+}
+
+func checkLocalArtifacts(root string, seasons []LocalSeason, episodes []LocalEpisode) []ComparisonIssue {
+	var issues []ComparisonIssue
+	add := func(season int, episode int, field string, detail string) {
+		issues = append(issues, ComparisonIssue{Severity: "warning", Season: season, Episode: episode, Field: field, Detail: detail})
+	}
+	for _, name := range []string{"tvshow.nfo"} {
+		if !fileExists(filepath.Join(root, name)) {
+			add(0, 0, "series."+name, "剧集级产物缺失")
+		}
+	}
+	for _, image := range []string{"poster", "fanart", "backdrop", "clearlogo", "clearart"} {
+		if !hasAnyExt(root, image, []string{".jpg", ".jpeg", ".png", ".webp"}) {
+			add(0, 0, "series.image."+image, "剧集图片缺失")
+		}
+	}
+	for _, season := range seasons {
+		seasonDir := seasonDirectory(root, season.Season, episodes)
+		if seasonDir == "" {
+			continue
+		}
+		if !fileExists(filepath.Join(seasonDir, "season.nfo")) {
+			add(season.Season, 0, "season.nfo", "季度 NFO 缺失")
+		}
+		if !directoryHasImage(seasonDir, []string{"poster", "folder", "season"}) {
+			add(season.Season, 0, "season.image", "季度图片缺失")
+		}
+	}
+	for _, episode := range episodes {
+		base := strings.TrimSuffix(episode.Path, filepath.Ext(episode.Path))
+		if !fileExists(base + ".nfo") {
+			add(episode.Season, episode.Episode, "episode.nfo", "单集 NFO 缺失")
+		}
+		if !episodeHasImage(base, filepath.Dir(episode.Path), episode.Thumb) {
+			add(episode.Season, episode.Episode, "episode.thumb", "单集图片缺失")
+		}
+		if !fileExists(base + "-mediainfo.json") {
+			add(episode.Season, episode.Episode, "episode.mediainfo", "mediainfo.json 缺失")
+		}
+		if !hasBIF(base) {
+			add(episode.Season, episode.Episode, "episode.bif", "BIF 缺失")
+		}
+	}
+	sort.Slice(issues, func(i, j int) bool {
+		if issues[i].Season == issues[j].Season {
+			if issues[i].Episode == issues[j].Episode {
+				return issues[i].Field < issues[j].Field
+			}
+			return issues[i].Episode < issues[j].Episode
+		}
+		return issues[i].Season < issues[j].Season
+	})
+	return issues
+}
+
+func seasonDirectory(root string, season int, episodes []LocalEpisode) string {
+	for _, episode := range episodes {
+		if episode.Season == season {
+			return filepath.Dir(episode.Path)
+		}
+	}
+	for _, dir := range []string{filepath.Join(root, fmt.Sprintf("Season %02d", season)), filepath.Join(root, fmt.Sprintf("Season %d", season))} {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	return ""
+}
+
+func hasAnyExt(dir string, stem string, exts []string) bool {
+	for _, ext := range exts {
+		if fileExists(filepath.Join(dir, stem+ext)) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBIF(base string) bool {
+	matches, err := filepath.Glob(base + "-*.bif")
+	return err == nil && len(matches) > 0
 }
 
 func shouldSkipIgnoredDir(path string) bool {

@@ -333,6 +333,9 @@ func scanLocalEpisodes(root string, cfg config.Config) ([]LocalEpisode, []string
 			return err
 		}
 		if entry.IsDir() {
+			if shouldSkipIgnoredDir(path) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !exts[strings.ToLower(filepath.Ext(path))] {
@@ -497,7 +500,16 @@ func readLocalShow(root string) (LocalShow, []string) {
 func scanLocalSeasons(root string) []LocalSeason {
 	var seasons []LocalSeason
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !strings.EqualFold(entry.Name(), "season.nfo") {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if shouldSkipIgnoredDir(path) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.EqualFold(entry.Name(), "season.nfo") {
 			return nil
 		}
 		season, ok := readLocalSeason(path)
@@ -595,6 +607,10 @@ func directoryHasImage(dir string, stems []string) bool {
 		}
 	}
 	return false
+}
+
+func shouldSkipIgnoredDir(path string) bool {
+	return fileExists(filepath.Join(path, ".ignore"))
 }
 
 func providerIDs(ids []nfoUniqueID, tmdbValue string) map[string]string {

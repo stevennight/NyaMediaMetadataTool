@@ -42,6 +42,39 @@ func TestRunUsesSeasonNFOAndSkipsSeasonZero(t *testing.T) {
 	}
 }
 
+func TestRunSkipsIgnoredDirectories(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	seasonDir := filepath.Join(root, "Season 01")
+	ignoredDir := filepath.Join(root, "Season 02")
+	if err := os.Mkdir(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(ignoredDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(seasonDir, "season.nfo"), `<season><episodeguide><episodecount>1</episodecount></episodeguide></season>`)
+	writeFile(t, filepath.Join(seasonDir, "Test Show S01E01.mkv"), "")
+	writeFile(t, filepath.Join(ignoredDir, ".ignore"), "")
+	writeFile(t, filepath.Join(ignoredDir, "season.nfo"), `<season><episodeguide><episodecount>1</episodecount></episodeguide></season>`)
+	writeFile(t, filepath.Join(ignoredDir, "Test Show S02E01.mkv"), "")
+
+	report, err := Run(context.Background(), Options{Root: root, Config: config.Default()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.LocalEpisodes) != 1 || report.LocalEpisodes[0].Season != 1 {
+		t.Fatalf("unexpected local episodes: %#v", report.LocalEpisodes)
+	}
+	if len(report.LocalSeasons) != 1 || report.LocalSeasons[0].Season != 1 {
+		t.Fatalf("unexpected local seasons: %#v", report.LocalSeasons)
+	}
+	if len(report.SeasonReports) != 1 || report.SeasonReports[0].Season != 1 {
+		t.Fatalf("unexpected season reports: %#v", report.SeasonReports)
+	}
+}
+
 func TestCompareEmbyDetectsMetadataDifferences(t *testing.T) {
 	t.Parallel()
 

@@ -13,6 +13,7 @@ import (
 
 	"NyaMediaMetadataTool/internal/bootstrap"
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/fileaudit"
 	"NyaMediaMetadataTool/internal/metadataaudit"
 	"NyaMediaMetadataTool/internal/renamer"
 	"NyaMediaMetadataTool/internal/store"
@@ -73,6 +74,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/rename/preview/item", s.handleRenamePreviewItem)
 	s.mux.HandleFunc("POST /api/rename/apply", s.handleRenameApply)
 	s.mux.HandleFunc("POST /api/audit/series", s.handleSeriesAudit)
+	s.mux.HandleFunc("POST /api/audit/files", s.handleFileAudit)
 	s.mux.HandleFunc("GET /api/rename/history", s.handleRenameHistory)
 	s.mux.HandleFunc("GET /api/rename/history/{id}/undo-check", s.handleRenameHistoryUndoCheck)
 	s.mux.HandleFunc("POST /api/rename/history/{id}/undo", s.handleRenameHistoryUndo)
@@ -412,6 +414,62 @@ func (s *Server) handleSeriesAudit(w http.ResponseWriter, r *http.Request) {
 		EmbyURL:      input.EmbyURL,
 		EmbyAPIKey:   embyAPIKey,
 		EmbySeriesID: input.EmbySeriesID,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleFileAudit(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		LocalRoot              string `json:"localRoot"`
+		RemoteRoot             string `json:"remoteRoot"`
+		SFTPAddr               string `json:"sftpAddr"`
+		SFTPUser               string `json:"sftpUser"`
+		SFTPPassword           string `json:"sftpPassword"`
+		SFTPKeyPath            string `json:"sftpKeyPath"`
+		SFTPKnownHostsPath     string `json:"sftpKnownHostsPath"`
+		SFTPInsecureIgnoreHost bool   `json:"sftpInsecureIgnoreHost"`
+		AllowSTRMProxy         bool   `json:"allowStrmProxy"`
+		CompareSize            bool   `json:"compareSize"`
+		CompareMD5             bool   `json:"compareMd5"`
+	}
+	var input request
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	input.LocalRoot = strings.TrimSpace(input.LocalRoot)
+	input.RemoteRoot = strings.TrimSpace(input.RemoteRoot)
+	if input.LocalRoot == "" || input.RemoteRoot == "" || strings.TrimSpace(input.SFTPAddr) == "" || strings.TrimSpace(input.SFTPUser) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("local root, remote root, sftp addr and sftp user are required"))
+		return
+	}
+
+	remoteFS, err := fileaudit.NewSFTPFS(r.Context(), fileaudit.SFTPConfig{
+		Addr:                  input.SFTPAddr,
+		User:                  input.SFTPUser,
+		Password:              input.SFTPPassword,
+		KeyPath:               input.SFTPKeyPath,
+		KnownHostsPath:        input.SFTPKnownHostsPath,
+		InsecureIgnoreHostKey: input.SFTPInsecureIgnoreHost,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	defer remoteFS.Close()
+
+	report, err := fileaudit.Compare(r.Context(), fileaudit.Options{
+		LocalRoot:       input.LocalRoot,
+		RemoteRoot:      input.RemoteRoot,
+		RemoteFS:        remoteFS,
+		VideoExtensions: s.snapshotConfig().Processing.Extensions,
+		AllowSTRMProxy:  input.AllowSTRMProxy,
+		CompareSize:     input.CompareSize,
+		CompareMD5:      input.CompareMD5,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)

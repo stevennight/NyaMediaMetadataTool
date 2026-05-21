@@ -200,6 +200,23 @@ type AuditReport = {
   warnings?: string[];
 };
 
+type FileAuditIssue = {
+  severity: string;
+  type: string;
+  path: string;
+  local?: string;
+  remote?: string;
+  detail?: string;
+};
+
+type FileAuditReport = {
+  localRoot: string;
+  remoteRoot: string;
+  localCount: number;
+  remoteCount: number;
+  issues?: FileAuditIssue[];
+};
+
 type RescanScope = 'all' | 'dir' | 'path';
 type RescanStrategy = 'missing' | 'force';
 type BatchEpisodeMode = 'keep' | 'offset' | 'sequence';
@@ -209,6 +226,7 @@ type RegionOption = { code: string; name: string };
 type SelectOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'rename' | 'audit';
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
+type AuditTab = 'series' | 'files';
 
 const pagePaths: Record<PageKey, string> = {
   dashboard: '/',
@@ -341,6 +359,16 @@ type AuditPreferences = {
   tmdbId?: string;
   embyItemUrl?: string;
   embyApiKeyId?: string;
+  fileLocalRoot?: string;
+  fileRemoteRoot?: string;
+  sftpAddr?: string;
+  sftpUser?: string;
+  sftpKeyPath?: string;
+  sftpKnownHostsPath?: string;
+  sftpInsecureIgnoreHost?: boolean;
+  allowStrmProxy?: boolean;
+  compareSize?: boolean;
+  compareMd5?: boolean;
 };
 
 function readRenamePreferences(): RenamePreferences {
@@ -517,12 +545,26 @@ export function App() {
   const [auditEmbyItemUrl, setAuditEmbyItemUrl] = useState(() => readAuditPreferences().embyItemUrl ?? '');
   const [auditEmbyApiKey, setAuditEmbyApiKey] = useState('');
   const [auditEmbyAPIKeys, setAuditEmbyAPIKeys] = useState<EmbyAPIKey[]>([]);
+  const [auditTab, setAuditTab] = useState<AuditTab>('series');
   const [auditSelectedEmbyKeyId, setAuditSelectedEmbyKeyId] = useState(() => readAuditPreferences().embyApiKeyId ?? '');
   const [newEmbyKeyTitle, setNewEmbyKeyTitle] = useState('');
   const [newEmbyKeyValue, setNewEmbyKeyValue] = useState('');
   const [savingEmbyKey, setSavingEmbyKey] = useState(false);
   const [auditReport, setAuditReport] = useState<AuditReport | null>(null);
   const [auditingSeries, setAuditingSeries] = useState(false);
+  const [fileAuditLocalRoot, setFileAuditLocalRoot] = useState(() => readAuditPreferences().fileLocalRoot ?? '');
+  const [fileAuditRemoteRoot, setFileAuditRemoteRoot] = useState(() => readAuditPreferences().fileRemoteRoot ?? '');
+  const [fileAuditSFTPAddr, setFileAuditSFTPAddr] = useState(() => readAuditPreferences().sftpAddr ?? '');
+  const [fileAuditSFTPUser, setFileAuditSFTPUser] = useState(() => readAuditPreferences().sftpUser ?? '');
+  const [fileAuditSFTPPassword, setFileAuditSFTPPassword] = useState('');
+  const [fileAuditSFTPKeyPath, setFileAuditSFTPKeyPath] = useState(() => readAuditPreferences().sftpKeyPath ?? '');
+  const [fileAuditSFTPKnownHostsPath, setFileAuditSFTPKnownHostsPath] = useState(() => readAuditPreferences().sftpKnownHostsPath ?? '');
+  const [fileAuditSFTPInsecure, setFileAuditSFTPInsecure] = useState(() => readAuditPreferences().sftpInsecureIgnoreHost ?? false);
+  const [fileAuditAllowSTRM, setFileAuditAllowSTRM] = useState(() => readAuditPreferences().allowStrmProxy ?? true);
+  const [fileAuditCompareSize, setFileAuditCompareSize] = useState(() => readAuditPreferences().compareSize ?? true);
+  const [fileAuditCompareMD5, setFileAuditCompareMD5] = useState(() => readAuditPreferences().compareMd5 ?? false);
+  const [fileAuditReport, setFileAuditReport] = useState<FileAuditReport | null>(null);
+  const [auditingFiles, setAuditingFiles] = useState(false);
   const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null);
   const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([]);
   const [checkingTools, setCheckingTools] = useState(false);
@@ -595,9 +637,19 @@ export function App() {
       root: auditRoot,
       tmdbId: auditTmdbId,
       embyItemUrl: auditEmbyItemUrl,
-      embyApiKeyId: auditSelectedEmbyKeyId
+      embyApiKeyId: auditSelectedEmbyKeyId,
+      fileLocalRoot: fileAuditLocalRoot,
+      fileRemoteRoot: fileAuditRemoteRoot,
+      sftpAddr: fileAuditSFTPAddr,
+      sftpUser: fileAuditSFTPUser,
+      sftpKeyPath: fileAuditSFTPKeyPath,
+      sftpKnownHostsPath: fileAuditSFTPKnownHostsPath,
+      sftpInsecureIgnoreHost: fileAuditSFTPInsecure,
+      allowStrmProxy: fileAuditAllowSTRM,
+      compareSize: fileAuditCompareSize,
+      compareMd5: fileAuditCompareMD5
     });
-  }, [auditRoot, auditTmdbId, auditEmbyItemUrl, auditSelectedEmbyKeyId]);
+  }, [auditRoot, auditTmdbId, auditEmbyItemUrl, auditSelectedEmbyKeyId, fileAuditLocalRoot, fileAuditRemoteRoot, fileAuditSFTPAddr, fileAuditSFTPUser, fileAuditSFTPKeyPath, fileAuditSFTPKnownHostsPath, fileAuditSFTPInsecure, fileAuditAllowSTRM, fileAuditCompareSize, fileAuditCompareMD5]);
 
   useEffect(() => {
     function handlePopState() {
@@ -1182,6 +1234,50 @@ export function App() {
     }
   }
 
+  async function runFileAudit() {
+    if (!fileAuditLocalRoot.trim() || !fileAuditRemoteRoot.trim()) {
+      setError('请输入本地目录和远端目录');
+      return;
+    }
+    if (!fileAuditSFTPAddr.trim() || !fileAuditSFTPUser.trim()) {
+      setError('请输入 SFTP 地址和用户名');
+      return;
+    }
+    setAuditingFiles(true);
+    setError('');
+    setNotice('');
+    try {
+      const response = await fetch('/api/audit/files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          localRoot: fileAuditLocalRoot.trim(),
+          remoteRoot: fileAuditRemoteRoot.trim(),
+          sftpAddr: fileAuditSFTPAddr.trim(),
+          sftpUser: fileAuditSFTPUser.trim(),
+          sftpPassword: fileAuditSFTPPassword,
+          sftpKeyPath: fileAuditSFTPKeyPath.trim(),
+          sftpKnownHostsPath: fileAuditSFTPKnownHostsPath.trim(),
+          sftpInsecureIgnoreHost: fileAuditSFTPInsecure,
+          allowStrmProxy: fileAuditAllowSTRM,
+          compareSize: fileAuditCompareSize,
+          compareMd5: fileAuditCompareMD5
+        })
+      });
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const report = await response.json() as FileAuditReport;
+      setFileAuditReport(report);
+      setNotice(`文件对齐检查完成：本地 ${report.localCount} 个，远端 ${report.remoteCount} 个，差异 ${report.issues?.length ?? 0} 项。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '文件对齐检查失败');
+    } finally {
+      setAuditingFiles(false);
+    }
+  }
+
   async function saveEmbyAPIKey() {
     if (!newEmbyKeyTitle.trim() || !newEmbyKeyValue.trim()) {
       setError('请输入 Emby API Key 标题和 Key');
@@ -1649,7 +1745,12 @@ export function App() {
 
         {activePage === 'audit' && (
         <section className="page-grid audit-page-grid">
-          <Card title="剧集缺漏与 Emby 核对" action={<button onClick={runSeriesAudit} disabled={auditingSeries}>{auditingSeries ? '核对中' : '开始核对'}</button>}>
+          <div className="audit-tabs" role="tablist" aria-label="核对类型">
+            <button className={auditTab === 'series' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'series'} onClick={() => setAuditTab('series')}>剧集缺漏与 Emby</button>
+            <button className={auditTab === 'files' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'files'} onClick={() => setAuditTab('files')}>文件对齐检查</button>
+          </div>
+
+          {auditTab === 'series' && <Card title="剧集缺漏与 Emby 核对" action={<button onClick={runSeriesAudit} disabled={auditingSeries}>{auditingSeries ? '核对中' : '开始核对'}</button>}>
             <div className="audit-controls">
               <label>剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择剧集根目录', value: auditRoot, onSelect: setAuditRoot })}>选择</button></div></label>
               <label>TMDB 剧集 ID<input value={auditTmdbId} onChange={(event) => setAuditTmdbId(event.target.value)} inputMode="numeric" placeholder="可选，优先于 tvshow.nfo" /></label>
@@ -1664,9 +1765,69 @@ export function App() {
               {auditSelectedEmbyKeyId ? <button className="secondary" type="button" onClick={() => deleteEmbyAPIKey(Number(auditSelectedEmbyKeyId))}>删除选中 Key</button> : null}
             </div>
             <p className="muted">Season 0 不参与缺漏判断。默认使用剧集 `tvshow.nfo` 里的 TMDB ID 精确核对，手动填写 TMDB ID 时优先使用手动值；TMDB 不可用时才回退季度 `season.nfo` 的总集数。Emby 直接粘贴剧集详情页地址即可。</p>
-          </Card>
+          </Card>}
 
-          {auditReport && (
+          {auditTab === 'files' && <Card title="文件对齐检查" action={<button onClick={runFileAudit} disabled={auditingFiles}>{auditingFiles ? '检查中' : '开始检查'}</button>}>
+            <div className="audit-controls file-audit-controls">
+              <label>本地目录<div className="path-input"><input value={fileAuditLocalRoot} onChange={(event) => setFileAuditLocalRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择本地目录', value: fileAuditLocalRoot, onSelect: setFileAuditLocalRoot })}>选择</button></div></label>
+              <label>远端目录<input value={fileAuditRemoteRoot} onChange={(event) => setFileAuditRemoteRoot(event.target.value)} placeholder="/media/TV/Example Show" /></label>
+              <label>SFTP 地址<input value={fileAuditSFTPAddr} onChange={(event) => setFileAuditSFTPAddr(event.target.value)} placeholder="nas.example.com:22" /></label>
+              <label>SFTP 用户<input value={fileAuditSFTPUser} onChange={(event) => setFileAuditSFTPUser(event.target.value)} placeholder="user" /></label>
+              <label>SFTP 密码<input type="password" value={fileAuditSFTPPassword} onChange={(event) => setFileAuditSFTPPassword(event.target.value)} placeholder="可选，不保存" /></label>
+              <label>私钥路径<input value={fileAuditSFTPKeyPath} onChange={(event) => setFileAuditSFTPKeyPath(event.target.value)} placeholder="C:\Users\me\.ssh\id_ed25519" /></label>
+              <label>known_hosts<input value={fileAuditSFTPKnownHostsPath} onChange={(event) => setFileAuditSFTPKnownHostsPath(event.target.value)} placeholder="C:\Users\me\.ssh\known_hosts" /></label>
+            </div>
+            <div className="audit-option-row">
+              <Toggle label="允许视频匹配同名 .strm" checked={fileAuditAllowSTRM} onChange={setFileAuditAllowSTRM} />
+              <Toggle label="比较文件大小" checked={fileAuditCompareSize} onChange={setFileAuditCompareSize} />
+              <Toggle label="比较 MD5" checked={fileAuditCompareMD5} onChange={setFileAuditCompareMD5} />
+              <Toggle label="跳过 SFTP 主机指纹校验" checked={fileAuditSFTPInsecure} onChange={setFileAuditSFTPInsecure} />
+            </div>
+            <p className="muted">这是本地文件树与远端文件树的独立核对，不依赖 Emby。默认允许本地视频文件对齐远端同名 `.strm`，这种匹配不会比较大小或 MD5。</p>
+          </Card>}
+
+          {auditTab === 'files' && fileAuditReport && (
+            <>
+              <Card title="文件对齐摘要">
+                <div className="audit-summary-grid">
+                  <div className="audit-stat"><span>本地文件</span><strong>{fileAuditReport.localCount}</strong><small>{fileAuditReport.localRoot}</small></div>
+                  <div className="audit-stat"><span>远端文件</span><strong>{fileAuditReport.remoteCount}</strong><small>{fileAuditReport.remoteRoot}</small></div>
+                  <div className="audit-stat"><span>差异</span><strong>{fileAuditReport.issues?.length ?? 0}</strong><small>{fileAuditReport.issues?.length ? '需要检查' : '未发现'}</small></div>
+                </div>
+              </Card>
+
+              <Card title="文件差异">
+                <div className="task-table-wrap">
+                  <table className="task-table audit-table file-audit-table">
+                    <thead>
+                      <tr>
+                        <th>级别</th>
+                        <th>类型</th>
+                        <th>相对路径</th>
+                        <th>本地</th>
+                        <th>远端</th>
+                        <th>说明</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {fileAuditReport.issues?.length ? fileAuditReport.issues.map((issue, index) => (
+                        <tr key={`${issue.type}-${issue.path}-${index}`}>
+                          <td><span className={issue.severity === 'error' ? 'pill bad' : 'pill'}>{issue.severity}</span></td>
+                          <td>{formatFileAuditIssueType(issue.type)}</td>
+                          <td className="path-cell">{issue.path}</td>
+                          <td className="path-cell">{issue.local || '-'}</td>
+                          <td className="path-cell">{issue.remote || '-'}</td>
+                          <td className="path-cell">{issue.detail || '-'}</td>
+                        </tr>
+                      )) : <tr><td colSpan={6} className="empty-cell">未发现文件差异。</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            </>
+          )}
+
+          {auditTab === 'series' && auditReport && (
             <>
               <Card title="核对摘要">
                 <div className="audit-summary-grid">
@@ -2349,6 +2510,25 @@ function formatAuditIssueTarget(issue: AuditComparisonIssue): string {
     return `S${String(issue.season).padStart(2, '0')}`;
   }
   return '剧集';
+}
+
+function formatFileAuditIssueType(type: string): string {
+  switch (type) {
+    case 'missing_remote':
+      return '远端缺少';
+    case 'extra_remote':
+      return '远端多出';
+    case 'extra_remote_dir':
+      return '远端目录多出';
+    case 'size_mismatch':
+      return '大小不一致';
+    case 'md5_mismatch':
+      return 'MD5 不一致';
+    case 'md5_error':
+      return 'MD5 失败';
+    default:
+      return type;
+  }
 }
 
 function normalizeExtensions(value: string): string[] {

@@ -337,6 +337,12 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.audit-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .audit-controls {
   display: grid;
   grid-template-columns: minmax(280px, 1fr) minmax(150px, 0.3fr) minmax(320px, 1fr) minmax(220px, 0.55fr);
@@ -354,6 +360,24 @@ button:disabled {
 
 .audit-controls input {
   width: 100%;
+}
+
+.file-audit-controls {
+  grid-template-columns: minmax(280px, 1fr) minmax(240px, 0.8fr) repeat(2, minmax(180px, 0.55fr));
+}
+
+.audit-option-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0 0 14px;
+}
+
+.audit-option-row .toggle-row {
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.52);
+  padding: 10px 12px;
 }
 
 .audit-key-manager {
@@ -1284,6 +1308,7 @@ h3 {
   .task-filters,
   .audit-controls,
   .audit-key-manager,
+  .audit-option-row,
   .audit-summary-grid,
   .rename-controls,
   .rescan-modal-grid {

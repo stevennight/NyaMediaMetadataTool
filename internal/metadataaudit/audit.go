@@ -844,7 +844,11 @@ func compareShowFields(local LocalShow, emby embyEpisode) []ComparisonIssue {
 		add("title", local.Title, emby.Name, "剧集标题不一致")
 	}
 	if local.Plot == "" {
-		add("plot", "", emby.Overview, "本地剧集简介缺失")
+		if emby.Overview == "" {
+			add("plot", "", "", "本地和 Emby 剧集简介均缺失")
+		} else {
+			add("plot", "", emby.Overview, "本地剧集简介缺失")
+		}
 	} else if emby.Overview == "" {
 		add("plot", local.Plot, "", "Emby 剧集简介缺失")
 	} else if normalizeText(local.Plot) != normalizeText(emby.Overview) {
@@ -901,7 +905,11 @@ func compareSeasonFields(local LocalSeason, emby embyEpisode) []ComparisonIssue 
 		add("title", local.Title, emby.Name, "季度标题不一致")
 	}
 	if local.Plot == "" {
-		add("plot", "", emby.Overview, "本地季度简介缺失")
+		if emby.Overview == "" {
+			add("plot", "", "", "本地和 Emby 季度简介均缺失")
+		} else {
+			add("plot", "", emby.Overview, "本地季度简介缺失")
+		}
 	} else if emby.Overview == "" {
 		add("plot", local.Plot, "", "Emby 季度简介缺失")
 	} else if normalizeText(local.Plot) != normalizeText(emby.Overview) {
@@ -926,7 +934,11 @@ func compareEpisodeFields(local LocalEpisode, emby embyEpisode) []ComparisonIssu
 		add("title", local.Title, emby.Name, "标题不一致")
 	}
 	if local.Plot == "" {
-		add("plot", "", emby.Overview, "本地单集简介缺失")
+		if emby.Overview == "" {
+			add("plot", "", "", "本地和 Emby 单集简介均缺失")
+		} else {
+			add("plot", "", emby.Overview, "本地单集简介缺失")
+		}
 	} else if emby.Overview == "" {
 		add("plot", local.Plot, "", "Emby 单集简介缺失")
 	} else if normalizeText(local.Plot) != normalizeText(emby.Overview) {

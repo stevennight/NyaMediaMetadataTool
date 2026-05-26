@@ -126,6 +126,30 @@ func TestCompareEmbyAllowsSTRMProxyExtension(t *testing.T) {
 	}
 }
 
+func TestCompareEmbyMatchesMultipleEpisodeSources(t *testing.T) {
+	t.Parallel()
+
+	issues := compareEmby(LocalShow{}, nil, []LocalEpisode{
+		{Season: 1, Episode: 59, Path: `E:\TV\BLEACH - S01E59 - 死闘決着！白き誇りと黒き想い.mkv`},
+		{Season: 1, Episode: 59, Path: `E:\TV\BLEACH - S01E59 - 死闘決着！白き誇りと黒き想い - AYWDXNH.mkv`},
+	}, embyEpisode{}, nil, []embyEpisode{{
+		Name:              "死闘決着！白き誇りと黒き想い",
+		Path:              `/remote/BLEACH - S01E59 - 死闘決着！白き誇りと黒き想い.strm`,
+		IndexNumber:       59,
+		ParentIndexNumber: 1,
+		MediaSources: []embyMediaSource{{
+			Path: `/remote/BLEACH - S01E59 - 死闘決着！白き誇りと黒き想い.strm`,
+		}, {
+			Path: `/remote/BLEACH - S01E59 - 死闘決着！白き誇りと黒き想い - AYWDXNH.strm`,
+		}},
+	}})
+	for _, issue := range issues {
+		if issue.Field == "file" {
+			t.Fatalf("did not expect file issue for matched multi-source episode: %#v", issues)
+		}
+	}
+}
+
 func TestApplyMissingEpisodesDoesNotAssumeOneBasedWhenCountOnlyMatches(t *testing.T) {
 	t.Parallel()
 

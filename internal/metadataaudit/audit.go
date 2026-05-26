@@ -736,6 +736,12 @@ type embyEpisode struct {
 	ParentIndexNumber int               `json:"ParentIndexNumber"`
 	ProviderIDs       map[string]string `json:"ProviderIds"`
 	ImageTags         map[string]string `json:"ImageTags"`
+	MediaSources      []embyMediaSource `json:"MediaSources"`
+}
+
+type embyMediaSource struct {
+	Name string `json:"Name"`
+	Path string `json:"Path"`
 }
 
 type embyItemsResponse struct {
@@ -789,13 +795,13 @@ func embyBaseCandidates(baseURL string) []string {
 }
 
 func (c embyClient) fetchItem(ctx context.Context, itemID string) (embyEpisode, error) {
-	fields := url.Values{"Fields": {"Overview,ProviderIds,ImageTags,IndexNumber,ParentIndexNumber"}}
+	fields := url.Values{"Fields": {"Overview,ProviderIds,ImageTags,IndexNumber,ParentIndexNumber,MediaSources"}}
 	var parsed embyEpisode
 	if err := c.get(ctx, "/Users/"+url.PathEscape(c.userID)+"/Items/"+url.PathEscape(strings.TrimSpace(itemID)), fields, &parsed); err == nil {
 		return parsed, nil
 	}
 	var items embyItemsResponse
-	query := url.Values{"Ids": {strings.TrimSpace(itemID)}, "Fields": {"Overview,ProviderIds,ImageTags,IndexNumber,ParentIndexNumber"}}
+	query := url.Values{"Ids": {strings.TrimSpace(itemID)}, "Fields": {"Overview,ProviderIds,ImageTags,IndexNumber,ParentIndexNumber,MediaSources"}}
 	if err := c.get(ctx, "/Items", query, &items); err != nil {
 		return embyEpisode{}, err
 	}
@@ -819,12 +825,12 @@ func (c embyClient) fetchSeasons(ctx context.Context, seriesID string) ([]embyEp
 }
 
 func (c embyClient) fetchEpisodes(ctx context.Context, seriesID string) ([]embyEpisode, error) {
-	query := url.Values{"Fields": {"Overview,Path,ProviderIds,ImageTags,ParentIndexNumber,IndexNumber"}}
+	query := url.Values{"Fields": {"Overview,Path,ProviderIds,ImageTags,ParentIndexNumber,IndexNumber,MediaSources"}}
 	var parsed embyItemsResponse
 	if err := c.get(ctx, "/Shows/"+url.PathEscape(strings.TrimSpace(seriesID))+"/Episodes", query, &parsed); err == nil {
 		return parsed.Items, nil
 	}
-	query = url.Values{"ParentId": {strings.TrimSpace(seriesID)}, "IncludeItemTypes": {"Episode"}, "Recursive": {"true"}, "Fields": {"Overview,Path,ProviderIds,ImageTags,ParentIndexNumber,IndexNumber"}}
+	query = url.Values{"ParentId": {strings.TrimSpace(seriesID)}, "IncludeItemTypes": {"Episode"}, "Recursive": {"true"}, "Fields": {"Overview,Path,ProviderIds,ImageTags,ParentIndexNumber,IndexNumber,MediaSources"}}
 	if err := c.get(ctx, "/Users/"+url.PathEscape(c.userID)+"/Items", query, &parsed); err != nil {
 		return nil, err
 	}
@@ -878,28 +884,33 @@ func compareEmby(localShow LocalShow, localSeasons []LocalSeason, localEpisodes 
 	issues := compareShowFields(localShow, embyShow)
 	issues = append(issues, compareSeasonList(localSeasons, embySeasons)...)
 
-	localByKey := make(map[string]LocalEpisode, len(localEpisodes))
+	localByKey := make(map[string][]LocalEpisode, len(localEpisodes))
 	for _, episode := range localEpisodes {
-		localByKey[episodeKey(episode.Season, episode.Episode)] = episode
+		key := episodeKey(episode.Season, episode.Episode)
+		localByKey[key] = append(localByKey[key], episode)
 	}
-	embyByKey := make(map[string]embyEpisode, len(embyEpisodes))
+	embyByKey := make(map[string][]embyEpisode, len(embyEpisodes))
 	for _, episode := range embyEpisodes {
 		if episode.ParentIndexNumber == 0 {
 			continue
 		}
-		embyByKey[episodeKey(episode.ParentIndexNumber, episode.IndexNumber)] = episode
+		key := episodeKey(episode.ParentIndexNumber, episode.IndexNumber)
+		embyByKey[key] = append(embyByKey[key], episode)
 	}
 
-	for key, localEpisode := range localByKey {
-		embyEpisode, ok := embyByKey[key]
+	for key, localGroup := range localByKey {
+		embyGroup, ok := embyByKey[key]
 		if !ok {
+			localEpisode := localGroup[0]
 			issues = append(issues, ComparisonIssue{Severity: "error", Season: localEpisode.Season, Episode: localEpisode.Episode, Field: "episode", Local: filepath.Base(localEpisode.Path), Detail: "Emby 中缺少该单集"})
 			continue
 		}
-		issues = append(issues, compareEpisodeFields(localEpisode, embyEpisode)...)
+		issues = append(issues, compareEpisodeFields(localGroup[0], embyGroup[0])...)
+		issues = append(issues, compareEpisodeSources(localGroup, embyGroup)...)
 	}
-	for key, embyEpisode := range embyByKey {
+	for key, embyGroup := range embyByKey {
 		if _, ok := localByKey[key]; !ok {
+			embyEpisode := embyGroup[0]
 			issues = append(issues, ComparisonIssue{Severity: "warning", Season: embyEpisode.ParentIndexNumber, Episode: embyEpisode.IndexNumber, Field: "episode", Emby: embyEpisode.Name, Detail: "Emby 中存在但本地目录未发现"})
 		}
 	}
@@ -1036,19 +1047,71 @@ func compareEpisodeFields(local LocalEpisode, emby embyEpisode) []ComparisonIssu
 	if local.HasImage != embyHasImage(emby) {
 		add("image", strconv.FormatBool(local.HasImage), strconv.FormatBool(embyHasImage(emby)), "单集图片存在性不一致")
 	}
-	if local.Path != "" && emby.Path != "" && !sameMediaStem(local.Path, emby.Path) {
-		add("file", filepath.Base(local.Path), filepath.Base(emby.Path), "文件名不一致")
+	return issues
+}
+
+func compareEpisodeSources(local []LocalEpisode, emby []embyEpisode) []ComparisonIssue {
+	if len(local) == 0 || len(emby) == 0 {
+		return nil
+	}
+	season := local[0].Season
+	episode := local[0].Episode
+	localSources := make(map[string]string)
+	for _, item := range local {
+		if item.Path == "" {
+			continue
+		}
+		localSources[mediaStemKey(item.Path)] = filepath.Base(item.Path)
+	}
+	embySources := make(map[string]string)
+	for _, item := range emby {
+		for _, path := range embyEpisodeSourcePaths(item) {
+			embySources[mediaStemKey(path)] = filepath.Base(path)
+		}
+	}
+	var issues []ComparisonIssue
+	for key, localName := range localSources {
+		if _, ok := embySources[key]; !ok {
+			issues = append(issues, ComparisonIssue{Severity: "warning", Season: season, Episode: episode, Field: "file", Local: localName, Detail: "Emby 中缺少该视频源"})
+		}
+	}
+	for key, embyName := range embySources {
+		if _, ok := localSources[key]; !ok {
+			issues = append(issues, ComparisonIssue{Severity: "warning", Season: season, Episode: episode, Field: "file", Emby: embyName, Detail: "Emby 中存在但本地目录未发现该视频源"})
+		}
 	}
 	return issues
 }
 
-func sameMediaStem(left string, right string) bool {
-	leftName := filepath.Base(left)
-	rightName := filepath.Base(right)
-	if strings.EqualFold(leftName, rightName) {
-		return true
+func embyEpisodeSourcePaths(episode embyEpisode) []string {
+	seen := map[string]struct{}{}
+	var paths []string
+	appendPath := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		key := strings.ToLower(path)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		paths = append(paths, path)
 	}
-	return strings.EqualFold(strings.TrimSuffix(leftName, filepath.Ext(leftName)), strings.TrimSuffix(rightName, filepath.Ext(rightName)))
+	appendPath(episode.Path)
+	for _, source := range episode.MediaSources {
+		appendPath(source.Path)
+	}
+	return paths
+}
+
+func sameMediaStem(left string, right string) bool {
+	return mediaStemKey(left) == mediaStemKey(right)
+}
+
+func mediaStemKey(path string) string {
+	name := filepath.Base(path)
+	return strings.ToLower(strings.TrimSpace(strings.TrimSuffix(name, filepath.Ext(name))))
 }
 
 func embyProviderID(ids map[string]string, key string) string {

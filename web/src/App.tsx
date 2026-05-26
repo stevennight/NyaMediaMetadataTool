@@ -1226,7 +1226,7 @@ export function App() {
       const missingCount = report.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0);
       const diffCount = report.embyComparisons?.length ?? 0;
       const artifactCount = report.artifactIssues?.length ?? 0;
-      setNotice(`核对完成：缺失 ${missingCount} 集，本地产物缺失 ${artifactCount} 项，差异/元数据缺失 ${diffCount} 项。`);
+      setNotice(`核对完成：缺失 ${missingCount} 集，本地产物缺失 ${artifactCount} 项，Emby 差异 ${diffCount} 项。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : '剧集核对失败');
     } finally {
@@ -1835,7 +1835,7 @@ export function App() {
                   <div className="audit-stat"><span>本地单集</span><strong>{auditReport.localEpisodes.length}</strong><small>{auditReport.root}</small></div>
                   <div className="audit-stat"><span>缺失集数</span><strong>{auditReport.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0)}</strong><small>{auditReport.seasonReports.length} 个季度</small></div>
                   <div className="audit-stat"><span>产物缺失</span><strong>{auditReport.artifactIssues?.length ?? 0}</strong><small>{auditReport.artifactIssues?.length ? '需要补齐' : '未发现'}</small></div>
-                  <div className="audit-stat"><span>差异/缺失</span><strong>{auditReport.embyComparisons?.length ?? 0}</strong><small>{auditReport.embyComparisons?.length ? '需要检查' : '未发现或未启用'}</small></div>
+                  <div className="audit-stat"><span>Emby 差异</span><strong>{auditReport.embyComparisons?.length ?? 0}</strong><small>{auditReport.embyComparisons?.length ? '需要检查' : '未发现或未启用'}</small></div>
                 </div>
               </Card>
 
@@ -1868,8 +1868,8 @@ export function App() {
                 </div>
               </Card>
 
-              <Card title="Emby 差异与元数据缺失">
-                <p className="muted">这里只列出发现的问题；没有行表示当前对比项未发现差异或缺失。`本地=-、Emby=-` 表示两边对应字段都为空，需要回到本地 NFO 和 Emby 条目里补全。对比范围包括剧集、季度和单集的标题、简介、图片存在性，以及可用的 TMDB ID。</p>
+              <Card title="Emby 差异">
+                <p className="muted">这里只列出本地与 Emby 不一致的问题；没有行表示当前对比项未发现差异。对比范围包括剧集、季度和单集的标题、简介、图片存在性，以及可用的 TMDB ID。</p>
                 <div className="task-table-wrap">
                   <table className="task-table audit-table">
                     <thead>

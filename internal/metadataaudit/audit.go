@@ -939,9 +939,7 @@ func compareShowFields(local LocalShow, emby embyEpisode) []ComparisonIssue {
 		add("title", local.Title, emby.Name, "剧集标题不一致")
 	}
 	if local.Plot == "" {
-		if emby.Overview == "" {
-			add("plot", "", "", "本地和 Emby 剧集简介均缺失")
-		} else {
+		if emby.Overview != "" {
 			add("plot", "", emby.Overview, "本地剧集简介缺失")
 		}
 	} else if emby.Overview == "" {
@@ -1000,9 +998,7 @@ func compareSeasonFields(local LocalSeason, emby embyEpisode) []ComparisonIssue 
 		add("title", local.Title, emby.Name, "季度标题不一致")
 	}
 	if local.Plot == "" {
-		if emby.Overview == "" {
-			add("plot", "", "", "本地和 Emby 季度简介均缺失")
-		} else {
+		if emby.Overview != "" {
 			add("plot", "", emby.Overview, "本地季度简介缺失")
 		}
 	} else if emby.Overview == "" {
@@ -1029,9 +1025,7 @@ func compareEpisodeFields(local LocalEpisode, emby embyEpisode) []ComparisonIssu
 		add("title", local.Title, emby.Name, "标题不一致")
 	}
 	if local.Plot == "" {
-		if emby.Overview == "" {
-			add("plot", "", "", "本地和 Emby 单集简介均缺失")
-		} else {
+		if emby.Overview != "" {
 			add("plot", "", emby.Overview, "本地单集简介缺失")
 		}
 	} else if emby.Overview == "" {
@@ -1061,12 +1055,12 @@ func compareEpisodeSources(local []LocalEpisode, emby []embyEpisode) []Compariso
 		if item.Path == "" {
 			continue
 		}
-		localSources[mediaStemKey(item.Path)] = filepath.Base(item.Path)
+		localSources[mediaStemKey(item.Path)] = mediaBaseName(item.Path)
 	}
 	embySources := make(map[string]string)
 	for _, item := range emby {
 		for _, path := range embyEpisodeSourcePaths(item) {
-			embySources[mediaStemKey(path)] = filepath.Base(path)
+			embySources[mediaStemKey(path)] = mediaBaseName(path)
 		}
 	}
 	var issues []ComparisonIssue
@@ -1110,8 +1104,17 @@ func sameMediaStem(left string, right string) bool {
 }
 
 func mediaStemKey(path string) string {
-	name := filepath.Base(path)
-	return strings.ToLower(strings.TrimSpace(strings.TrimSuffix(name, filepath.Ext(name))))
+	name := mediaBaseName(path)
+	stem := strings.TrimSpace(strings.TrimSuffix(name, filepath.Ext(name)))
+	return strings.ToLower(strings.Join(strings.Fields(stem), " "))
+}
+
+func mediaBaseName(path string) string {
+	name := filepath.Base(strings.TrimSpace(path))
+	if decoded, err := url.PathUnescape(name); err == nil {
+		return decoded
+	}
+	return name
 }
 
 func embyProviderID(ids map[string]string, key string) string {

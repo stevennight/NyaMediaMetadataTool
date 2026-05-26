@@ -106,6 +106,28 @@ func TestCompareEmbyDetectsMetadataDifferences(t *testing.T) {
 	}
 }
 
+func TestCompareSeasonFieldsSkipsBothMissingPlot(t *testing.T) {
+	t.Parallel()
+
+	issues := compareSeasonFields(LocalSeason{Season: 1}, embyEpisode{IndexNumber: 1})
+	for _, issue := range issues {
+		if issue.Field == "season.plot" {
+			t.Fatalf("did not expect both-missing plot issue: %#v", issues)
+		}
+	}
+
+	issues = compareSeasonFields(LocalSeason{Season: 1}, embyEpisode{IndexNumber: 1, Overview: "Emby plot"})
+	found := false
+	for _, issue := range issues {
+		if issue.Field == "season.plot" && issue.Detail == "本地季度简介缺失" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected local-missing plot issue when Emby has plot: %#v", issues)
+	}
+}
+
 func TestCompareEmbyAllowsSTRMProxyExtension(t *testing.T) {
 	t.Parallel()
 
@@ -146,6 +168,28 @@ func TestCompareEmbyMatchesMultipleEpisodeSources(t *testing.T) {
 	for _, issue := range issues {
 		if issue.Field == "file" {
 			t.Fatalf("did not expect file issue for matched multi-source episode: %#v", issues)
+		}
+	}
+}
+
+func TestCompareEmbyDecodesURLEncodedSourcePaths(t *testing.T) {
+	t.Parallel()
+
+	issues := compareEmby(LocalShow{}, nil, []LocalEpisode{{
+		Season:  1,
+		Episode: 1,
+		Path:    `E:\TV\Another - S01E01 - Rough sketch -素描-.mkv`,
+	}}, embyEpisode{}, nil, []embyEpisode{{
+		Name:              "Rough sketch - 素描-",
+		IndexNumber:       1,
+		ParentIndexNumber: 1,
+		MediaSources: []embyMediaSource{{
+			Path: `Another%20-%20S01E01%20-%20Rough%20sketch%20-%E7%B4%A0%E6%8F%8F-.mkv`,
+		}},
+	}})
+	for _, issue := range issues {
+		if issue.Field == "file" {
+			t.Fatalf("did not expect file issue for url-encoded source path: %#v", issues)
 		}
 	}
 }

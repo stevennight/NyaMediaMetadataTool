@@ -17,7 +17,6 @@ type AppConfig = {
   };
   processing: {
     extensions: string[];
-    episodePatterns: string[];
     concurrency: number;
     bifWidth: number;
     bifInterval: number;
@@ -1481,7 +1480,6 @@ export function App() {
   }
 
   const extensionInput = config?.processing.extensions?.join('\n') ?? '';
-  const episodePatternInput = config?.processing.episodePatterns?.join('\n') ?? '';
 
   return (
     <main className="app-shell">
@@ -1518,7 +1516,6 @@ export function App() {
             <Row label="扫描处理并发" value={String(config?.processing.concurrency ?? '-')} />
             <Row label="整理命名并发" value={String(config?.renaming?.concurrency ?? '-')} />
             <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
-            <Row label="自定义集数正则" value={config?.processing.episodePatterns?.length ? `${config.processing.episodePatterns.length} 条` : '未设置'} />
             <Row label="TMDB 地址" value={config?.scraping.tmdbBaseUrl ?? '-'} />
             <Row label="TMDB 接口超时" value={`${config?.scraping.tmdbRequestTimeoutSeconds ?? '-'}s`} />
             <Row label="字幕提取" value={config?.processing.enableSubtitles ? '开启' : '关闭'} />
@@ -1558,7 +1555,6 @@ export function App() {
                   <label>mkvextract<input value={config.tools.mkvextract} onChange={(event) => updateConfig((draft) => { draft.tools.mkvextract = event.target.value; })} /></label>
                   <label>mediainfo<input value={config.tools.mediainfo} onChange={(event) => updateConfig((draft) => { draft.tools.mediainfo = event.target.value; })} /></label>
                   <label className="extensions-field">扩展名<textarea value={extensionInput} onChange={(event) => updateConfig((draft) => { draft.processing.extensions = normalizeExtensions(event.target.value); })} placeholder={commonVideoExtensions.join('\n')} rows={8} /><small>每行一个后缀，或用逗号分隔，例如 `.mkv`、`.mp4`、`.rmvb`。</small></label>
-                  <label className="extensions-field">自定义集数正则<textarea value={episodePatternInput} onChange={(event) => updateConfig((draft) => { draft.processing.episodePatterns = normalizeLines(event.target.value); })} placeholder={'可选。每行一条，例如：(?i)^.+?-(?P<episode>\\d{2})$'} rows={4} /><small>默认已识别 S01E01、1x01、`标题 - 01 [参数]`、`01.mkv` 等；仅默认不够时填写。命名捕获组可用 `season` / `episode`，还能在模板里使用 `releaseGroup`。</small></label>
                   <label>扫描处理并发<input type="number" min="1" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
                   <label>整理命名并发<input type="number" min="1" max="8" value={config.renaming?.concurrency ?? 3} onChange={(event) => updateConfig((draft) => { draft.renaming = { ...(draft.renaming ?? { concurrency: 3 }), concurrency: Number(event.target.value) }; })} /><small>用于生成预览、批量修正季集、批量应用剧集；设为 1 可降低 TMDB 风控风险。</small></label>
                   <label>BIF 宽度<input type="number" value={config.processing.bifWidth} onChange={(event) => updateConfig((draft) => { draft.processing.bifWidth = Number(event.target.value); })} /></label>

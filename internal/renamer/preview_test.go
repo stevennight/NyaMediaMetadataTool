@@ -113,6 +113,19 @@ func TestParseEpisodeSupportsNumericEpisodeOnly(t *testing.T) {
 	}
 }
 
+func TestParseEpisodeSupportsReleaseGroupShowSeasonAndEpisode(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(`D:\Media`, "[LoliHouse] Enen no Shouboutai S3 - 13 [WebRip 1080p HEVC-10bit AAC SRTx2].mkv")
+	parsed, ok := parseEpisode(path, config.Default())
+	if !ok {
+		t.Fatal("expected episode to parse")
+	}
+	if parsed.releaseGroup != "LoliHouse" || parsed.show != "Enen no Shouboutai" || parsed.season != 3 || parsed.episode != 13 {
+		t.Fatalf("unexpected parsed episode: %+v", parsed)
+	}
+}
+
 func TestParseEpisodeRejectsFractionalEpisodeAsNumericFallback(t *testing.T) {
 	t.Parallel()
 
@@ -251,20 +264,5 @@ func TestApplyTemplateSupportsLocalizedShowAndTitle(t *testing.T) {
 	want := "刀剑神域 ソードアート・オンライン - 剑的世界 / 剣の世界"
 	if got != want {
 		t.Fatalf("applyTemplate() = %q, want %q", got, want)
-	}
-}
-
-func TestParseEpisodeSupportsCustomRegex(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.Default()
-	cfg.Processing.EpisodePatterns = []string{`(?i)^.+?-(?P<episode>\d{2})$`}
-	path := filepath.Join(`D:\Media`, "Anime_Title-12.mkv")
-	parsed, ok := parseEpisode(path, cfg)
-	if !ok {
-		t.Fatal("expected episode to parse")
-	}
-	if parsed.episode != 12 || parsed.season != 1 {
-		t.Fatalf("unexpected parsed episode: %+v", parsed)
 	}
 }

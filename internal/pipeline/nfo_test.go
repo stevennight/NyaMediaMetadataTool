@@ -117,16 +117,14 @@ func TestParseEpisodeInfoSupportsNumericEpisodeOnly(t *testing.T) {
 	}
 }
 
-func TestParseEpisodeInfoSupportsCustomRegex(t *testing.T) {
+func TestParseEpisodeInfoSupportsReleaseGroupShowSeasonAndEpisode(t *testing.T) {
 	t.Parallel()
 
-	cfg := config.Default()
-	cfg.Processing.EpisodePatterns = []string{`(?i)^.+?-(?P<episode>\d{2})$`}
-	info, ok := parseEpisodeInfo(`D:\Media\Anime_Title-12.mkv`, cfg)
+	info, ok := parseEpisodeInfo(`D:\Media\[LoliHouse] Enen no Shouboutai S3 - 13 [WebRip 1080p HEVC-10bit AAC SRTx2].mkv`, config.Default())
 	if !ok {
 		t.Fatal("expected episode info to parse")
 	}
-	if info.Episode != 12 || info.Season != 1 {
+	if info.ReleaseGroup != "LoliHouse" || info.Show != "Enen no Shouboutai" || info.Season != 3 || info.Episode != 13 {
 		t.Fatalf("unexpected episode info: %+v", info)
 	}
 }

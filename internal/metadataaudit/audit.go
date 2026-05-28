@@ -377,7 +377,7 @@ func localEpisodeFromVideo(path string, cfg config.Config) (LocalEpisode, string
 		episode.ProviderIDs = providerIDs(doc.UniqueID, doc.TMDBID)
 	}
 	if episode.Season == 0 || episode.Episode == 0 {
-		if parsed, ok := episodeparse.Parse(filepath.Base(base), cfg.Processing.EpisodePatterns); ok {
+		if parsed, ok := episodeparse.Parse(filepath.Base(base)); ok {
 			episode.Season = parsed.Season
 			episode.Episode = parsed.Episode
 		}

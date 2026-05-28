@@ -356,7 +356,7 @@ func claimSeriesScopes(ctx context.Context, claim SeriesScopeClaimFunc, showType
 
 func parseEpisodeInfo(path string, cfg config.Config) (episodeInfo, bool) {
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	parsed, ok := episodeparse.Parse(name, cfg.Processing.EpisodePatterns)
+	parsed, ok := episodeparse.Parse(name)
 	if !ok {
 		return episodeInfo{}, false
 	}

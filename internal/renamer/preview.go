@@ -729,7 +729,7 @@ type parsedEpisode struct {
 
 func parseEpisode(path string, cfg config.Config) (parsedEpisode, bool) {
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	parsed, ok := episodeparse.Parse(name, cfg.Processing.EpisodePatterns)
+	parsed, ok := episodeparse.Parse(name)
 	if !ok {
 		showDir := showDirectory(path)
 		return parsedEpisode{releaseGroup: parseReleaseGroup(name), year: parseDirectoryYearFromPath(showDir), tmdbShowID: parseTMDBShowIDFromPath(showDir)}, false

@@ -2067,8 +2067,8 @@ function ArtifactRow(props: { artifact: Artifact; timezone: string }) {
 function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose: () => void }) {
   const logs = [...asArray<TaskLog>(props.detail.logs)].reverse();
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <section className="modal-card" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop">
+      <section className="modal-card">
         <div className="card-header">
           <h2>任务详情</h2>
           <button className="secondary" onClick={props.onClose}>关闭</button>
@@ -2118,8 +2118,8 @@ function RescanModal(props: {
   onSubmit: () => void;
 }) {
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <section className="modal-card" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop">
+      <section className="modal-card">
         <div className="card-header">
           <h2>补扫</h2>
           <button className="secondary" onClick={props.onClose}>关闭</button>
@@ -2181,8 +2181,8 @@ function BatchEpisodeModal(props: {
   onSubmit: () => void;
 }) {
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <section className="modal-card batch-episode-modal" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop">
+      <section className="modal-card batch-episode-modal">
         <div className="card-header">
           <h2>批量修正季集</h2>
           <button className="secondary" onClick={props.onClose}>关闭</button>
@@ -2261,8 +2261,8 @@ function RenameTemplateEditorModal(props: { value: string; placeholders: string[
   }
 
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <section className="modal-card rename-template-modal" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop">
+      <section className="modal-card rename-template-modal">
         <div className="card-header">
           <h2>编辑命名模板</h2>
           <button className="secondary" onClick={props.onClose}>关闭</button>
@@ -2287,8 +2287,8 @@ function RenameTemplateEditorModal(props: { value: string; placeholders: string[
 
 function TargetPathEditorModal(props: { value: string; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <section className="modal-card target-path-modal" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop">
+      <section className="modal-card target-path-modal">
         <div className="card-header">
           <h2>编辑目标路径</h2>
           <button className="secondary" onClick={props.onClose}>关闭</button>
@@ -2336,8 +2336,8 @@ function DirectoryPicker(props: { title: string; initialPath: string; onSelect: 
   }
 
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <section className="modal-card" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop">
+      <section className="modal-card">
         <div className="card-header">
           <h2>{props.title}</h2>
           <button className="secondary" onClick={props.onClose}>关闭</button>

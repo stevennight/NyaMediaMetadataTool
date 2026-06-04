@@ -511,7 +511,7 @@ export function App() {
   const [renamePreviewCount, setRenamePreviewCount] = useState(0);
   const [renameHistory, setRenameHistory] = useState<RenameHistoryBatch[]>([]);
   const [renameHistoryOpen, setRenameHistoryOpen] = useState(false);
-  const [expandedHistoryIds, setExpandedHistoryIds] = useState<string[]>([]);
+  const [selectedHistoryBatch, setSelectedHistoryBatch] = useState<RenameHistoryBatch | null>(null);
   const [undoCheckResult, setUndoCheckResult] = useState<RenameUndoCheckResult | null>(null);
   const [loadingRenameHistory, setLoadingRenameHistory] = useState(false);
   const [undoingHistoryId, setUndoingHistoryId] = useState('');
@@ -1097,8 +1097,8 @@ export function App() {
     const check = await checkResponse.json() as RenameUndoCheckResult;
     setUndoCheckResult(check);
     if (!check.canUndo) {
-      setError('该批次存在不可撤销项，已停止撤销。请展开历史查看详情。');
-      setExpandedHistoryIds((ids) => [...new Set([...ids, id])]);
+      setError('该批次存在不可撤销项，已停止撤销。已打开详情供检查。');
+      setSelectedHistoryBatch(check.batch);
       return;
     }
     if (!window.confirm(`确认撤销该批次的 ${check.items.length} 个文件移动？`)) {
@@ -1120,10 +1120,6 @@ export function App() {
     } finally {
       setUndoingHistoryId('');
     }
-  }
-
-  function toggleHistoryDetails(id: string) {
-    setExpandedHistoryIds((ids) => ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]);
   }
 
   async function addWatchDir() {
@@ -2069,7 +2065,8 @@ export function App() {
       {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
       {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
-      {renameHistoryOpen && <RenameHistoryModal history={renameHistory} expandedIds={expandedHistoryIds} undoCheck={undoCheckResult} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onToggleDetails={toggleHistoryDetails} onUndo={(id) => void undoRenameBatch(id)} />}
+      {renameHistoryOpen && <RenameHistoryModal history={renameHistory} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onOpenDetails={setSelectedHistoryBatch} onUndo={(id) => void undoRenameBatch(id)} />}
+      {selectedHistoryBatch && <RenameHistoryDetailsModal batch={selectedHistoryBatch} undoCheck={undoCheckResult?.batch?.id === selectedHistoryBatch.id ? undoCheckResult : null} timezone={displayTimezone} onClose={() => setSelectedHistoryBatch(null)} />}
       {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} placeholders={renamePlaceholders} onChange={setRenameTemplate} onClose={() => setRenameTemplateEditorOpen(false)} />}
       {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
@@ -2323,14 +2320,12 @@ function BatchEpisodeModal(props: {
 
 function RenameHistoryModal(props: {
   history: RenameHistoryBatch[];
-  expandedIds: string[];
-  undoCheck: RenameUndoCheckResult | null;
   undoingId: string;
   loading: boolean;
   timezone: string;
   onClose: () => void;
   onRefresh: () => void;
-  onToggleDetails: (id: string) => void;
+  onOpenDetails: (batch: RenameHistoryBatch) => void;
   onUndo: (id: string) => void;
 }) {
   return (
@@ -2347,7 +2342,7 @@ function RenameHistoryModal(props: {
           {props.history.length ? props.history.map((batch) => (
             <div className="history-item" key={batch.id}>
               <div className="history-summary">
-                <button className="secondary" type="button" onClick={() => props.onToggleDetails(batch.id)}>{props.expandedIds.includes(batch.id) ? '收起' : '详情'}</button>
+                <button className="secondary" type="button" onClick={() => props.onOpenDetails(batch)}>详情</button>
                 <div>
                   <strong>{formatStoredTime(batch.createdAt, props.timezone)}</strong>
                   <small>{batch.items.length} 项 · {batch.id}{batch.undone ? ` · 已撤销 ${batch.undoneAt ? formatStoredTime(batch.undoneAt, props.timezone) : ''}` : ''}</small>
@@ -2356,9 +2351,27 @@ function RenameHistoryModal(props: {
                   <button className="secondary" onClick={() => props.onUndo(batch.id)} disabled={batch.undone || props.undoingId === batch.id}>{batch.undone ? '已撤销' : props.undoingId === batch.id ? '撤销中' : '撤销'}</button>
                 </div>
               </div>
-              {props.expandedIds.includes(batch.id) && <HistoryDetails batch={batch} undoCheck={props.undoCheck?.batch?.id === batch.id ? props.undoCheck : null} />}
             </div>
           )) : <p className="muted">暂无重命名历史。</p>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RenameHistoryDetailsModal(props: { batch: RenameHistoryBatch; undoCheck: RenameUndoCheckResult | null; timezone: string; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop detail-backdrop">
+      <section className="modal-card rename-history-detail-modal">
+        <div className="card-header">
+          <div>
+            <h2>历史详情</h2>
+            <small>{formatStoredTime(props.batch.createdAt, props.timezone)} · {props.batch.items.length} 项 · {props.batch.id}</small>
+          </div>
+          <button className="secondary" onClick={props.onClose}>关闭</button>
+        </div>
+        <div className="rename-history-detail-scroll">
+          <HistoryDetails batch={props.batch} undoCheck={props.undoCheck} />
         </div>
       </section>
     </div>

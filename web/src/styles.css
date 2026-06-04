@@ -926,13 +926,42 @@ button:disabled {
 }
 
 .rename-history-modal {
+  display: flex;
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+  overflow: hidden;
   width: min(1120px, 100%);
 }
 
 .rename-history-list {
   display: grid;
   gap: 0;
-  max-height: calc(100vh - 190px);
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.detail-backdrop {
+  z-index: 45;
+}
+
+.rename-history-detail-modal {
+  display: flex;
+  max-height: calc(100vh - 72px);
+  flex-direction: column;
+  overflow: hidden;
+  width: min(980px, 100%);
+}
+
+.rename-history-detail-modal .card-header small {
+  display: block;
+  margin-top: 4px;
+  color: #78716c;
+  overflow-wrap: anywhere;
+}
+
+.rename-history-detail-scroll {
+  min-height: 0;
   overflow: auto;
   padding-right: 4px;
 }

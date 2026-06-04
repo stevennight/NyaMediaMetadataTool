@@ -510,6 +510,7 @@ export function App() {
   const [renamePreview, setRenamePreview] = useState<RenamePreviewItem[]>([]);
   const [renamePreviewCount, setRenamePreviewCount] = useState(0);
   const [renameHistory, setRenameHistory] = useState<RenameHistoryBatch[]>([]);
+  const [renameHistoryOpen, setRenameHistoryOpen] = useState(false);
   const [expandedHistoryIds, setExpandedHistoryIds] = useState<string[]>([]);
   const [undoCheckResult, setUndoCheckResult] = useState<RenameUndoCheckResult | null>(null);
   const [loadingRenameHistory, setLoadingRenameHistory] = useState(false);
@@ -1679,7 +1680,7 @@ export function App() {
 
         {activePage === 'rename' && (
         <section className="page-grid rename-page-grid">
-          <Card title="整理命名" action={<button onClick={previewRename} disabled={previewingRename}>{previewingRename ? `扫描中 ${renamePreviewCount}` : '生成预览'}</button>}>
+          <Card title="整理命名" action={<div className="inline-actions"><button className="secondary" type="button" onClick={() => setRenameHistoryOpen(true)}>重命名历史{renameHistory.length ? `(${renameHistory.length})` : ''}</button><button onClick={previewRename} disabled={previewingRename}>{previewingRename ? `扫描中 ${renamePreviewCount}` : '生成预览'}</button></div>}>
             <div className="rename-controls">
               <label>目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}>选择</button></div></label>
               <label>命名模板
@@ -1774,24 +1775,6 @@ export function App() {
                 </tbody>
               </table>
             </div>
-          </Card>
-
-          <Card title="重命名历史" action={<button className="secondary" onClick={() => void loadRenameHistory()} disabled={loadingRenameHistory}>{loadingRenameHistory ? '刷新中' : '刷新历史'}</button>}>
-            {renameHistory.length ? renameHistory.map((batch) => (
-              <div className="history-item" key={batch.id}>
-                <div className="history-summary">
-                  <button className="secondary" type="button" onClick={() => toggleHistoryDetails(batch.id)}>{expandedHistoryIds.includes(batch.id) ? '收起' : '详情'}</button>
-                  <div>
-                    <strong>{formatStoredTime(batch.createdAt, displayTimezone)}</strong>
-                    <small>{batch.items.length} 项 · {batch.id}{batch.undone ? ` · 已撤销 ${batch.undoneAt ? formatStoredTime(batch.undoneAt, displayTimezone) : ''}` : ''}</small>
-                  </div>
-                  <div className="inline-actions">
-                    <button className="secondary" onClick={() => void undoRenameBatch(batch.id)} disabled={batch.undone || undoingHistoryId === batch.id}>{batch.undone ? '已撤销' : undoingHistoryId === batch.id ? '撤销中' : '撤销'}</button>
-                  </div>
-                </div>
-                {expandedHistoryIds.includes(batch.id) && <HistoryDetails batch={batch} undoCheck={undoCheckResult?.batch?.id === batch.id ? undoCheckResult : null} />}
-              </div>
-            )) : <p className="muted">暂无重命名历史。</p>}
           </Card>
         </section>
       )}
@@ -2086,6 +2069,7 @@ export function App() {
       {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
       {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
+      {renameHistoryOpen && <RenameHistoryModal history={renameHistory} expandedIds={expandedHistoryIds} undoCheck={undoCheckResult} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onToggleDetails={toggleHistoryDetails} onUndo={(id) => void undoRenameBatch(id)} />}
       {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} placeholders={renamePlaceholders} onChange={setRenameTemplate} onClose={() => setRenameTemplateEditorOpen(false)} />}
       {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
@@ -2331,6 +2315,50 @@ function BatchEpisodeModal(props: {
         <div className="inline-actions modal-actions">
           <button className="secondary" onClick={props.onClose}>取消</button>
           <button onClick={props.onSubmit} disabled={props.applying}>{props.applying ? `应用中 ${props.progress}/${props.count}` : '应用并查 TMDB'}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RenameHistoryModal(props: {
+  history: RenameHistoryBatch[];
+  expandedIds: string[];
+  undoCheck: RenameUndoCheckResult | null;
+  undoingId: string;
+  loading: boolean;
+  timezone: string;
+  onClose: () => void;
+  onRefresh: () => void;
+  onToggleDetails: (id: string) => void;
+  onUndo: (id: string) => void;
+}) {
+  return (
+    <div className="modal-backdrop">
+      <section className="modal-card rename-history-modal">
+        <div className="card-header">
+          <h2>重命名历史</h2>
+          <div className="inline-actions">
+            <button className="secondary" onClick={props.onRefresh} disabled={props.loading}>{props.loading ? '刷新中' : '刷新历史'}</button>
+            <button className="secondary" onClick={props.onClose}>关闭</button>
+          </div>
+        </div>
+        <div className="rename-history-list">
+          {props.history.length ? props.history.map((batch) => (
+            <div className="history-item" key={batch.id}>
+              <div className="history-summary">
+                <button className="secondary" type="button" onClick={() => props.onToggleDetails(batch.id)}>{props.expandedIds.includes(batch.id) ? '收起' : '详情'}</button>
+                <div>
+                  <strong>{formatStoredTime(batch.createdAt, props.timezone)}</strong>
+                  <small>{batch.items.length} 项 · {batch.id}{batch.undone ? ` · 已撤销 ${batch.undoneAt ? formatStoredTime(batch.undoneAt, props.timezone) : ''}` : ''}</small>
+                </div>
+                <div className="inline-actions">
+                  <button className="secondary" onClick={() => props.onUndo(batch.id)} disabled={batch.undone || props.undoingId === batch.id}>{batch.undone ? '已撤销' : props.undoingId === batch.id ? '撤销中' : '撤销'}</button>
+                </div>
+              </div>
+              {props.expandedIds.includes(batch.id) && <HistoryDetails batch={batch} undoCheck={props.undoCheck?.batch?.id === batch.id ? props.undoCheck : null} />}
+            </div>
+          )) : <p className="muted">暂无重命名历史。</p>}
         </div>
       </section>
     </div>

@@ -925,6 +925,18 @@ button:disabled {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
+.rename-history-modal {
+  width: min(1120px, 100%);
+}
+
+.rename-history-list {
+  display: grid;
+  gap: 0;
+  max-height: calc(100vh - 190px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .history-item {
   display: grid;
   gap: 10px;

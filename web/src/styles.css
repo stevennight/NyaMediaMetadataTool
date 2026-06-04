@@ -173,6 +173,7 @@ h1 {
   height: 100%;
   min-height: 0;
   flex-direction: column;
+  justify-content: flex-start;
   overflow: hidden;
 }
 
@@ -182,7 +183,8 @@ h1 {
 
 .settings-grid > .card > .settings-form {
   flex: 1 1 auto;
-  width: min(100%, 980px);
+  width: 100%;
+  max-width: 980px;
   min-height: 0;
   align-self: center;
   overflow-y: auto;
@@ -1175,11 +1177,31 @@ h3 {
 .settings-form {
   gap: 0;
   grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: max-content;
   align-items: start;
+  align-content: start;
 }
 
 .settings-form .language-picker {
   grid-column: 1 / -1;
+}
+
+.settings-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 0 14px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(12px);
+}
+
+.settings-tabs .status-tab {
+  min-width: 88px;
+  justify-content: center;
+  font-weight: 700;
 }
 
 .settings-section {
@@ -1192,25 +1214,17 @@ h3 {
   border-top: 1px solid rgba(120, 113, 108, 0.16);
 }
 
+.settings-section:not(.active) {
+  display: none;
+}
+
 .settings-section-wide {
   grid-column: 1 / -1;
 }
 
-.settings-form .settings-section:first-child {
-  padding-top: 0;
+.settings-form .settings-section.active {
+  padding-top: 4px;
   border-top: 0;
-}
-
-.settings-section h3 {
-  grid-column: 1 / -1;
-  margin: 0 0 2px;
-  padding: 0 0 0 12px;
-  border-left: 4px solid #60a5fa;
-  background: transparent;
-  color: #1f2937;
-  font-size: 20px;
-  font-weight: 800;
-  line-height: 1.2;
 }
 
 .config-form label {

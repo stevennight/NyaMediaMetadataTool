@@ -224,6 +224,7 @@ type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
 type SelectOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'rename' | 'audit';
+type SettingsTab = 'basic' | 'processing' | 'scraping';
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
 type AuditTab = 'series' | 'files';
 
@@ -489,6 +490,7 @@ export function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('basic');
   const [taskTotal, setTaskTotal] = useState(0);
   const [taskPage, setTaskPage] = useState(1);
   const [taskPageSize] = useState(20);
@@ -1570,8 +1572,12 @@ export function App() {
           <Card title="设置" action={<button onClick={saveConfig} disabled={savingConfig || !config}>{savingConfig ? '保存中' : '保存配置'}</button>}>
             {config ? (
               <div className="config-form settings-form">
-                <section className="settings-section">
-                  <h3>基础</h3>
+                <div className="settings-tabs" role="tablist" aria-label="设置分类">
+                  <button className={settingsTab === 'basic' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'basic'} onClick={() => setSettingsTab('basic')}>基础</button>
+                  <button className={settingsTab === 'processing' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'processing'} onClick={() => setSettingsTab('processing')}>处理</button>
+                  <button className={settingsTab === 'scraping' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'scraping'} onClick={() => setSettingsTab('scraping')}>刮削</button>
+                </div>
+                <section className={`settings-section ${settingsTab === 'basic' ? 'active' : ''}`}>
                   <label>显示时区<input list="timezone-options" value={config.server.timezone} onChange={(event) => updateConfig((draft) => { draft.server.timezone = event.target.value; })} placeholder="Asia/Shanghai" /></label>
                   <datalist id="timezone-options">
                     {timeZoneOptions.map((timezone) => <option key={timezone} value={timezone} />)}
@@ -1580,27 +1586,25 @@ export function App() {
                   <label>ffprobe<input value={config.tools.ffprobe} onChange={(event) => updateConfig((draft) => { draft.tools.ffprobe = event.target.value; })} /></label>
                   <label>mkvextract<input value={config.tools.mkvextract} onChange={(event) => updateConfig((draft) => { draft.tools.mkvextract = event.target.value; })} /></label>
                   <label>mediainfo<input value={config.tools.mediainfo} onChange={(event) => updateConfig((draft) => { draft.tools.mediainfo = event.target.value; })} /></label>
+                </section>
+                <section className={`settings-section ${settingsTab === 'processing' ? 'active' : ''}`}>
                   <label className="extensions-field">扩展名<textarea value={extensionInput} onChange={(event) => updateConfig((draft) => { draft.processing.extensions = normalizeExtensions(event.target.value); })} placeholder={commonVideoExtensions.join('\n')} rows={8} /><small>每行一个后缀，或用逗号分隔，例如 `.mkv`、`.mp4`、`.rmvb`。</small></label>
                   <label>扫描处理并发<input type="number" min="1" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
                   <label>整理命名并发<input type="number" min="1" max="8" value={config.renaming?.concurrency ?? 3} onChange={(event) => updateConfig((draft) => { draft.renaming = { ...(draft.renaming ?? { concurrency: 3 }), concurrency: Number(event.target.value) }; })} /><small>用于生成预览、批量修正季集、批量应用剧集；设为 1 可降低 TMDB 风控风险。</small></label>
-                  <label>BIF 宽度<input type="number" value={config.processing.bifWidth} onChange={(event) => updateConfig((draft) => { draft.processing.bifWidth = Number(event.target.value); })} /></label>
-                  <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
-                  <SelectField label="BIF 加速" value={config.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => updateConfig((draft) => { draft.processing.bifHwAccel = value; })} />
-                </section>
-                <section className="settings-section">
-                  <h3>处理开关</h3>
                   <Toggle label="覆盖已有文件" checked={config.processing.overwriteExisting} onChange={(value) => updateConfig((draft) => { draft.processing.overwriteExisting = value; })} />
                   <Toggle label="字幕提取" checked={config.processing.enableSubtitles} onChange={(value) => updateConfig((draft) => { draft.processing.enableSubtitles = value; })} />
                   <Toggle label="MediaInfo" checked={config.processing.enableMediaInfo} onChange={(value) => updateConfig((draft) => { draft.processing.enableMediaInfo = value; })} />
                   <Toggle label="NFO" checked={config.processing.enableNfo} onChange={(value) => updateConfig((draft) => { draft.processing.enableNfo = value; })} />
                   <Toggle label="BIF" checked={config.processing.enableBif} onChange={(value) => updateConfig((draft) => { draft.processing.enableBif = value; })} />
+                  <label>BIF 宽度<input type="number" value={config.processing.bifWidth} onChange={(event) => updateConfig((draft) => { draft.processing.bifWidth = Number(event.target.value); })} /></label>
+                  <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
+                  <SelectField label="BIF 加速" value={config.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => updateConfig((draft) => { draft.processing.bifHwAccel = value; })} />
                   <Toggle label="接管剧集/季度图片" checked={config.processing.enableImageTakeover} onChange={(value) => updateConfig((draft) => { draft.processing.enableImageTakeover = value; })} />
+                </section>
+                <section className={`settings-section settings-section-wide ${settingsTab === 'scraping' ? 'active' : ''}`}>
                   <Toggle label="TMDB 刮削" checked={config.scraping.enableTmdb} onChange={(value) => updateConfig((draft) => { draft.scraping.enableTmdb = value; })} />
                   <Toggle label="刮削演员/职员" checked={config.scraping.enablePeople} onChange={(value) => updateConfig((draft) => { draft.scraping.enablePeople = value; })} />
                   <Toggle label="优先原语言海报" checked={config.scraping.preferOriginalLanguagePoster} onChange={(value) => updateConfig((draft) => { draft.scraping.preferOriginalLanguagePoster = value; })} />
-                </section>
-                <section className="settings-section settings-section-wide">
-                  <h3>刮削</h3>
                   <label>Fanart API Key<input type="password" value={config.scraping.fanartApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartApiKey = event.target.value; })} placeholder="用于 clearart/clearlogo" /></label>
                   <label>Fanart 地址<input value={config.scraping.fanartBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartBaseUrl = event.target.value; })} placeholder="https://webservice.fanart.tv" /><small>程序会自动追加 `/v3`，这里只填前缀，支持子目录。</small></label>
                   <label>TMDB Token<input type="password" value={config.scraping.tmdbToken} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbToken = event.target.value; })} placeholder="Bearer token" /></label>

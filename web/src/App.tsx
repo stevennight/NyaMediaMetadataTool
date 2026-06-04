@@ -535,6 +535,7 @@ export function App() {
   const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; onSelect: (path: string) => void } | null>(null);
   const [newWatchDir, setNewWatchDir] = useState('');
   const [newWatchDirEnabled, setNewWatchDirEnabled] = useState(true);
+  const [addWatchDirOpen, setAddWatchDirOpen] = useState(false);
   const [rescanOpen, setRescanOpen] = useState(false);
   const [rescanScope, setRescanScope] = useState<RescanScope>('all');
   const [rescanTarget, setRescanTarget] = useState('');
@@ -1124,6 +1125,9 @@ export function App() {
     const created = await response.json();
     setWatchDirs((items) => [...items, created]);
     setNewWatchDir('');
+    setNewWatchDirEnabled(true);
+    setAddWatchDirOpen(false);
+    setNotice('媒体目录已添加。自动监听和启动扫描将在服务重启后按新配置生效，可立即手动补扫。');
   }
 
   async function updateWatchDir(dir: WatchDir, patch: Partial<WatchDir>) {
@@ -1595,14 +1599,7 @@ export function App() {
 
         {activePage === 'watchDirs' && (
         <section className="page-grid">
-          <Card title="媒体目录" action={<button onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '补扫中' : '补扫'}</button>}>
-            <div className="form-row watch-dir-form-row">
-              <div className="watch-dir-create">
-                <div className="path-input"><input value={newWatchDir} onChange={(event) => setNewWatchDir(event.target.value)} placeholder="D:\\Media\\Anime" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })}>选择</button></div>
-                <Toggle label="自动监听并启动时扫描" checked={newWatchDirEnabled} onChange={setNewWatchDirEnabled} />
-              </div>
-              <button className="watch-dir-add-button" onClick={addWatchDir}>添加</button>
-            </div>
+          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary" onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '补扫中' : '补扫'}</button><button onClick={() => setAddWatchDirOpen(true)}>添加媒体目录</button></div>}>
             {watchDirs.length ? watchDirs.map((dir) => (
               <div className="dir-item" key={dir.id}>
                 <div>
@@ -2026,6 +2023,7 @@ export function App() {
         </section>
       )}
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onBrowsePath={() => setDirectoryPicker({ title: '选择补扫目录', value: rescanTarget, onSelect: setRescanTarget })} onSubmit={() => void rescan()} />}
+      {addWatchDirOpen && <AddWatchDirModal path={newWatchDir} enabled={newWatchDirEnabled} onPathChange={setNewWatchDir} onEnabledChange={setNewWatchDirEnabled} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} placeholders={renamePlaceholders} onChange={setRenameTemplate} onClose={() => setRenameTemplateEditorOpen(false)} />}
       {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
@@ -2159,6 +2157,39 @@ function RescanModal(props: {
         <div className="inline-actions modal-actions">
           <button className="secondary" onClick={props.onClose}>取消</button>
           <button onClick={props.onSubmit} disabled={props.rescanning}>{props.rescanning ? '补扫中' : '开始补扫'}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function AddWatchDirModal(props: {
+  path: string;
+  enabled: boolean;
+  onPathChange: (value: string) => void;
+  onEnabledChange: (value: boolean) => void;
+  onClose: () => void;
+  onBrowsePath: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="modal-backdrop">
+      <section className="modal-card watch-dir-modal">
+        <div className="card-header">
+          <h2>添加媒体目录</h2>
+          <button className="secondary" onClick={props.onClose}>关闭</button>
+        </div>
+        <div className="config-form watch-dir-modal-form">
+          <label>
+            媒体目录路径
+            <div className="path-input"><input value={props.path} onChange={(event) => props.onPathChange(event.target.value)} placeholder="D:\\Media\\Anime" autoFocus /><button type="button" onClick={props.onBrowsePath}>选择</button></div>
+          </label>
+          <Toggle label="自动监听并启动时扫描" checked={props.enabled} onChange={props.onEnabledChange} />
+        </div>
+        <p className="muted">添加后会递归处理该目录。自动监听和启动扫描需要服务读取新配置后生效，手动补扫可立即执行。</p>
+        <div className="inline-actions modal-actions">
+          <button className="secondary" onClick={props.onClose}>取消</button>
+          <button onClick={props.onSubmit} disabled={!props.path.trim()}>添加</button>
         </div>
       </section>
     </div>

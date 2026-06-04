@@ -177,7 +177,10 @@ h1 {
 
 .card h2 {
   margin: 0;
-  font-size: 20px;
+  color: #1f2937;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.2;
 }
 
 .card-header {
@@ -185,7 +188,11 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 18px;
+  margin: -24px -24px 20px;
+  padding: 16px 24px;
+  border-bottom: 1px solid rgba(120, 113, 108, 0.18);
+  border-radius: 24px 24px 0 0;
+  background: #e8f2ff;
 }
 
 button {
@@ -1151,7 +1158,8 @@ h3 {
   gap: 12px;
   align-content: start;
   height: 100%;
-  padding: 18px;
+  overflow: hidden;
+  padding: 0 18px 18px;
   border: 1px solid rgba(120, 113, 108, 0.16);
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.5);
@@ -1162,9 +1170,13 @@ h3 {
 }
 
 .settings-section h3 {
-  margin: 0;
-  font-size: 14px;
-  color: #44403c;
+  margin: 0 -18px 4px;
+  padding: 12px 18px;
+  background: #eef6ff;
+  color: #1f2937;
+  font-size: 20px;
+  font-weight: 750;
+  line-height: 1.2;
 }
 
 .config-form label {

@@ -2080,16 +2080,27 @@ function AlertDialog(props: { title: string; message: string; onClose: () => voi
   return (
     <div className="modal-backdrop alert-backdrop" role="presentation" onClick={props.onClose}>
       <section className="modal-card alert-dialog" role="alertdialog" aria-modal="true" aria-labelledby="alert-dialog-title" onClick={(event) => event.stopPropagation()}>
-        <div className="card-header">
-          <h2 id="alert-dialog-title">{props.title}</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+        <div className="card-header alert-header">
+          <div className="alert-title">
+            <span aria-hidden="true">!</span>
+            <h2 id="alert-dialog-title">{props.title}</h2>
+          </div>
+          <IconCloseButton onClick={props.onClose} />
         </div>
-        <p>{props.message}</p>
+        <div className="alert-message">{props.message}</div>
         <div className="inline-actions modal-actions">
           <button onClick={props.onClose} autoFocus>知道了</button>
         </div>
       </section>
     </div>
+  );
+}
+
+function IconCloseButton(props: { onClick: () => void }) {
+  return (
+    <button className="icon-close-button" type="button" onClick={props.onClick} aria-label="关闭" title="关闭">
+      <span aria-hidden="true">&times;</span>
+    </button>
   );
 }
 
@@ -2147,7 +2158,7 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
       <section className="modal-card">
         <div className="card-header">
           <h2>任务详情</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <Row label="任务" value={`${props.detail.task.type} #${props.detail.task.id}`} />
         {props.detail.task.mediaPath && <Row label="文件" value={props.detail.task.mediaPath} />}
@@ -2198,7 +2209,7 @@ function RescanModal(props: {
       <section className="modal-card">
         <div className="card-header">
           <h2>补扫</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <div className="task-filters rescan-modal-grid">
           <label>
@@ -2257,7 +2268,7 @@ function WatchDirModal(props: {
       <section className="modal-card watch-dir-modal">
         <div className="card-header">
           <h2>{props.title}</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <div className="config-form watch-dir-modal-form">
           <label>
@@ -2296,7 +2307,7 @@ function BatchEpisodeModal(props: {
       <section className="modal-card batch-episode-modal">
         <div className="card-header">
           <h2>批量修正季集</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <p className="muted">将应用到当前勾选的 {props.count} 个文件，并按修正后的季集重新查询 TMDB 预览。</p>
         <div className="config-form batch-episode-form">
@@ -2335,7 +2346,7 @@ function RenameHistoryModal(props: {
           <h2>重命名历史</h2>
           <div className="inline-actions">
             <button className="secondary" onClick={props.onRefresh} disabled={props.loading}>{props.loading ? '刷新中' : '刷新历史'}</button>
-            <button className="secondary" onClick={props.onClose}>关闭</button>
+            <IconCloseButton onClick={props.onClose} />
           </div>
         </div>
         <div className="rename-history-list">
@@ -2368,7 +2379,7 @@ function RenameHistoryDetailsModal(props: { batch: RenameHistoryBatch; undoCheck
             <h2>历史详情</h2>
             <small>{formatStoredTime(props.batch.createdAt, props.timezone)} · {props.batch.items.length} 项 · {props.batch.id}</small>
           </div>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <div className="rename-history-detail-scroll">
           <HistoryDetails batch={props.batch} undoCheck={props.undoCheck} />
@@ -2436,7 +2447,7 @@ function RenameTemplateEditorModal(props: { value: string; placeholders: string[
       <section className="modal-card rename-template-modal">
         <div className="card-header">
           <h2>编辑命名模板</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <textarea ref={textareaRef} value={props.value} onChange={(event) => props.onChange(event.target.value)} placeholder={defaultRenameTemplate} autoFocus />
         <div className="placeholder-bar modal-placeholder-bar">
@@ -2462,7 +2473,7 @@ function TargetPathEditorModal(props: { value: string; onChange: (value: string)
       <section className="modal-card target-path-modal">
         <div className="card-header">
           <h2>编辑目标路径</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <textarea value={props.value} onChange={(event) => props.onChange(event.target.value)} autoFocus />
         <p className="muted">可以填写文件名、相对路径或完整路径。执行前仍会检查目标冲突。</p>
@@ -2511,7 +2522,7 @@ function DirectoryPicker(props: { title: string; initialPath: string; onSelect: 
       <section className="modal-card">
         <div className="card-header">
           <h2>{props.title}</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <div className="form-row">
           <input value={currentPath} onChange={(event) => setCurrentPath(event.target.value)} placeholder="选择磁盘或输入路径" />

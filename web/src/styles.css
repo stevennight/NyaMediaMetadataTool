@@ -372,6 +372,29 @@ button.secondary {
   color: #1f2937;
 }
 
+.icon-close-button {
+  display: grid;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgba(120, 113, 108, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #57534e;
+  padding: 0;
+}
+
+.icon-close-button span {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.icon-close-button:hover {
+  background: #fff;
+  color: #111827;
+}
+
 input {
   min-width: 0;
   border: 1px solid rgba(120, 113, 108, 0.28);
@@ -1082,11 +1105,58 @@ button:disabled {
 }
 
 .alert-dialog {
+  border-color: rgba(185, 28, 28, 0.36);
+  background: #fff7f7;
+  box-shadow: 0 28px 90px rgba(127, 29, 29, 0.32);
   width: min(460px, 100%);
 }
 
-.alert-dialog p {
-  margin: 14px 0 0;
+.alert-header {
+  border-bottom-color: rgba(185, 28, 28, 0.18);
+  background: #fee2e2;
+}
+
+.alert-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.alert-title span {
+  display: grid;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 999px;
+  background: #b91c1c;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.alert-title h2 {
+  color: #991b1b;
+}
+
+.alert-dialog .icon-close-button {
+  border-color: rgba(185, 28, 28, 0.22);
+  color: #991b1b;
+}
+
+.alert-dialog .icon-close-button:hover {
+  background: #fff;
+  color: #7f1d1d;
+}
+
+.alert-message {
+  margin-top: 16px;
+  border: 1px solid rgba(185, 28, 28, 0.14);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 14px 16px;
   color: #b91c1c;
   line-height: 1.7;
   overflow-wrap: anywhere;

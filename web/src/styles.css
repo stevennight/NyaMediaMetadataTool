@@ -1171,6 +1171,7 @@ h3 {
 }
 
 .settings-form {
+  gap: 0 22px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
 }
@@ -1181,26 +1182,33 @@ h3 {
 
 .settings-section {
   display: grid;
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
   align-content: start;
-  padding: 0 18px 18px;
-  border: 1px solid rgba(120, 113, 108, 0.16);
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.5);
+  min-width: 0;
+  padding: 20px 0 22px;
+  border-top: 1px solid rgba(120, 113, 108, 0.16);
 }
 
 .settings-section-wide {
   grid-column: 1 / -1;
 }
 
+.settings-form .settings-section:first-child {
+  grid-column: 1 / -1;
+  padding-top: 0;
+  border-top: 0;
+}
+
 .settings-section h3 {
-  margin: 0 -18px 4px;
-  padding: 12px 18px;
-  border-radius: 20px 20px 0 0;
-  background: #eef6ff;
+  grid-column: 1 / -1;
+  margin: 0 0 2px;
+  padding: 0 0 0 12px;
+  border-left: 4px solid #60a5fa;
+  background: transparent;
   color: #1f2937;
   font-size: 20px;
-  font-weight: 750;
+  font-weight: 800;
   line-height: 1.2;
 }
 
@@ -1208,8 +1216,9 @@ h3 {
   display: grid;
   gap: 6px;
   color: #44403c;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 650;
+  min-width: 0;
 }
 
 .config-form .toggle-row,
@@ -1223,7 +1232,7 @@ h3 {
   border-top: 1px solid rgba(120, 113, 108, 0.12);
   cursor: pointer;
   color: #44403c;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 650;
   line-height: 1.35;
 }

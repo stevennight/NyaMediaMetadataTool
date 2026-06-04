@@ -242,9 +242,13 @@ h1 {
 
 .dashboard-content-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(300px, 0.75fr);
+  grid-template-columns: minmax(360px, 0.95fr) minmax(360px, 1.05fr);
   gap: 20px;
-  align-items: start;
+  align-items: stretch;
+}
+
+.dashboard-content-grid .card {
+  height: 100%;
 }
 
 .dashboard-content-grid .card:last-child {

@@ -161,6 +161,128 @@ h1 {
   grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
 }
 
+.dashboard-page {
+  display: grid;
+  gap: 20px;
+}
+
+.dashboard-overview {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(0, 1.4fr);
+  gap: 20px;
+  align-items: stretch;
+  border: 1px solid rgba(120, 113, 108, 0.2);
+  border-radius: 24px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.86), rgba(232, 242, 255, 0.76));
+  box-shadow: 0 20px 60px rgba(68, 64, 60, 0.08);
+  padding: 24px;
+}
+
+.dashboard-heading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.dashboard-heading h2 {
+  margin: 0;
+  color: #111827;
+  font-size: 28px;
+  line-height: 1.15;
+}
+
+.dashboard-heading p:last-child {
+  margin: 12px 0 0;
+  color: #57534e;
+  line-height: 1.7;
+}
+
+.dashboard-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dashboard-metric {
+  min-width: 0;
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.74);
+  padding: 14px;
+}
+
+.dashboard-metric span,
+.dashboard-feature span {
+  display: block;
+  color: #78716c;
+  font-size: 13px;
+}
+
+.dashboard-metric strong {
+  display: block;
+  margin-top: 8px;
+  color: #1f2937;
+  font-size: 24px;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-metric.good strong {
+  color: #15803d;
+}
+
+.dashboard-metric.warn strong {
+  color: #b45309;
+}
+
+.dashboard-metric.bad strong {
+  color: #b91c1c;
+}
+
+.dashboard-content-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(300px, 0.75fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.dashboard-content-grid .card:last-child {
+  grid-column: 1 / -1;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dashboard-feature {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 16px;
+  background: rgba(245, 245, 244, 0.72);
+  padding: 12px 14px;
+}
+
+.dashboard-feature strong {
+  flex: 0 0 auto;
+  color: #78716c;
+}
+
+.dashboard-feature.enabled {
+  border-color: rgba(22, 101, 52, 0.16);
+  background: rgba(240, 253, 244, 0.72);
+}
+
+.dashboard-feature.enabled strong {
+  color: #15803d;
+}
+
 .settings-grid {
   height: calc(100vh - 48px);
   grid-template-rows: minmax(0, 1fr);
@@ -1476,6 +1598,8 @@ h3 {
   .hero,
   .grid,
   .dashboard-grid,
+  .dashboard-overview,
+  .dashboard-content-grid,
   .task-page-grid,
   .settings-form,
   .task-filters,
@@ -1486,6 +1610,11 @@ h3 {
   .rename-controls,
   .rescan-modal-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-metrics,
+  .feature-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .settings-section-wide {

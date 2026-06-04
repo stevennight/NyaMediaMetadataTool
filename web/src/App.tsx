@@ -589,6 +589,10 @@ export function App() {
   const renameBatchConcurrency = previewWorkerCount(config?.renaming?.concurrency ?? 3);
   const renameErrorCount = renamePreview.filter((item) => item.status === 'error' || item.conflict).length;
   const renameWarningCount = renamePreview.filter((item) => item.status === 'warning').length;
+  const availableToolCount = tools.filter((tool) => tool.available).length;
+  const enabledWatchDirCount = watchDirs.filter((dir) => dir.enabled).length;
+  const activeTaskCount = tasks.filter((task) => task.status === 'pending' || task.status === 'running').length;
+  const failedTaskCount = tasks.filter((task) => task.status === 'failed').length;
 
   useEffect(() => {
     if (!notice) return;
@@ -1542,34 +1546,57 @@ export function App() {
         {notice && <section className="toast-card" role="status">{notice}</section>}
 
         {activePage === 'dashboard' && (
-        <section className="page-grid dashboard-grid">
-          <Card title="当前配置">
-            <Row label="监听地址" value={config?.server.addr ?? '-'} />
-            <Row label="显示时区" value={displayTimezone} />
-            <Row label="数据库" value={config?.database.path ?? '-'} />
-            <Row label="扫描处理并发" value={String(config?.processing.concurrency ?? '-')} />
-            <Row label="整理命名并发" value={String(config?.renaming?.concurrency ?? '-')} />
-            <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
-            <Row label="TMDB 地址" value={config?.scraping.tmdbBaseUrl ?? '-'} />
-            <Row label="TMDB 接口超时" value={`${config?.scraping.tmdbRequestTimeoutSeconds ?? '-'}s`} />
-            <Row label="字幕提取" value={config?.processing.enableSubtitles ? '开启' : '关闭'} />
-            <Row label="MediaInfo" value={config?.processing.enableMediaInfo ? '开启' : '关闭'} />
-            <Row label="NFO" value={config?.processing.enableNfo ? '开启' : '关闭'} />
-            <Row label="BIF" value={config?.processing.enableBif ? '开启' : '关闭'} />
-            <Row label="接管图片" value={config?.processing.enableImageTakeover ? '开启' : '关闭'} />
-          </Card>
+        <section className="dashboard-page">
+          <section className="dashboard-overview">
+            <div className="dashboard-heading">
+              <p className="eyebrow">Dashboard</p>
+              <h2>媒体元数据控制台</h2>
+              <p>查看服务状态、任务队列、目录监听和本地工具可用性。</p>
+            </div>
+            <div className="dashboard-metrics" aria-label="运行概览">
+              <DashboardMetric label="服务状态" value={health?.status ?? 'loading'} tone={health?.status === 'ok' ? 'good' : 'warn'} />
+              <DashboardMetric label="任务总数" value={String(taskTotal)} />
+              <DashboardMetric label="活跃任务" value={String(activeTaskCount)} tone={activeTaskCount ? 'warn' : 'neutral'} />
+              <DashboardMetric label="失败任务" value={String(failedTaskCount)} tone={failedTaskCount ? 'bad' : 'good'} />
+              <DashboardMetric label="媒体目录" value={`${enabledWatchDirCount}/${watchDirs.length}`} />
+              <DashboardMetric label="可用工具" value={`${availableToolCount}/${tools.length || 4}`} tone={tools.length && availableToolCount !== tools.length ? 'bad' : 'good'} />
+            </div>
+          </section>
 
-          <Card title="工具状态" action={<button onClick={checkTools} disabled={checkingTools}>{checkingTools ? '检测中' : '一键检测'}</button>}>
-            {tools.length ? tools.map((tool) => (
-              <div className="tool" key={tool.name}>
-                <div>
-                  <strong>{tool.name}</strong>
-                  <small>{tool.version || tool.error || '未检测'}</small>
-                </div>
-                <span className={tool.available ? 'pill ok' : 'pill bad'}>{tool.available ? '可用' : '不可用'}</span>
+          <section className="dashboard-content-grid">
+            <Card title="配置摘要">
+              <Row label="监听地址" value={config?.server.addr ?? '-'} />
+              <Row label="显示时区" value={displayTimezone} />
+              <Row label="数据库" value={config?.database.path ?? '-'} />
+              <Row label="扫描并发" value={String(config?.processing.concurrency ?? '-')} />
+              <Row label="重命名并发" value={String(config?.renaming?.concurrency ?? '-')} />
+              <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
+              <Row label="TMDB" value={config?.scraping.enableTmdb ? `${config?.scraping.tmdbBaseUrl ?? '-'} · ${config?.scraping.tmdbRequestTimeoutSeconds ?? '-'}s` : '关闭'} />
+            </Card>
+
+            <Card title="处理能力">
+              <div className="feature-grid">
+                <DashboardFeature label="字幕提取" enabled={config?.processing.enableSubtitles} />
+                <DashboardFeature label="MediaInfo" enabled={config?.processing.enableMediaInfo} />
+                <DashboardFeature label="NFO" enabled={config?.processing.enableNfo} />
+                <DashboardFeature label="BIF" enabled={config?.processing.enableBif} />
+                <DashboardFeature label="图片接管" enabled={config?.processing.enableImageTakeover} />
+                <DashboardFeature label="人物刮削" enabled={config?.scraping.enablePeople} />
               </div>
-            )) : <p className="muted">尚未检测工具状态。</p>}
-          </Card>
+            </Card>
+
+            <Card title="工具状态" action={<button onClick={checkTools} disabled={checkingTools}>{checkingTools ? '检测中' : '重新检测'}</button>}>
+              {tools.length ? tools.map((tool) => (
+                <div className="tool" key={tool.name}>
+                  <div>
+                    <strong>{tool.name}</strong>
+                    <small>{tool.version || tool.error || '未检测'}</small>
+                  </div>
+                  <span className={tool.available ? 'pill ok' : 'pill bad'}>{tool.available ? '可用' : '不可用'}</span>
+                </div>
+              )) : <p className="muted">尚未检测工具状态。</p>}
+            </Card>
+          </section>
         </section>
       )}
 
@@ -2106,6 +2133,24 @@ function Row(props: { label: string; value: string }) {
     <div className="row">
       <span>{props.label}</span>
       <strong>{props.value}</strong>
+    </div>
+  );
+}
+
+function DashboardMetric(props: { label: string; value: string; tone?: 'neutral' | 'good' | 'warn' | 'bad' }) {
+  return (
+    <div className={`dashboard-metric ${props.tone ?? 'neutral'}`}>
+      <span>{props.label}</span>
+      <strong>{props.value}</strong>
+    </div>
+  );
+}
+
+function DashboardFeature(props: { label: string; enabled?: boolean }) {
+  return (
+    <div className={props.enabled ? 'dashboard-feature enabled' : 'dashboard-feature'}>
+      <span>{props.label}</span>
+      <strong>{props.enabled ? '开启' : '关闭'}</strong>
     </div>
   );
 }

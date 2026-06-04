@@ -591,6 +591,12 @@ export function App() {
   const renameWarningCount = renamePreview.filter((item) => item.status === 'warning').length;
 
   useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(''), 3600);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
     async function load() {
       try {
         const [healthResponse, configResponse, toolsResponse, tasksResponse, dirsResponse, artifactsResponse] = await Promise.all([
@@ -1532,8 +1538,7 @@ export function App() {
       </aside>
 
       <section className="content-panel">
-        {error && <section className="error-card">{error}</section>}
-        {notice && <section className="notice-card">{notice}</section>}
+        {notice && <section className="toast-card" role="status">{notice}</section>}
 
         {activePage === 'dashboard' && (
         <section className="page-grid dashboard-grid">
@@ -2056,8 +2061,26 @@ export function App() {
       {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} placeholders={renamePlaceholders} onChange={setRenameTemplate} onClose={() => setRenameTemplateEditorOpen(false)} />}
       {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
+      {error && <AlertDialog title="操作失败" message={error} onClose={() => setError('')} />}
       </section>
     </main>
+  );
+}
+
+function AlertDialog(props: { title: string; message: string; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop alert-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card alert-dialog" role="alertdialog" aria-modal="true" aria-labelledby="alert-dialog-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <h2 id="alert-dialog-title">{props.title}</h2>
+          <button className="secondary" onClick={props.onClose}>关闭</button>
+        </div>
+        <p>{props.message}</p>
+        <div className="inline-actions modal-actions">
+          <button onClick={props.onClose} autoFocus>知道了</button>
+        </div>
+      </section>
+    </div>
   );
 }
 

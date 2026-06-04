@@ -61,8 +61,9 @@ func main() {
 	serviceCtx, serviceCancel := context.WithCancel(context.Background())
 	defer serviceCancel()
 
+	watcherService := watcher.New(cfg, db, logger)
 	go func() {
-		if err := watcher.New(cfg, db, logger).Run(serviceCtx); err != nil {
+		if err := watcherService.Run(serviceCtx); err != nil {
 			logger.Error("watcher stopped", "error", err)
 		}
 	}()
@@ -76,7 +77,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
-		Handler:           api.NewServer(cfg, *configPath, db, taskRunner, logger),
+		Handler:           api.NewServer(cfg, *configPath, db, taskRunner, watcherService, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -104,7 +105,7 @@ func main() {
 func watchDirsFromStore(dirs []store.WatchDir) []config.WatchDir {
 	result := make([]config.WatchDir, 0, len(dirs))
 	for _, dir := range dirs {
-		result = append(result, config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: dir.Enabled})
+		result = append(result, config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: dir.Enabled, WatchEnabled: dir.WatchEnabled, ScanOnStart: dir.ScanOnStart})
 	}
 	return result
 }

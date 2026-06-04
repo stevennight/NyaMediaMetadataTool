@@ -40,7 +40,7 @@ func TestSyncAndScanEnqueuesStableMediaFile(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true}}
+	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true, ScanOnStart: true}}
 	cfg.Processing.StableDelay = time.Second
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -81,7 +81,7 @@ func TestSyncAndScanSkipsUnstableMediaFile(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true}}
+	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true, ScanOnStart: true}}
 	cfg.Processing.StableDelay = time.Hour
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -136,7 +136,7 @@ func TestSyncAndScanSkipsIgnoredDirectory(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true}}
+	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true, ScanOnStart: true}}
 	cfg.Processing.StableDelay = time.Second
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -283,7 +283,7 @@ func TestScanWatchDirAssignsOneScanRunToDirectoryTasks(t *testing.T) {
 	cfg := config.Default()
 	cfg.Processing.StableDelay = time.Second
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	if err := ScanWatchDir(context.Background(), cfg, st, logger, config.WatchDir{Path: root, Recursive: true, Enabled: true}, ScanOptions{OverwriteExisting: true}); err != nil {
+	if err := ScanWatchDir(context.Background(), cfg, st, logger, config.WatchDir{Path: root, Recursive: true, Enabled: true, ScanOnStart: true}, ScanOptions{OverwriteExisting: true}); err != nil {
 		t.Fatal(err)
 	}
 

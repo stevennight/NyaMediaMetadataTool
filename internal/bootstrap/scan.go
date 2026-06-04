@@ -33,7 +33,7 @@ func SyncAndScan(ctx context.Context, cfg config.Config, st *store.Store, logger
 }
 
 func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, dir config.WatchDir, options ScanOptions) error {
-	if !dir.Enabled {
+	if !dir.ScanOnStart {
 		return nil
 	}
 	if options.ScanRunID == "" {
@@ -98,7 +98,7 @@ func ScanPath(ctx context.Context, cfg config.Config, st *store.Store, logger *s
 		return err
 	}
 	if info.IsDir() {
-		return ScanWatchDir(ctx, cfg, st, logger, config.WatchDir{Path: path, Recursive: true, Enabled: true}, options)
+		return ScanWatchDir(ctx, cfg, st, logger, config.WatchDir{Path: path, Recursive: true, Enabled: true, ScanOnStart: true}, options)
 	}
 	if hasIgnoreFileInAncestors(filepath.Dir(path)) {
 		return nil

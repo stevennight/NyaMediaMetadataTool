@@ -17,12 +17,17 @@ import (
 )
 
 type Watcher struct {
-	cfg     config.Config
-	store   *store.Store
-	logger  *slog.Logger
-	allowed map[string]struct{}
-	mu      sync.Mutex
-	timers  map[string]*time.Timer
+	cfg      config.Config
+	store    *store.Store
+	logger   *slog.Logger
+	allowed  map[string]struct{}
+	mu       sync.Mutex
+	timers   map[string]*time.Timer
+	reloadCh chan reloadRequest
+}
+
+type reloadRequest struct {
+	done chan error
 }
 
 const ignoreFileName = ".ignore"
@@ -32,7 +37,23 @@ func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Watcher {
 	for _, ext := range cfg.Processing.Extensions {
 		allowed[strings.ToLower(ext)] = struct{}{}
 	}
-	return &Watcher{cfg: cfg, store: st, logger: logger, allowed: allowed, timers: map[string]*time.Timer{}}
+	return &Watcher{cfg: cfg, store: st, logger: logger, allowed: allowed, timers: map[string]*time.Timer{}, reloadCh: make(chan reloadRequest)}
+}
+
+func (w *Watcher) ReloadWatchDirs(ctx context.Context) error {
+	request := reloadRequest{done: make(chan error, 1)}
+	select {
+	case w.reloadCh <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-request.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (w *Watcher) Run(ctx context.Context) error {
@@ -42,24 +63,22 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 	defer fsw.Close()
 
-	for _, dir := range w.cfg.WatchDirs {
-		if !dir.Enabled {
-			continue
-		}
-		if err := w.addWatchDirs(fsw, dir.Path, dir.Recursive); err != nil {
-			w.logger.Warn("add watcher failed", "path", dir.Path, "error", err)
-		}
+	watched := map[string]struct{}{}
+	if err := w.reloadWatchDirs(ctx, fsw, watched); err != nil {
+		w.logger.Warn("initial watcher reload failed", "error", err)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case request := <-w.reloadCh:
+			request.done <- w.reloadWatchDirs(ctx, fsw, watched)
 		case event, ok := <-fsw.Events:
 			if !ok {
 				return nil
 			}
-			w.handleEvent(ctx, fsw, event)
+			w.handleEvent(ctx, fsw, watched, event)
 		case err, ok := <-fsw.Errors:
 			if !ok {
 				return nil
@@ -69,7 +88,50 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Watcher) addWatchDirs(fsw *fsnotify.Watcher, root string, recursive bool) error {
+func (w *Watcher) reloadWatchDirs(ctx context.Context, fsw *fsnotify.Watcher, watched map[string]struct{}) error {
+	dirs, err := w.store.ListWatchDirs(ctx)
+	if err != nil {
+		return err
+	}
+
+	desired := map[string]struct{}{}
+	activeRoots := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		if !dir.WatchEnabled {
+			continue
+		}
+		activeRoots = append(activeRoots, dir.Path)
+		if err := collectWatchDirs(desired, dir.Path, dir.Recursive); err != nil {
+			w.logger.Warn("collect watch dirs failed", "path", dir.Path, "error", err)
+		}
+	}
+
+	for path := range watched {
+		if _, ok := desired[path]; ok {
+			continue
+		}
+		if err := fsw.Remove(path); err != nil {
+			w.logger.Warn("remove watcher failed", "path", path, "error", err)
+		}
+		delete(watched, path)
+	}
+
+	for path := range desired {
+		if _, ok := watched[path]; ok {
+			continue
+		}
+		if err := fsw.Add(path); err != nil {
+			w.logger.Warn("add watcher failed", "path", path, "error", err)
+			continue
+		}
+		watched[path] = struct{}{}
+	}
+
+	w.cancelTimersOutside(activeRoots)
+	return nil
+}
+
+func collectWatchDirs(result map[string]struct{}, root string, recursive bool) error {
 	if hasIgnoreFileInAncestors(root) {
 		return nil
 	}
@@ -86,17 +148,36 @@ func (w *Watcher) addWatchDirs(fsw *fsnotify.Watcher, root string, recursive boo
 		if path != root && !recursive {
 			return filepath.SkipDir
 		}
-		return fsw.Add(path)
+		result[path] = struct{}{}
+		return nil
 	})
 }
 
-func (w *Watcher) handleEvent(ctx context.Context, fsw *fsnotify.Watcher, event fsnotify.Event) {
+func (w *Watcher) addWatchDirs(fsw *fsnotify.Watcher, watched map[string]struct{}, root string, recursive bool) error {
+	dirs := map[string]struct{}{}
+	if err := collectWatchDirs(dirs, root, recursive); err != nil {
+		return err
+	}
+	for path := range dirs {
+		if _, ok := watched[path]; ok {
+			continue
+		}
+		if err := fsw.Add(path); err != nil {
+			w.logger.Warn("add watcher failed", "path", path, "error", err)
+			continue
+		}
+		watched[path] = struct{}{}
+	}
+	return nil
+}
+
+func (w *Watcher) handleEvent(ctx context.Context, fsw *fsnotify.Watcher, watched map[string]struct{}, event fsnotify.Event) {
 	if event.Op&fsnotify.Create != 0 {
 		if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
 			if hasIgnoreFile(event.Name) {
 				return
 			}
-			_ = w.addWatchDirs(fsw, event.Name, true)
+			_ = w.addWatchDirs(fsw, watched, event.Name, true)
 			go w.scheduleDirectory(ctx, event.Name)
 			return
 		}
@@ -153,6 +234,29 @@ func (w *Watcher) debounceFile(ctx context.Context, path string) {
 		w.scheduleFile(ctx, path)
 	})
 	w.mu.Unlock()
+}
+
+func (w *Watcher) cancelTimersOutside(activeRoots []string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for path, timer := range w.timers {
+		if isUnderAnyRoot(path, activeRoots) {
+			continue
+		}
+		timer.Stop()
+		delete(w.timers, path)
+	}
+}
+
+func isUnderAnyRoot(path string, roots []string) bool {
+	cleanPath := filepath.Clean(path)
+	for _, root := range roots {
+		cleanRoot := filepath.Clean(root)
+		if cleanPath == cleanRoot || strings.HasPrefix(cleanPath, cleanRoot+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *Watcher) scheduleFile(ctx context.Context, path string) {

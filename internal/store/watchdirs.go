@@ -9,15 +9,17 @@ import (
 var ErrWatchDirNotFound = errors.New("watch dir not found")
 
 type WatchDir struct {
-	ID        int64  `json:"id"`
-	Path      string `json:"path"`
-	Recursive bool   `json:"recursive"`
-	Enabled   bool   `json:"enabled"`
+	ID           int64  `json:"id"`
+	Path         string `json:"path"`
+	Recursive    bool   `json:"recursive"`
+	Enabled      bool   `json:"enabled"`
+	WatchEnabled bool   `json:"watchEnabled"`
+	ScanOnStart  bool   `json:"scanOnStart"`
 }
 
 func (s *Store) ListWatchDirs(ctx context.Context) ([]WatchDir, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, path, recursive, enabled
+SELECT id, path, recursive, enabled, watch_enabled, scan_on_start
 FROM watch_dirs
 ORDER BY path
 `)
@@ -31,23 +33,26 @@ ORDER BY path
 		var dir WatchDir
 		var recursive int
 		var enabled int
-		if err := rows.Scan(&dir.ID, &dir.Path, &recursive, &enabled); err != nil {
+		var watchEnabled int
+		var scanOnStart int
+		if err := rows.Scan(&dir.ID, &dir.Path, &recursive, &enabled, &watchEnabled, &scanOnStart); err != nil {
 			return nil, err
 		}
 		dir.Recursive = recursive == 1
 		dir.Enabled = enabled == 1
+		dir.WatchEnabled = watchEnabled == 1
+		dir.ScanOnStart = scanOnStart == 1
 		dirs = append(dirs, dir)
 	}
 	return dirs, rows.Err()
 }
 
 func (s *Store) CreateWatchDir(ctx context.Context, dir WatchDir) (WatchDir, error) {
-	recursive := boolToInt(dir.Recursive)
-	enabled := boolToInt(dir.Enabled)
+	dir.Enabled = dir.WatchEnabled || dir.ScanOnStart
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO watch_dirs (path, recursive, enabled, updated_at)
-VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-`, dir.Path, recursive, enabled)
+INSERT INTO watch_dirs (path, recursive, enabled, watch_enabled, scan_on_start, updated_at)
+VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+`, dir.Path, boolToInt(dir.Recursive), boolToInt(dir.Enabled), boolToInt(dir.WatchEnabled), boolToInt(dir.ScanOnStart))
 	if err != nil {
 		return WatchDir{}, err
 	}
@@ -60,11 +65,12 @@ VALUES (?, ?, ?, CURRENT_TIMESTAMP)
 }
 
 func (s *Store) UpdateWatchDir(ctx context.Context, dir WatchDir) (WatchDir, error) {
+	dir.Enabled = dir.WatchEnabled || dir.ScanOnStart
 	result, err := s.db.ExecContext(ctx, `
 UPDATE watch_dirs
-SET path = ?, recursive = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
+SET path = ?, recursive = ?, enabled = ?, watch_enabled = ?, scan_on_start = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
-`, dir.Path, boolToInt(dir.Recursive), boolToInt(dir.Enabled), dir.ID)
+`, dir.Path, boolToInt(dir.Recursive), boolToInt(dir.Enabled), boolToInt(dir.WatchEnabled), boolToInt(dir.ScanOnStart), dir.ID)
 	if err != nil {
 		return WatchDir{}, err
 	}
@@ -97,11 +103,13 @@ func (s *Store) GetWatchDir(ctx context.Context, id int64) (WatchDir, error) {
 	var dir WatchDir
 	var recursive int
 	var enabled int
+	var watchEnabled int
+	var scanOnStart int
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, path, recursive, enabled
+SELECT id, path, recursive, enabled, watch_enabled, scan_on_start
 FROM watch_dirs
 WHERE id = ?
-`, id).Scan(&dir.ID, &dir.Path, &recursive, &enabled)
+`, id).Scan(&dir.ID, &dir.Path, &recursive, &enabled, &watchEnabled, &scanOnStart)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return WatchDir{}, ErrWatchDirNotFound
@@ -110,6 +118,8 @@ WHERE id = ?
 	}
 	dir.Recursive = recursive == 1
 	dir.Enabled = enabled == 1
+	dir.WatchEnabled = watchEnabled == 1
+	dir.ScanOnStart = scanOnStart == 1
 	return dir, nil
 }
 

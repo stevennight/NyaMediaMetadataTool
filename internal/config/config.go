@@ -74,9 +74,11 @@ type ScrapingConfig struct {
 }
 
 type WatchDir struct {
-	Path      string `json:"path" yaml:"path"`
-	Recursive bool   `json:"recursive" yaml:"recursive"`
-	Enabled   bool   `json:"enabled" yaml:"enabled"`
+	Path         string `json:"path" yaml:"path"`
+	Recursive    bool   `json:"recursive" yaml:"recursive"`
+	Enabled      bool   `json:"enabled" yaml:"enabled"`
+	WatchEnabled bool   `json:"watchEnabled" yaml:"watchEnabled"`
+	ScanOnStart  bool   `json:"scanOnStart" yaml:"scanOnStart"`
 }
 
 func Load(path string) (Config, error) {

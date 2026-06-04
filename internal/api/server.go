@@ -28,6 +28,7 @@ type Server struct {
 	configPath string
 	store      *store.Store
 	tasks      TaskCanceller
+	watcher    WatchDirReloader
 	logger     *slog.Logger
 	mux        *http.ServeMux
 }
@@ -36,12 +37,17 @@ type TaskCanceller interface {
 	CancelRunningTasks() int
 }
 
-func NewServer(cfg config.Config, configPath string, store *store.Store, tasks TaskCanceller, logger *slog.Logger) http.Handler {
+type WatchDirReloader interface {
+	ReloadWatchDirs(ctx context.Context) error
+}
+
+func NewServer(cfg config.Config, configPath string, store *store.Store, tasks TaskCanceller, watcher WatchDirReloader, logger *slog.Logger) http.Handler {
 	server := &Server{
 		cfg:        cfg,
 		configPath: configPath,
 		store:      store,
 		tasks:      tasks,
+		watcher:    watcher,
 		logger:     logger,
 		mux:        http.NewServeMux(),
 	}
@@ -560,6 +566,10 @@ func (s *Server) handleCreateWatchDir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if err := s.reloadWatchDirs(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -588,6 +598,10 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if err := s.reloadWatchDirs(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -601,6 +615,10 @@ func (s *Server) handleDeleteWatchDir(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, err)
 			return
 		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.reloadWatchDirs(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -652,7 +670,7 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		for _, dir := range dirs {
-			cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: true}
+			cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: true, WatchEnabled: dir.WatchEnabled, ScanOnStart: true}
 			if err := bootstrap.ScanWatchDir(context.Background(), cfg, s.store, s.logger, cfgDir, options); err != nil {
 				s.logger.Warn("manual rescan failed", "path", dir.Path, "error", err)
 			}
@@ -671,6 +689,13 @@ func scanOptionsFromStrategy(strategy string) bootstrap.ScanOptions {
 	default:
 		return bootstrap.ScanOptions{MissingOnly: true}
 	}
+}
+
+func (s *Server) reloadWatchDirs(ctx context.Context) error {
+	if s.watcher == nil {
+		return nil
+	}
+	return s.watcher.ReloadWatchDirs(ctx)
 }
 
 func (s *Server) snapshotConfig() config.Config {

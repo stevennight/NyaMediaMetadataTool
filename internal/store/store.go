@@ -69,7 +69,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureScanScopeTaskColumn(ctx); err != nil {
 		return err
 	}
-	return s.ensureEmbyAPIKeyNoteColumn(ctx)
+	if err := s.ensureEmbyAPIKeyNoteColumn(ctx); err != nil {
+		return err
+	}
+	return s.ensureWatchDirSplitColumns(ctx)
 }
 
 func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
@@ -88,14 +91,55 @@ func (s *Store) ensureEmbyAPIKeyNoteColumn(ctx context.Context) error {
 	return s.ensureColumn(ctx, "emby_api_keys", "note", `ALTER TABLE emby_api_keys ADD COLUMN note TEXT NOT NULL DEFAULT ''`)
 }
 
+func (s *Store) ensureWatchDirSplitColumns(ctx context.Context) error {
+	hasWatchEnabled, err := s.hasColumn(ctx, "watch_dirs", "watch_enabled")
+	if err != nil {
+		return err
+	}
+	if !hasWatchEnabled {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE watch_dirs ADD COLUMN watch_enabled INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE watch_dirs SET watch_enabled = enabled WHERE enabled IN (0, 1)`); err != nil {
+			return err
+		}
+	}
+
+	hasScanOnStart, err := s.hasColumn(ctx, "watch_dirs", "scan_on_start")
+	if err != nil {
+		return err
+	}
+	if !hasScanOnStart {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE watch_dirs ADD COLUMN scan_on_start INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE watch_dirs SET scan_on_start = enabled WHERE enabled IN (0, 1)`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) ensureTaskColumn(ctx context.Context, column string, statement string) error {
 	return s.ensureColumn(ctx, "tasks", column, statement)
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table string, column string, statement string) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	exists, err := s.hasColumn(ctx, table, column)
 	if err != nil {
 		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, statement)
+	return err
+}
+
+func (s *Store) hasColumn(ctx context.Context, table string, column string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, err
 	}
 	defer rows.Close()
 
@@ -106,17 +150,16 @@ func (s *Store) ensureColumn(ctx context.Context, table string, column string, s
 		var defaultValue any
 		var pk int
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
-			return err
+			return false, err
 		}
 		if name == column {
-			return rows.Err()
+			return true, rows.Err()
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return false, err
 	}
-	_, err = s.db.ExecContext(ctx, statement)
-	return err
+	return false, nil
 }
 
 func (s *Store) Ping(ctx context.Context) error {
@@ -129,6 +172,8 @@ CREATE TABLE IF NOT EXISTS watch_dirs (
   path TEXT NOT NULL UNIQUE,
   recursive INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER NOT NULL DEFAULT 1,
+  watch_enabled INTEGER NOT NULL DEFAULT 1,
+  scan_on_start INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

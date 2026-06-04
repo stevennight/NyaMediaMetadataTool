@@ -2427,6 +2427,10 @@ function Toggle(props: { label: string; checked: boolean; onChange: (value: bool
     <label className="toggle-row">
       <span>{props.label}</span>
       <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} />
+      <span className="toggle-switch" aria-hidden="true">
+        <span className="toggle-switch-label">{props.checked ? '开' : '关'}</span>
+        <span className="toggle-switch-thumb" />
+      </span>
     </label>
   );
 }

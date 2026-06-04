@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -638,6 +639,10 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	options := scanOptionsFromStrategy(input.Strategy)
 
 	if input.Path != "" {
+		if _, err := os.Stat(input.Path); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
 		go func() {
 			if err := bootstrap.ScanPath(context.Background(), cfg, s.store, s.logger, input.Path, options); err != nil {
 				s.logger.Warn("manual path rescan failed", "path", input.Path, "error", err)
@@ -666,6 +671,12 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		dirs = allDirs
+	}
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir.Path); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
 	}
 
 	go func() {

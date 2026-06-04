@@ -50,6 +50,9 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 
 	return filepath.WalkDir(dir.Path, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
+			if path == dir.Path {
+				return err
+			}
 			return nil
 		}
 		if entry.IsDir() {

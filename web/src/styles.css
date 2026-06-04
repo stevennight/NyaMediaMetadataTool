@@ -1189,7 +1189,8 @@ h3 {
 .toast-card {
   position: fixed;
   top: 24px;
-  right: 24px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 30;
   width: min(360px, calc(100vw - 48px));
   padding: 14px 18px;

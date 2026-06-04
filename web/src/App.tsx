@@ -1212,9 +1212,10 @@ export function App() {
         body: JSON.stringify(payload)
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
+      setNotice('补扫已加入队列。');
       await loadTasks(1);
     } catch (err) {
       setError(err instanceof Error ? err.message : '补扫失败');
@@ -2578,6 +2579,17 @@ function LanguageMultiPicker(props: { label: string; values: string[]; onChange:
 
 function asArray<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  const text = await response.text();
+  if (!text) return response.statusText || '请求失败';
+  try {
+    const data = JSON.parse(text) as { error?: string };
+    return data.error || text;
+  } catch {
+    return text;
+  }
 }
 
 function formatEpisodeList(values: number[] | null | undefined): string {

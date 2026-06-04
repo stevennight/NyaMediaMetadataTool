@@ -110,10 +110,7 @@ func (s *Store) ensureWatchDirSplitColumns(ctx context.Context) error {
 		return err
 	}
 	if !hasScanOnStart {
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE watch_dirs ADD COLUMN scan_on_start INTEGER NOT NULL DEFAULT 1`); err != nil {
-			return err
-		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE watch_dirs SET scan_on_start = enabled WHERE enabled IN (0, 1)`); err != nil {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE watch_dirs ADD COLUMN scan_on_start INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
 	}
@@ -173,7 +170,7 @@ CREATE TABLE IF NOT EXISTS watch_dirs (
   recursive INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER NOT NULL DEFAULT 1,
   watch_enabled INTEGER NOT NULL DEFAULT 1,
-  scan_on_start INTEGER NOT NULL DEFAULT 1,
+  scan_on_start INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

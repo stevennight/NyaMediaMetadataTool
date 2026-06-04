@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"NyaMediaMetadataTool/internal/api"
-	"NyaMediaMetadataTool/internal/bootstrap"
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/runner"
 	"NyaMediaMetadataTool/internal/store"
@@ -46,17 +45,16 @@ func main() {
 		logger.Error("reset running tasks", "error", err)
 		os.Exit(1)
 	}
+	if err := db.DisableWatchDirScanOnStart(context.Background()); err != nil {
+		logger.Error("disable watch dir scan on start", "error", err)
+		os.Exit(1)
+	}
 	dirs, err := db.ListWatchDirs(context.Background())
 	if err != nil {
 		logger.Error("load watch dirs", "error", err)
 		os.Exit(1)
 	}
 	cfg.WatchDirs = watchDirsFromStore(dirs)
-
-	if err := bootstrap.SyncAndScan(context.Background(), cfg, db, logger); err != nil {
-		logger.Error("bootstrap sync and scan", "error", err)
-		os.Exit(1)
-	}
 
 	serviceCtx, serviceCancel := context.WithCancel(context.Background())
 	defer serviceCancel()

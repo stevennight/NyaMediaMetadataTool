@@ -48,7 +48,8 @@ ORDER BY path
 }
 
 func (s *Store) CreateWatchDir(ctx context.Context, dir WatchDir) (WatchDir, error) {
-	dir.Enabled = dir.WatchEnabled || dir.ScanOnStart
+	dir.ScanOnStart = false
+	dir.Enabled = dir.WatchEnabled
 	result, err := s.db.ExecContext(ctx, `
 INSERT INTO watch_dirs (path, recursive, enabled, watch_enabled, scan_on_start, updated_at)
 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -65,7 +66,8 @@ VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 }
 
 func (s *Store) UpdateWatchDir(ctx context.Context, dir WatchDir) (WatchDir, error) {
-	dir.Enabled = dir.WatchEnabled || dir.ScanOnStart
+	dir.ScanOnStart = false
+	dir.Enabled = dir.WatchEnabled
 	result, err := s.db.ExecContext(ctx, `
 UPDATE watch_dirs
 SET path = ?, recursive = ?, enabled = ?, watch_enabled = ?, scan_on_start = ?, updated_at = CURRENT_TIMESTAMP
@@ -82,6 +84,15 @@ WHERE id = ?
 		return WatchDir{}, ErrWatchDirNotFound
 	}
 	return dir, nil
+}
+
+func (s *Store) DisableWatchDirScanOnStart(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE watch_dirs
+SET scan_on_start = 0, enabled = watch_enabled, updated_at = CURRENT_TIMESTAMP
+WHERE scan_on_start != 0 OR enabled != watch_enabled
+`)
+	return err
 }
 
 func (s *Store) DeleteWatchDir(ctx context.Context, id int64) error {

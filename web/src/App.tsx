@@ -559,7 +559,7 @@ export function App() {
   const [selectedRenamePaths, setSelectedRenamePaths] = useState<string[]>([]);
   const [tmdbQuery, setTmdbQuery] = useState('');
   const [tmdbResults, setTmdbResults] = useState<TMDBSearchResult[]>([]);
-  const [tmdbResultsCollapsed, setTmdbResultsCollapsed] = useState(false);
+  const [tmdbMatchOpen, setTmdbMatchOpen] = useState(false);
   const [searchingTmdb, setSearchingTmdb] = useState(false);
   const [applyingTmdbShowId, setApplyingTmdbShowId] = useState<number | null>(null);
   const [tmdbApplyProgress, setTmdbApplyProgress] = useState(0);
@@ -1002,7 +1002,6 @@ export function App() {
       }
       const result = await response.json();
       setTmdbResults(asArray<TMDBSearchResult>(result.items));
-      setTmdbResultsCollapsed(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : '搜索 TMDB 失败');
     } finally {
@@ -1032,7 +1031,7 @@ export function App() {
           setTmdbApplyProgress(completed);
         }
       });
-      setTmdbResultsCollapsed(true);
+      setTmdbMatchOpen(false);
     } finally {
       applyingTmdbShowRef.current = false;
       setApplyingTmdbShowId(null);
@@ -1736,10 +1735,10 @@ export function App() {
 
         {activePage === 'rename' && (
         <section className="page-grid rename-page-grid">
-          <Card title="整理命名" action={<div className="inline-actions"><button className="secondary" type="button" onClick={() => setRenameHistoryOpen(true)}>重命名历史{renameHistory.length ? `(${renameHistory.length})` : ''}</button><button onClick={previewRename} disabled={previewingRename}>{previewingRename ? `扫描中 ${renamePreviewCount}` : '生成预览'}</button></div>}>
+          <Card title="整理命名" action={<button className="secondary" type="button" onClick={() => setRenameHistoryOpen(true)}>重命名历史{renameHistory.length ? ` (${renameHistory.length})` : ''}</button>}>
             <div className="rename-controls">
-              <label>目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}>选择</button></div></label>
-              <label>命名模板
+              <label className="rename-control-primary">目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}>选择</button></div></label>
+              <label className="rename-control-primary">命名模板
                 <div className="template-input-row">
                   <button className="target-path-preview rename-template-preview" type="button" onClick={() => setRenameTemplateEditorOpen(true)}>{renameTemplate || defaultRenameTemplate}</button>
                   <select value="" onChange={(event) => { if (event.target.value) setRenameTemplate(event.target.value); }} disabled={!renameTemplateHistory.length} title="最近模板">
@@ -1751,33 +1750,25 @@ export function App() {
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <label>字幕组<input value={renameReleaseGroup} onChange={(event) => setRenameReleaseGroup(event.target.value)} placeholder="留空则从原文件名识别" /></label>
               <Toggle label="生成预览时查询 TMDB" checked={renameUseTmdb} onChange={setRenameUseTmdb} />
+              <div className="rename-preview-action">
+                <button type="button" onClick={previewRename} disabled={previewingRename}>{previewingRename ? `扫描中 ${renamePreviewCount}` : '生成预览'}</button>
+              </div>
             </div>
             <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
           </Card>
 
-          <Card title="重命名预览">
+          <Card title="重命名预览" action={<div className="rename-preview-summary"><span>共 <strong>{renamePreview.length}</strong> 项</span><span>已选 <strong>{selectedRenamePaths.length}</strong></span><span className={renameWarningCount ? 'warn' : ''}>警告 <strong>{renameWarningCount}</strong></span><span className={renameErrorCount ? 'bad' : ''}>错误 <strong>{renameErrorCount}</strong></span></div>}>
             <div className="rename-match-bar">
-              <div className="inline-actions rename-bulk-actions">
-                <button className="secondary" type="button" onClick={selectAllRenameItems} disabled={!renamePreview.length}>全选</button>
-                <button className="secondary" type="button" onClick={invertRenameSelection} disabled={!renamePreview.length}>反选</button>
-                <button className="secondary" type="button" onClick={openBatchEpisodeDialog} disabled={!selectedRenamePaths.length}>批量修正季集</button>
-                <button type="button" onClick={applySelectedRenames} disabled={applyingRename || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
-                <span className="rename-preview-stats">并发 {renameBatchConcurrency} · 错误 {renameErrorCount} · 警告 {renameWarningCount}</span>
-              </div>
-              <div className="path-input">
-                <input value={tmdbQuery} onChange={(event) => setTmdbQuery(event.target.value)} placeholder="搜索 TMDB 剧集，例如 Frieren" />
-                <button type="button" onClick={searchTmdbShows} disabled={searchingTmdb}>{searchingTmdb ? '搜索中' : '搜索剧集'}</button>
-                {tmdbResults.length ? <button className="secondary" type="button" onClick={() => setTmdbResultsCollapsed((value) => !value)}>{tmdbResultsCollapsed ? `展开结果 (${tmdbResults.length})` : '收起结果'}</button> : null}
-              </div>
-              {tmdbResults.length && !tmdbResultsCollapsed ? (
-                <div className="tmdb-results">
-                  {tmdbResults.map((show) => (
-                    <button type="button" key={show.id} onClick={() => applyTmdbShowToSelected(show)} disabled={applyingTmdbShowId !== null} title="套用到勾选项并按各自行季集重新获取标题">
-                      {applyingTmdbShowId === show.id ? `应用中 ${tmdbApplyProgress}/${tmdbApplyTotal}` : show.name || show.originalName} <small>{show.firstAirDate?.slice(0, 4) || '----'} · #{show.id}</small>
-                    </button>
-                  ))}
+              <div className="rename-action-row">
+                <div className="inline-actions rename-bulk-actions">
+                  <button className="secondary" type="button" onClick={selectAllRenameItems} disabled={!renamePreview.length}>全选</button>
+                  <button className="secondary" type="button" onClick={invertRenameSelection} disabled={!renamePreview.length}>反选</button>
+                  <button className="secondary" type="button" onClick={openBatchEpisodeDialog} disabled={!selectedRenamePaths.length}>批量修正季集</button>
+                  <button className="secondary" type="button" onClick={() => setTmdbMatchOpen(true)} disabled={!selectedRenamePaths.length}>更改匹配剧集</button>
+                  <span className="rename-preview-stats">并发 {renameBatchConcurrency}</span>
                 </div>
-              ) : tmdbResults.length ? null : <p className="muted">勾选文件后搜索剧集，点击候选即可套用到选中项并重新预览。</p>}
+                <button className="rename-apply-button" type="button" onClick={applySelectedRenames} disabled={applyingRename || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
+              </div>
             </div>
             <div className="task-table-wrap">
               <table className="task-table rename-table">
@@ -2123,6 +2114,7 @@ export function App() {
       {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
       {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
+      {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
       {renameHistoryOpen && <RenameHistoryModal history={renameHistory} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onOpenDetails={setSelectedHistoryBatch} onUndo={(id) => void undoRenameBatch(id)} />}
       {selectedHistoryBatch && <RenameHistoryDetailsModal batch={selectedHistoryBatch} undoCheck={undoCheckResult?.batch?.id === selectedHistoryBatch.id ? undoCheckResult : null} timezone={displayTimezone} onClose={() => setSelectedHistoryBatch(null)} />}
       {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} placeholders={renamePlaceholders} onChange={setRenameTemplate} onClose={() => setRenameTemplateEditorOpen(false)} />}
@@ -2154,9 +2146,9 @@ function AlertDialog(props: { title: string; message: string; onClose: () => voi
   );
 }
 
-function IconCloseButton(props: { onClick: () => void }) {
+function IconCloseButton(props: { onClick: () => void; disabled?: boolean }) {
   return (
-    <button className="icon-close-button" type="button" onClick={props.onClick} aria-label="关闭" title="关闭">
+    <button className="icon-close-button" type="button" onClick={props.onClick} disabled={props.disabled} aria-label="关闭" title="关闭">
       <span aria-hidden="true">&times;</span>
     </button>
   );
@@ -2447,6 +2439,57 @@ function BatchEpisodeModal(props: {
         <div className="inline-actions modal-actions">
           <button className="secondary" onClick={props.onClose}>取消</button>
           <button onClick={props.onSubmit} disabled={props.applying}>{props.applying ? `应用中 ${props.progress}/${props.count}` : '应用并查 TMDB'}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TmdbMatchModal(props: {
+  count: number;
+  query: string;
+  results: TMDBSearchResult[];
+  searching: boolean;
+  applyingShowId: number | null;
+  applyProgress: number;
+  applyTotal: number;
+  onQueryChange: (value: string) => void;
+  onSearch: () => void;
+  onApply: (show: TMDBSearchResult) => void;
+  onClose: () => void;
+}) {
+  const applying = props.applyingShowId !== null;
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={applying ? undefined : props.onClose}>
+      <section className="modal-card tmdb-match-modal" role="dialog" aria-modal="true" aria-labelledby="tmdb-match-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <div>
+            <h2 id="tmdb-match-title">更改匹配剧集</h2>
+            <small>将应用到当前选中的 {props.count} 个文件，并重新生成预览。</small>
+          </div>
+          <IconCloseButton onClick={props.onClose} disabled={applying} />
+        </div>
+        <form className="tmdb-match-search" onSubmit={(event) => { event.preventDefault(); props.onSearch(); }}>
+          <input autoFocus value={props.query} onChange={(event) => props.onQueryChange(event.target.value)} placeholder="搜索 TMDB 剧集，例如 Frieren" />
+          <button type="submit" disabled={props.searching || applying || !props.query.trim()}>{props.searching ? '搜索中' : '搜索剧集'}</button>
+        </form>
+        <div className="tmdb-match-results">
+          {props.results.length ? props.results.map((show) => (
+            <button className="tmdb-match-result" type="button" key={show.id} onClick={() => props.onApply(show)} disabled={applying} title="套用到选中项并按各自行季集重新获取标题">
+              <span>
+                <strong>{show.name || show.originalName}</strong>
+                {show.originalName && show.originalName !== show.name ? <small>{show.originalName}</small> : null}
+              </span>
+              <span className="tmdb-match-meta">{show.firstAirDate?.slice(0, 4) || '年份未知'} · TMDB #{show.id}</span>
+              {show.overview ? <p>{show.overview}</p> : null}
+              {props.applyingShowId === show.id ? <em>应用中 {props.applyProgress}/{props.applyTotal}</em> : <em>选择并应用</em>}
+            </button>
+          )) : (
+            <div className="tmdb-match-empty">
+              <strong>{props.searching ? '正在搜索剧集…' : '搜索并选择正确的剧集'}</strong>
+              <span>选择后会更新当前勾选项，并按照各自季集重新查询标题。</span>
+            </div>
+          )}
         </div>
       </section>
     </div>

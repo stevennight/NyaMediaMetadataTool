@@ -320,7 +320,29 @@ h1 {
 }
 
 .rename-page-grid {
+  height: calc(100vh - 48px);
   grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(440px, 1fr);
+  align-items: stretch;
+  min-height: 0;
+}
+
+.rename-page-grid > .card:last-child {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rename-page-grid > .card:last-child > .card-header,
+.rename-page-grid > .card:last-child > .rename-match-bar {
+  flex: 0 0 auto;
+}
+
+.rename-page-grid > .card:last-child > .task-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 .task-page-grid {
@@ -713,10 +735,14 @@ button:disabled {
 
 .rename-controls {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) minmax(180px, 0.55fr) minmax(220px, 0.6fr);
+  grid-template-columns: minmax(180px, 0.55fr) minmax(240px, 0.9fr) minmax(220px, 0.65fr) auto;
   gap: 12px;
   align-items: end;
   margin-bottom: 14px;
+}
+
+.rename-controls .rename-control-primary {
+  grid-column: span 2;
 }
 
 .rename-controls label {
@@ -729,6 +755,24 @@ button:disabled {
 .rename-controls input,
 .rename-controls select {
   width: 100%;
+}
+
+.rename-controls .toggle-row {
+  min-height: 40px;
+  align-self: end;
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.52);
+  padding: 8px 12px;
+}
+
+.rename-preview-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.rename-preview-action button {
+  min-width: 132px;
 }
 
 .template-input-row {
@@ -777,8 +821,6 @@ button:disabled {
 }
 
 .rename-match-bar {
-  position: sticky;
-  top: 12px;
   z-index: 5;
   display: grid;
   gap: 10px;
@@ -791,10 +833,55 @@ button:disabled {
   box-shadow: 0 12px 28px rgba(68, 64, 60, 0.08);
 }
 
+.rename-preview-summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.rename-preview-summary span {
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.66);
+  color: #78716c;
+  font-size: 12px;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+
+.rename-preview-summary strong {
+  color: #1f2937;
+}
+
+.rename-preview-summary .warn {
+  border-color: rgba(217, 119, 6, 0.24);
+  background: rgba(254, 243, 199, 0.72);
+  color: #b45309;
+}
+
+.rename-preview-summary .bad {
+  border-color: rgba(185, 28, 28, 0.22);
+  background: rgba(254, 226, 226, 0.72);
+  color: #b91c1c;
+}
+
+.rename-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .rename-bulk-actions {
   justify-content: flex-start;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.rename-apply-button {
+  flex: 0 0 auto;
+  min-width: 190px;
 }
 
 .rename-preview-stats {
@@ -804,23 +891,11 @@ button:disabled {
   white-space: nowrap;
 }
 
-.rename-match-bar .path-input {
-  grid-template-columns: minmax(0, 1fr) auto auto;
-}
-
-.tmdb-results {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.tmdb-results button {
-  text-align: left;
-}
-
-.tmdb-results small {
-  display: block;
-  opacity: 0.72;
+.rename-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: #fff;
 }
 
 .rename-edit-cell {
@@ -1270,6 +1345,102 @@ button:disabled {
 
 .batch-episode-modal {
   width: min(560px, 100%);
+}
+
+.tmdb-match-modal {
+  display: flex;
+  width: min(860px, 100%);
+  min-height: min(620px, calc(100vh - 48px));
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tmdb-match-modal .card-header {
+  flex: 0 0 auto;
+}
+
+.tmdb-match-modal .card-header small {
+  display: block;
+  margin-top: 4px;
+  color: #78716c;
+}
+
+.tmdb-match-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.tmdb-match-results {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  margin-top: 16px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.tmdb-match-result {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 16px;
+  border: 1px solid rgba(120, 113, 108, 0.18);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #1f2937;
+  padding: 14px 16px;
+  text-align: left;
+}
+
+.tmdb-match-result:hover {
+  border-color: rgba(217, 119, 6, 0.38);
+  background: #fff;
+}
+
+.tmdb-match-result strong,
+.tmdb-match-result small {
+  display: block;
+}
+
+.tmdb-match-result small,
+.tmdb-match-meta,
+.tmdb-match-result p {
+  color: #78716c;
+  font-size: 12px;
+}
+
+.tmdb-match-result p {
+  grid-column: 1 / -1;
+  display: -webkit-box;
+  margin: 2px 0 0;
+  overflow: hidden;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.tmdb-match-result em {
+  grid-column: 1 / -1;
+  color: #b45309;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.tmdb-match-empty {
+  display: grid;
+  min-height: 300px;
+  place-content: center;
+  gap: 8px;
+  color: #78716c;
+  text-align: center;
+}
+
+.tmdb-match-empty strong {
+  color: #44403c;
+  font-size: 18px;
 }
 
 .batch-episode-form {
@@ -1843,6 +2014,41 @@ h3 {
 
   .task-page-grid {
     height: auto;
+  }
+
+  .rename-page-grid {
+    height: auto;
+    grid-template-rows: auto;
+  }
+
+  .rename-controls .rename-control-primary {
+    grid-column: auto;
+  }
+
+  .rename-preview-action,
+  .rename-preview-action button {
+    width: 100%;
+  }
+
+  .rename-action-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rename-apply-button {
+    width: 100%;
+  }
+
+  .rename-preview-summary {
+    justify-content: flex-start;
+  }
+
+  .tmdb-match-modal {
+    min-height: 0;
+  }
+
+  .tmdb-match-result {
+    grid-template-columns: 1fr;
   }
 
   .task-page-grid > .card {

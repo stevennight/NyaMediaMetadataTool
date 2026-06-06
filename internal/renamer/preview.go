@@ -51,7 +51,6 @@ var sidecarExtensions = map[string]struct{}{
 type PreviewRequest struct {
 	Path         string `json:"path"`
 	Template     string `json:"template"`
-	UseTMDB      bool   `json:"useTmdb"`
 	Language     string `json:"language"`
 	ReleaseGroup string `json:"releaseGroup"`
 }
@@ -76,6 +75,8 @@ type PreviewItem struct {
 	TMDBShowID      int    `json:"tmdbShowId"`
 	TMDBEpisodeID   int    `json:"tmdbEpisodeId"`
 	Source          string `json:"source"`
+	IdentitySource  string `json:"identitySource"`
+	MetadataSource  string `json:"metadataSource"`
 	Status          string `json:"status"`
 	Message         string `json:"message"`
 	Conflict        bool   `json:"conflict"`
@@ -88,7 +89,6 @@ type PreviewItem struct {
 type PreviewItemRequest struct {
 	Path         string    `json:"path"`
 	Template     string    `json:"template"`
-	UseTMDB      bool      `json:"useTmdb"`
 	Language     string    `json:"language"`
 	Show         string    `json:"show"`
 	Title        string    `json:"title"`
@@ -147,14 +147,24 @@ type ApplyResult struct {
 }
 
 type episodeNFO struct {
-	Title     string `xml:"title"`
-	ShowTitle string `xml:"showtitle"`
-	Language  string `xml:"language"`
-	LangAttr  string `xml:"lang,attr"`
-	Season    int    `xml:"season"`
-	Episode   int    `xml:"episode"`
-	Premiered string `xml:"premiered"`
-	Aired     string `xml:"aired"`
+	Title     string        `xml:"title"`
+	ShowTitle string        `xml:"showtitle"`
+	Season    *int          `xml:"season"`
+	Episode   *int          `xml:"episode"`
+	TMDBID    string        `xml:"tmdbid"`
+	UniqueID  []nfoUniqueID `xml:"uniqueid"`
+}
+
+type tvShowNFO struct {
+	Title    string        `xml:"title"`
+	Year     string        `xml:"year"`
+	TMDBID   string        `xml:"tmdbid"`
+	UniqueID []nfoUniqueID `xml:"uniqueid"`
+}
+
+type nfoUniqueID struct {
+	Type  string `xml:"type,attr"`
+	Value string `xml:",chardata"`
 }
 
 func Preview(ctx context.Context, cfg config.Config, input PreviewRequest) (PreviewResult, error) {
@@ -199,9 +209,6 @@ func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, e
 		cfg.Scraping.Language = language
 	}
 	client, _ := tmdb.NewClient(cfg.Scraping)
-	if !input.UseTMDB {
-		client = nil
-	}
 
 	files := make([]string, 0)
 	addFile := func(path string) {
@@ -347,9 +354,6 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 	}
 
 	client, _ := tmdb.NewClient(cfg.Scraping)
-	if !input.UseTMDB {
-		client = nil
-	}
 
 	item := buildPreviewItem(ctx, cfg, client, path, template, previewOverrides{Show: input.Show, Title: input.Title, ReleaseGroup: input.ReleaseGroup, Season: input.Season, Episode: input.Episode, TMDBShowID: input.TMDBShowID})
 	if strings.TrimSpace(input.NewName) != "" {
@@ -554,11 +558,11 @@ func updateRenamedNFOReferences(path string, oldBase string, newBase string) {
 }
 
 func buildPreviewItem(ctx context.Context, cfg config.Config, client *tmdb.Client, path string, template string, overrides previewOverrides) PreviewItem {
-	parsed, ok := parseEpisode(path, cfg)
-	item := PreviewItem{Path: path, CurrentName: filepath.Base(path), Show: parsed.show, ReleaseGroup: parsed.releaseGroup, Year: parsed.year, TMDBShowID: parsed.tmdbShowID, Season: parsed.season, Episode: parsed.episode, Source: "filename", Status: "ok"}
+	parsed, ok, identitySource := identifyEpisode(path, cfg)
+	item := PreviewItem{Path: path, CurrentName: filepath.Base(path), Show: parsed.show, ReleaseGroup: parsed.releaseGroup, Year: parsed.year, TMDBShowID: parsed.tmdbShowID, Season: parsed.season, Episode: parsed.episode, Source: identitySource, IdentitySource: identitySource, MetadataSource: "tmdb", Status: "ok"}
 	if !ok {
 		item.Status = "warning"
-		item.Message = "无法从文件名解析集数"
+		item.Message = "无法识别剧集身份"
 	}
 	applyPreviewOverrides(&item, overrides)
 	invalidEpisodeInput := applyEpisodeOverrides(&item, overrides)
@@ -574,18 +578,73 @@ func buildPreviewItem(ctx context.Context, cfg config.Config, client *tmdb.Clien
 			item.Year = yearFromDate(firstNonEmpty(episode.ShowFirstAirDate, episode.AirDate))
 			item.TMDBShowID = episode.ShowID
 			item.TMDBEpisodeID = episode.EpisodeID
-			item.Source = "tmdb"
+			item.MetadataSource = "tmdb"
 			item.Status = "ok"
 			item.Message = ""
 		} else {
+			item.MetadataSource = "tmdb-error"
 			item.Status = "warning"
 			item.Message = err.Error()
 		}
 		applyLocalizedTemplateValues(ctx, client, template, &item)
+	} else if client == nil {
+		item.MetadataSource = "tmdb-unavailable"
+		item.Status = "warning"
+		item.Message = "TMDB 不可用，无法获取命名信息"
 	}
 
 	finalizeItem(path, template, &item)
 	return item
+}
+
+func identifyEpisode(path string, cfg config.Config) (parsedEpisode, bool, string) {
+	parsed, parsedOK := parseEpisode(path, cfg)
+	source := "filename"
+	nfoUsed := false
+	episodeNFOShowUsed := false
+
+	if doc, ok := readEpisodeNFO(path); ok {
+		if show := strings.TrimSpace(doc.ShowTitle); show != "" {
+			parsed.show = show
+			nfoUsed = true
+			episodeNFOShowUsed = true
+		}
+		if doc.Season != nil {
+			parsed.season = *doc.Season
+			nfoUsed = true
+		}
+		if doc.Episode != nil {
+			parsed.episode = *doc.Episode
+			parsedOK = true
+			nfoUsed = true
+		}
+		if id := nfoTMDBID(doc.UniqueID, doc.TMDBID); id > 0 {
+			parsed.tmdbShowID = id
+			nfoUsed = true
+		}
+	}
+
+	if doc, ok := readTVShowNFO(path); ok {
+		if parsed.tmdbShowID == 0 {
+			if id := nfoTMDBID(doc.UniqueID, doc.TMDBID); id > 0 {
+				parsed.tmdbShowID = id
+				nfoUsed = true
+			}
+		}
+		if !episodeNFOShowUsed && strings.TrimSpace(doc.Title) != "" {
+			parsed.show = strings.TrimSpace(doc.Title)
+			nfoUsed = true
+		}
+		if strings.TrimSpace(parsed.year) == "" && strings.TrimSpace(doc.Year) != "" {
+			parsed.year = strings.TrimSpace(doc.Year)
+			nfoUsed = true
+		}
+	}
+
+	if nfoUsed {
+		source = "nfo"
+	}
+	return parsed, parsedOK, source
 }
 
 func applyPreviewOverrides(item *PreviewItem, overrides previewOverrides) {
@@ -806,18 +865,29 @@ func readEpisodeNFO(mediaPath string) (episodeNFO, bool) {
 	return doc, true
 }
 
-func nfoMatchesLanguage(nfo episodeNFO, requested string) bool {
-	nfoLanguage := firstNonEmpty(nfo.Language, nfo.LangAttr)
-	if strings.TrimSpace(nfoLanguage) == "" || strings.TrimSpace(requested) == "" {
-		return false
+func readTVShowNFO(mediaPath string) (tvShowNFO, bool) {
+	path := filepath.Join(showDirectory(mediaPath), "tvshow.nfo")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return tvShowNFO{}, false
 	}
-	return normalizeLanguage(nfoLanguage) == normalizeLanguage(requested)
+	var doc tvShowNFO
+	if err := xml.Unmarshal(data, &doc); err != nil {
+		return tvShowNFO{}, false
+	}
+	return doc, true
 }
 
-func normalizeLanguage(language string) string {
-	language = strings.TrimSpace(strings.ToLower(language))
-	language = strings.ReplaceAll(language, "_", "-")
-	return language
+func nfoTMDBID(ids []nfoUniqueID, direct string) int {
+	for _, id := range ids {
+		if strings.EqualFold(strings.TrimSpace(id.Type), "tmdb") {
+			if value, err := strconv.Atoi(strings.TrimSpace(id.Value)); err == nil && value > 0 {
+				return value
+			}
+		}
+	}
+	value, _ := strconv.Atoi(strings.TrimSpace(direct))
+	return value
 }
 
 func applyTemplate(template string, item PreviewItem) string {

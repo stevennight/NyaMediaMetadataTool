@@ -133,6 +133,8 @@ type RenamePreviewItem = {
   tmdbShowId: number;
   tmdbEpisodeId: number;
   source: string;
+  identitySource: string;
+  metadataSource: string;
   status: string;
   message: string;
   conflict: boolean;
@@ -375,6 +377,19 @@ function previewWorkerCount(configured: number) {
   return configured;
 }
 
+function renameIdentitySourceLabel(source: string) {
+  if (source === 'nfo') return 'NFO';
+  if (source === 'filename') return '文件名 / 目录';
+  return source || '-';
+}
+
+function renameMetadataSourceLabel(source: string) {
+  if (source === 'tmdb') return 'TMDB 已获取';
+  if (source === 'tmdb-error') return 'TMDB 查询失败';
+  if (source === 'tmdb-unavailable') return 'TMDB 不可用';
+  return source || '-';
+}
+
 async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<void>) {
   let nextIndex = 0;
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
@@ -390,7 +405,6 @@ type RenamePreferences = {
   path?: string;
   template?: string;
   language?: string;
-  useTmdb?: boolean;
   releaseGroup?: string;
   templateHistory?: string[];
 };
@@ -543,7 +557,6 @@ export function App() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [renamePath, setRenamePath] = useState(() => readRenamePreferences().path ?? '');
   const [renameTemplate, setRenameTemplate] = useState(() => readRenamePreferences().template ?? defaultRenameTemplate);
-  const [renameUseTmdb, setRenameUseTmdb] = useState(() => readRenamePreferences().useTmdb ?? true);
   const [renameReleaseGroup, setRenameReleaseGroup] = useState(() => readRenamePreferences().releaseGroup ?? '');
   const [renameLanguage, setRenameLanguage] = useState(() => readRenamePreferences().language ?? 'zh-CN');
   const [renameLanguageInitialized, setRenameLanguageInitialized] = useState(() => Boolean(readRenamePreferences().language));
@@ -847,7 +860,7 @@ export function App() {
       const response = await fetch('/api/rename/preview/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, useTmdb: renameUseTmdb, language: renameLanguage, releaseGroup: renameReleaseGroup.trim() })
+        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, language: renameLanguage, releaseGroup: renameReleaseGroup.trim() })
       });
       if (!response.ok) {
         setError(await response.text());
@@ -889,7 +902,6 @@ export function App() {
       path: renamePath.trim(),
       template,
       language: renameLanguage,
-      useTmdb: renameUseTmdb,
       releaseGroup: renameReleaseGroup.trim(),
       templateHistory: nextHistory
     });
@@ -955,7 +967,6 @@ export function App() {
       body: JSON.stringify({
         path: item.path,
         template: renameTemplate,
-        useTmdb: options.forceTmdb ?? false,
         language: renameLanguage,
         show: options.show ?? item.show,
         title: item.title,
@@ -1749,12 +1760,10 @@ export function App() {
               </label>
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <label>字幕组<input value={renameReleaseGroup} onChange={(event) => setRenameReleaseGroup(event.target.value)} placeholder="留空则从原文件名识别" /></label>
-              <Toggle label="生成预览时查询 TMDB" checked={renameUseTmdb} onChange={setRenameUseTmdb} />
               <div className="rename-preview-action">
                 <button type="button" onClick={previewRename} disabled={previewingRename}>{previewingRename ? `扫描中 ${renamePreviewCount}` : '生成预览'}</button>
               </div>
             </div>
-            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
           </Card>
 
           <Card title="重命名预览" action={<div className="rename-preview-summary"><span>共 <strong>{renamePreview.length}</strong> 项</span><span>已选 <strong>{selectedRenamePaths.length}</strong></span><span className={renameWarningCount ? 'warn' : ''}>警告 <strong>{renameWarningCount}</strong></span><span className={renameErrorCount ? 'bad' : ''}>错误 <strong>{renameErrorCount}</strong></span></div>}>
@@ -1776,7 +1785,8 @@ export function App() {
                   <tr>
                     <th>选择</th>
                     <th>状态</th>
-                    <th>来源</th>
+                    <th>身份来源</th>
+                    <th>元数据</th>
                     <th>识别结果</th>
                     <th>原文件名</th>
                     <th>新文件名</th>
@@ -1791,7 +1801,8 @@ export function App() {
                     <tr className={selectedRenamePaths.includes(item.path) ? 'rename-row selected' : 'rename-row'} key={item.path} onClick={(event) => handleRenameRowClick(event, item, index)} title="点击行选择，Shift+点击连续选择">
                       <td><span className={selectedRenamePaths.includes(item.path) ? 'rename-row-index selected' : 'rename-row-index'} aria-hidden="true"><strong>{index + 1}</strong></span></td>
                       <td><span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{item.status}</span></td>
-                      <td>{item.source || '-'}</td>
+                      <td>{renameIdentitySourceLabel(item.identitySource || item.source)}</td>
+                      <td>{renameMetadataSourceLabel(item.metadataSource)}</td>
                       <td className="rename-edit-cell">
                         <label className="rename-edit-field">
                           <span>剧名</span>
@@ -1829,7 +1840,7 @@ export function App() {
                     </tr>
                   );
                   }) : (
-                    <tr><td colSpan={8} className="empty-cell">尚未生成预览。</td></tr>
+                    <tr><td colSpan={9} className="empty-cell">尚未生成预览。</td></tr>
                   )}
                 </tbody>
               </table>

@@ -82,6 +82,35 @@ func TestPreviewWorkerCountRespectsLowConcurrency(t *testing.T) {
 	}
 }
 
+func TestPreviewEachProgressReportsTotalBeforeItems(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for _, name := range []string{"Show - S01E01.mkv", "Show - S01E02.mkv"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("demo"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total := -1
+	items := 0
+	err := PreviewEachProgress(context.Background(), config.Default(), PreviewRequest{Path: root}, func(value int) error {
+		if items != 0 {
+			t.Fatal("expected total before preview items")
+		}
+		total = value
+		return nil
+	}, func(PreviewItem) error {
+		items++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || items != 2 {
+		t.Fatalf("total=%d items=%d, want 2 and 2", total, items)
+	}
+}
+
 func TestParseEpisodeUsesShowDirectoryMetadata(t *testing.T) {
 	t.Parallel()
 

@@ -87,6 +87,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/rename/history/{id}/undo-check", s.handleRenameHistoryUndoCheck)
 	s.mux.HandleFunc("POST /api/rename/history/{id}/undo", s.handleRenameHistoryUndo)
 	s.mux.HandleFunc("GET /api/tmdb/search-tv", s.handleTMDBSearchTV)
+	s.mux.HandleFunc("GET /api/tmdb/episode", s.handleTMDBEpisode)
 	s.mux.HandleFunc("GET /api/watch-dirs", s.handleListWatchDirs)
 	s.mux.HandleFunc("POST /api/watch-dirs", s.handleCreateWatchDir)
 	s.mux.HandleFunc("PUT /api/watch-dirs/", s.handleUpdateWatchDir)
@@ -333,9 +334,19 @@ func (s *Server) handleRenamePreviewStream(w http.ResponseWriter, r *http.Reques
 	flusher, _ := w.(http.Flusher)
 	encoder := json.NewEncoder(w)
 	count := 0
-	err := renamer.PreviewEach(r.Context(), s.snapshotConfig(), input, func(item renamer.PreviewItem) error {
+	total := 0
+	err := renamer.PreviewEachProgress(r.Context(), s.snapshotConfig(), input, func(value int) error {
+		total = value
+		if err := encoder.Encode(map[string]any{"type": "start", "count": 0, "total": total}); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}, func(item renamer.PreviewItem) error {
 		count++
-		if err := encoder.Encode(map[string]any{"type": "item", "item": item, "count": count}); err != nil {
+		if err := encoder.Encode(map[string]any{"type": "item", "item": item, "count": count, "total": total}); err != nil {
 			return err
 		}
 		if flusher != nil {
@@ -344,9 +355,9 @@ func (s *Server) handleRenamePreviewStream(w http.ResponseWriter, r *http.Reques
 		return nil
 	})
 	if err != nil {
-		_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "count": count})
+		_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "count": count, "total": total})
 	} else {
-		_ = encoder.Encode(map[string]any{"type": "done", "count": count})
+		_ = encoder.Encode(map[string]any{"type": "done", "count": count, "total": total})
 	}
 	if flusher != nil {
 		flusher.Flush()
@@ -541,6 +552,44 @@ func (s *Server) handleTMDBSearchTV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": results})
+}
+
+func (s *Server) handleTMDBEpisode(w http.ResponseWriter, r *http.Request) {
+	showID, err := strconv.Atoi(r.URL.Query().Get("showId"))
+	if err != nil || showID <= 0 {
+		writeError(w, http.StatusBadRequest, errors.New("valid showId is required"))
+		return
+	}
+	season, err := strconv.Atoi(r.URL.Query().Get("season"))
+	if err != nil || season < 0 {
+		writeError(w, http.StatusBadRequest, errors.New("valid season is required"))
+		return
+	}
+	episode, err := strconv.Atoi(r.URL.Query().Get("episode"))
+	if err != nil || episode < 0 {
+		writeError(w, http.StatusBadRequest, errors.New("valid episode is required"))
+		return
+	}
+	cfg := s.snapshotConfig()
+	if language := strings.TrimSpace(r.URL.Query().Get("language")); language != "" {
+		cfg.Scraping.Language = language
+	}
+	client, err := tmdb.NewClient(cfg.Scraping)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	detail, err := client.FindEpisodeByShowID(r.Context(), showID, season, episode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"showId": detail.ShowID, "episodeId": detail.EpisodeID, "showName": detail.ShowName,
+		"showOriginalName": detail.ShowOriginalName, "showFirstAirDate": detail.ShowFirstAirDate,
+		"season": season, "episode": episode, "title": detail.Title, "overview": detail.Overview,
+		"airDate": detail.AirDate, "voteAverage": detail.VoteAverage, "stillUrl": client.ImageURL(detail.StillPath),
+	})
 }
 
 func (s *Server) handleListWatchDirs(w http.ResponseWriter, r *http.Request) {

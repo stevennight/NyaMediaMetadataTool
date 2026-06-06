@@ -930,6 +930,24 @@ button:disabled {
   padding-left: 44px;
 }
 
+.tmdb-detail-link {
+  justify-self: start;
+  margin-left: 44px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tmdb-detail-link:hover {
+  color: #1d4ed8;
+}
+
 .rename-episode-edit {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1458,6 +1476,48 @@ button:disabled {
 .tmdb-match-empty strong {
   color: #44403c;
   font-size: 18px;
+}
+
+.tmdb-episode-detail-modal {
+  width: min(900px, 100%);
+}
+
+.tmdb-episode-detail-modal .card-header small {
+  display: block;
+  margin-top: 4px;
+  color: #78716c;
+}
+
+.tmdb-episode-detail-content {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(0, 1.1fr);
+  gap: 20px;
+}
+
+.tmdb-episode-detail-content img {
+  width: 100%;
+  border-radius: 18px;
+  object-fit: cover;
+}
+
+.tmdb-episode-detail-copy h3 {
+  margin: 12px 0 4px;
+  font-size: 24px;
+}
+
+.tmdb-episode-detail-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 18px;
+  color: #78716c;
+  font-size: 13px;
+}
+
+.tmdb-episode-overview {
+  margin: 18px 0 0;
+  line-height: 1.7;
+  white-space: pre-wrap;
 }
 
 .batch-episode-form {
@@ -2066,6 +2126,11 @@ h3 {
   }
 
   .tmdb-match-result {
+    grid-template-columns: 1fr;
+  }
+
+  .tmdb-episode-detail-content,
+  .tmdb-episode-detail-meta {
     grid-template-columns: 1fr;
   }
 

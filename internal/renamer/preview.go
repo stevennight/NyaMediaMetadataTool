@@ -179,6 +179,10 @@ func Preview(ctx context.Context, cfg config.Config, input PreviewRequest) (Prev
 }
 
 func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, emit func(PreviewItem) error) error {
+	return PreviewEachProgress(ctx, cfg, input, nil, emit)
+}
+
+func PreviewEachProgress(ctx context.Context, cfg config.Config, input PreviewRequest, start func(int) error, emit func(PreviewItem) error) error {
 	root := strings.TrimSpace(input.Path)
 	if root == "" {
 		return errors.New("path is required")
@@ -247,6 +251,11 @@ func PreviewEach(ctx context.Context, cfg config.Config, input PreviewRequest, e
 		}
 		return left < right
 	})
+	if start != nil {
+		if err := start(len(files)); err != nil {
+			return err
+		}
+	}
 
 	type previewJob struct {
 		index int

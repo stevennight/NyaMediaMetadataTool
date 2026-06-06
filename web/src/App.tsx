@@ -51,7 +51,19 @@ type AppConfig = {
   watchDirs: WatchDir[];
 };
 
-type WatchDir = { id: number; path: string; recursive: boolean; enabled: boolean; watchEnabled: boolean; scanOnStart: boolean };
+type OutputProcessingConfig = {
+  strategy: RescanStrategy;
+  bifWidth: number;
+  bifInterval: number;
+  bifHwAccel: string;
+  enableSubtitles: boolean;
+  enableMediaInfo: boolean;
+  enableNfo: boolean;
+  enableBif: boolean;
+  enableImageTakeover: boolean;
+};
+
+type WatchDir = { id: number; path: string; recursive: boolean; enabled: boolean; watchEnabled: boolean; scanOnStart: boolean; useGlobalProcessing: boolean; processing: OutputProcessingConfig };
 
 type ToolStatus = {
   name: string;
@@ -225,6 +237,35 @@ type RegionOption = { code: string; name: string };
 type SelectOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'rename' | 'audit';
 type SettingsTab = 'basic' | 'processing' | 'scraping';
+
+function defaultOutputProcessing(): OutputProcessingConfig {
+  return {
+    strategy: 'missing',
+    bifWidth: 320,
+    bifInterval: 10,
+    bifHwAccel: 'cpu',
+    enableSubtitles: true,
+    enableMediaInfo: true,
+    enableNfo: true,
+    enableBif: true,
+    enableImageTakeover: false
+  };
+}
+
+function outputProcessingFromConfig(config: AppConfig | null): OutputProcessingConfig {
+  if (!config) return defaultOutputProcessing();
+  return {
+    strategy: config.processing.strategy || 'missing',
+    bifWidth: config.processing.bifWidth,
+    bifInterval: config.processing.bifInterval,
+    bifHwAccel: config.processing.bifHwAccel || 'cpu',
+    enableSubtitles: config.processing.enableSubtitles,
+    enableMediaInfo: config.processing.enableMediaInfo,
+    enableNfo: config.processing.enableNfo,
+    enableBif: config.processing.enableBif,
+    enableImageTakeover: config.processing.enableImageTakeover
+  };
+}
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
 type AuditTab = 'series' | 'files';
 
@@ -538,10 +579,14 @@ export function App() {
   const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; onSelect: (path: string) => void } | null>(null);
   const [newWatchDir, setNewWatchDir] = useState('');
   const [newWatchDirWatchEnabled, setNewWatchDirWatchEnabled] = useState(true);
+  const [newWatchDirUseGlobalProcessing, setNewWatchDirUseGlobalProcessing] = useState(true);
+  const [newWatchDirProcessing, setNewWatchDirProcessing] = useState<OutputProcessingConfig>(() => defaultOutputProcessing());
   const [addWatchDirOpen, setAddWatchDirOpen] = useState(false);
   const [editingWatchDir, setEditingWatchDir] = useState<WatchDir | null>(null);
   const [editingWatchDirPath, setEditingWatchDirPath] = useState('');
   const [editingWatchDirWatchEnabled, setEditingWatchDirWatchEnabled] = useState(true);
+  const [editingWatchDirUseGlobalProcessing, setEditingWatchDirUseGlobalProcessing] = useState(true);
+  const [editingWatchDirProcessing, setEditingWatchDirProcessing] = useState<OutputProcessingConfig>(() => defaultOutputProcessing());
   const [rescanOpen, setRescanOpen] = useState(false);
   const [rescanScope, setRescanScope] = useState<RescanScope>('all');
   const [rescanTarget, setRescanTarget] = useState('');
@@ -1129,7 +1174,7 @@ export function App() {
     const response = await fetch('/api/watch-dirs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, watchEnabled: newWatchDirWatchEnabled, scanOnStart: false })
+      body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, watchEnabled: newWatchDirWatchEnabled, scanOnStart: false, useGlobalProcessing: newWatchDirUseGlobalProcessing, processing: newWatchDirProcessing })
     });
     if (!response.ok) {
       setError(await response.text());
@@ -1139,6 +1184,8 @@ export function App() {
     setWatchDirs((items) => [...items, created]);
     setNewWatchDir('');
     setNewWatchDirWatchEnabled(true);
+    setNewWatchDirUseGlobalProcessing(true);
+    setNewWatchDirProcessing(outputProcessingFromConfig(config));
     setAddWatchDirOpen(false);
     setNotice('媒体目录已添加，自动监听配置已热更新。');
   }
@@ -1147,6 +1194,8 @@ export function App() {
     setEditingWatchDir(dir);
     setEditingWatchDirPath(dir.path);
     setEditingWatchDirWatchEnabled(dir.watchEnabled);
+    setEditingWatchDirUseGlobalProcessing(dir.useGlobalProcessing);
+    setEditingWatchDirProcessing(dir.processing?.strategy ? dir.processing : outputProcessingFromConfig(config));
   }
 
   async function submitEditWatchDir() {
@@ -1154,7 +1203,9 @@ export function App() {
     const updated = await updateWatchDir(editingWatchDir, {
       path: editingWatchDirPath.trim(),
       watchEnabled: editingWatchDirWatchEnabled,
-      scanOnStart: false
+      scanOnStart: false,
+      useGlobalProcessing: editingWatchDirUseGlobalProcessing,
+      processing: editingWatchDirProcessing
     });
     if (!updated) return;
     setEditingWatchDir(null);
@@ -1656,12 +1707,12 @@ export function App() {
 
         {activePage === 'watchDirs' && (
         <section className="page-grid">
-          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary" onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '补扫中' : '补扫'}</button><button onClick={() => setAddWatchDirOpen(true)}>添加媒体目录</button></div>}>
+          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary" onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '补扫中' : '补扫'}</button><button onClick={() => { setNewWatchDirProcessing(outputProcessingFromConfig(config)); setAddWatchDirOpen(true); }}>添加媒体目录</button></div>}>
             {watchDirs.length ? watchDirs.map((dir) => (
               <div className="dir-item" key={dir.id}>
                 <div>
                   <strong>{dir.path}</strong>
-                  <small>{dir.watchEnabled ? '自动监听' : '不监听'} · {dir.recursive ? '递归' : '当前层'}</small>
+                  <small>{dir.watchEnabled ? '自动监听' : '不监听'} · {dir.recursive ? '递归' : '当前层'} · {dir.useGlobalProcessing ? '跟随全局处理设置' : '独立处理设置'}</small>
                 </div>
                 <div className="inline-actions">
                   <button className="secondary" onClick={() => openEditWatchDir(dir)}>编辑</button>
@@ -2061,8 +2112,8 @@ export function App() {
         </section>
       )}
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onBrowsePath={() => setDirectoryPicker({ title: '选择补扫目录', value: rescanTarget, onSelect: setRescanTarget })} onSubmit={() => void rescan()} />}
-      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
-      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
+      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
+      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {renameHistoryOpen && <RenameHistoryModal history={renameHistory} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onOpenDetails={setSelectedHistoryBatch} onUndo={(id) => void undoRenameBatch(id)} />}
       {selectedHistoryBatch && <RenameHistoryDetailsModal batch={selectedHistoryBatch} undoCheck={undoCheckResult?.batch?.id === selectedHistoryBatch.id ? undoCheckResult : null} timezone={displayTimezone} onClose={() => setSelectedHistoryBatch(null)} />}
@@ -2270,8 +2321,12 @@ function WatchDirModal(props: {
   submitLabel: string;
   path: string;
   watchEnabled: boolean;
+  useGlobalProcessing: boolean;
+  processing: OutputProcessingConfig;
   onPathChange: (value: string) => void;
   onWatchEnabledChange: (value: boolean) => void;
+  onUseGlobalProcessingChange: (value: boolean) => void;
+  onProcessingChange: (patch: Partial<OutputProcessingConfig>) => void;
   onClose: () => void;
   onBrowsePath: () => void;
   onSubmit: () => void;
@@ -2289,6 +2344,20 @@ function WatchDirModal(props: {
             <div className="path-input"><input value={props.path} onChange={(event) => props.onPathChange(event.target.value)} placeholder="D:\\Media\\Anime" autoFocus /><button type="button" onClick={props.onBrowsePath}>选择</button></div>
           </label>
           <Toggle label="自动监听" checked={props.watchEnabled} onChange={props.onWatchEnabledChange} />
+          <Toggle label="跟随全局处理设置" checked={props.useGlobalProcessing} onChange={props.onUseGlobalProcessingChange} />
+          {!props.useGlobalProcessing && (
+            <>
+              <SelectField label="处理策略" value={props.processing.strategy} options={[{ code: 'missing', name: '只补缺失' }, { code: 'force', name: '强制重建' }]} onChange={(value) => props.onProcessingChange({ strategy: value as RescanStrategy })} />
+              <Toggle label="字幕提取" checked={props.processing.enableSubtitles} onChange={(value) => props.onProcessingChange({ enableSubtitles: value })} />
+              <Toggle label="MediaInfo" checked={props.processing.enableMediaInfo} onChange={(value) => props.onProcessingChange({ enableMediaInfo: value })} />
+              <Toggle label="NFO" checked={props.processing.enableNfo} onChange={(value) => props.onProcessingChange({ enableNfo: value })} />
+              <Toggle label="BIF" checked={props.processing.enableBif} onChange={(value) => props.onProcessingChange({ enableBif: value })} />
+              <label>BIF 宽度<input type="number" value={props.processing.bifWidth} onChange={(event) => props.onProcessingChange({ bifWidth: Number(event.target.value) })} /></label>
+              <label>BIF 间隔秒<input type="number" value={props.processing.bifInterval} onChange={(event) => props.onProcessingChange({ bifInterval: Number(event.target.value) })} /></label>
+              <SelectField label="BIF 加速" value={props.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => props.onProcessingChange({ bifHwAccel: value })} />
+              <Toggle label="接管剧集/季度图片" checked={props.processing.enableImageTakeover} onChange={(value) => props.onProcessingChange({ enableImageTakeover: value })} />
+            </>
+          )}
         </div>
         <p className="muted">保存后默认递归处理该目录。自动监听会在保存后立即热更新，无需重启服务。</p>
         <div className="inline-actions modal-actions">

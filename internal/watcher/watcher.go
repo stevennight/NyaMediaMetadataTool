@@ -300,7 +300,11 @@ func (w *Watcher) scheduleFile(ctx context.Context, path string) {
 		w.logger.Warn("watch upsert media file failed", "path", path, "error", err)
 		return
 	}
-	options := bootstrap.ScanOptionsFromStrategy(w.cfg.Processing.Strategy)
+	strategy := w.cfg.Processing.Strategy
+	if dir, findErr := w.store.FindWatchDirForPath(ctx, path); findErr == nil && !dir.UseGlobalProcessing {
+		strategy = dir.Processing.Strategy
+	}
+	options := bootstrap.ScanOptionsFromStrategy(strategy)
 	if err := w.store.EnqueueMediaTaskWithOptions(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly); err != nil {
 		w.logger.Warn("watch enqueue media task failed", "path", path, "error", err)
 	}

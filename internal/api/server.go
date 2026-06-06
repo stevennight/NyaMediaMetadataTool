@@ -562,6 +562,7 @@ func (s *Server) handleCreateWatchDir(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
 		return
 	}
+	normalizeWatchDirProcessing(&input, s.snapshotConfig().Processing.OutputConfig())
 	created, err := s.store.CreateWatchDir(r.Context(), input)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -590,6 +591,7 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
 		return
 	}
+	normalizeWatchDirProcessing(&input, s.snapshotConfig().Processing.OutputConfig())
 	updated, err := s.store.UpdateWatchDir(r.Context(), input)
 	if err != nil {
 		if errors.Is(err, store.ErrWatchDirNotFound) {
@@ -604,6 +606,26 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func normalizeWatchDirProcessing(dir *store.WatchDir, global config.OutputProcessingConfig) {
+	if strings.TrimSpace(dir.Processing.Strategy) == "" {
+		dir.Processing = global
+		dir.UseGlobalProcessing = true
+		return
+	}
+	if dir.Processing.Strategy != config.ProcessingStrategyMissing && dir.Processing.Strategy != config.ProcessingStrategyForce {
+		dir.Processing.Strategy = global.Strategy
+	}
+	if dir.Processing.BIFWidth <= 0 {
+		dir.Processing.BIFWidth = global.BIFWidth
+	}
+	if dir.Processing.BIFInterval <= 0 {
+		dir.Processing.BIFInterval = global.BIFInterval
+	}
+	if strings.TrimSpace(dir.Processing.BIFHWAccel) == "" {
+		dir.Processing.BIFHWAccel = global.BIFHWAccel
+	}
 }
 
 func (s *Server) handleDeleteWatchDir(w http.ResponseWriter, r *http.Request) {

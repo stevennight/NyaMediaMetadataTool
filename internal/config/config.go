@@ -58,6 +58,44 @@ type ProcessingConfig struct {
 	EnableImageTakeover bool          `json:"enableImageTakeover" yaml:"enableImageTakeover"`
 }
 
+type OutputProcessingConfig struct {
+	Strategy            string `json:"strategy"`
+	BIFWidth            int    `json:"bifWidth"`
+	BIFInterval         int    `json:"bifInterval"`
+	BIFHWAccel          string `json:"bifHwAccel"`
+	EnableSubtitles     bool   `json:"enableSubtitles"`
+	EnableMediaInfo     bool   `json:"enableMediaInfo"`
+	EnableNFO           bool   `json:"enableNfo"`
+	EnableBIF           bool   `json:"enableBif"`
+	EnableImageTakeover bool   `json:"enableImageTakeover"`
+}
+
+func (c ProcessingConfig) OutputConfig() OutputProcessingConfig {
+	return OutputProcessingConfig{
+		Strategy:            c.Strategy,
+		BIFWidth:            c.BIFWidth,
+		BIFInterval:         c.BIFInterval,
+		BIFHWAccel:          c.BIFHWAccel,
+		EnableSubtitles:     c.EnableSubtitles,
+		EnableMediaInfo:     c.EnableMediaInfo,
+		EnableNFO:           c.EnableNFO,
+		EnableBIF:           c.EnableBIF,
+		EnableImageTakeover: c.EnableImageTakeover,
+	}
+}
+
+func (c *ProcessingConfig) ApplyOutputConfig(output OutputProcessingConfig) {
+	c.Strategy = output.Strategy
+	c.BIFWidth = output.BIFWidth
+	c.BIFInterval = output.BIFInterval
+	c.BIFHWAccel = output.BIFHWAccel
+	c.EnableSubtitles = output.EnableSubtitles
+	c.EnableMediaInfo = output.EnableMediaInfo
+	c.EnableNFO = output.EnableNFO
+	c.EnableBIF = output.EnableBIF
+	c.EnableImageTakeover = output.EnableImageTakeover
+}
+
 type RenamingConfig struct {
 	Concurrency int `json:"concurrency" yaml:"concurrency"`
 }

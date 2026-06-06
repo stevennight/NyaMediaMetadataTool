@@ -72,7 +72,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureEmbyAPIKeyNoteColumn(ctx); err != nil {
 		return err
 	}
-	return s.ensureWatchDirSplitColumns(ctx)
+	if err := s.ensureWatchDirSplitColumns(ctx); err != nil {
+		return err
+	}
+	return s.ensureWatchDirProcessingColumns(ctx)
 }
 
 func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
@@ -115,6 +118,13 @@ func (s *Store) ensureWatchDirSplitColumns(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) ensureWatchDirProcessingColumns(ctx context.Context) error {
+	if err := s.ensureColumn(ctx, "watch_dirs", "use_global_processing", `ALTER TABLE watch_dirs ADD COLUMN use_global_processing INTEGER NOT NULL DEFAULT 1`); err != nil {
+		return err
+	}
+	return s.ensureColumn(ctx, "watch_dirs", "processing_config", `ALTER TABLE watch_dirs ADD COLUMN processing_config TEXT NOT NULL DEFAULT ''`)
 }
 
 func (s *Store) ensureTaskColumn(ctx context.Context, column string, statement string) error {
@@ -171,6 +181,8 @@ CREATE TABLE IF NOT EXISTS watch_dirs (
   enabled INTEGER NOT NULL DEFAULT 1,
   watch_enabled INTEGER NOT NULL DEFAULT 1,
   scan_on_start INTEGER NOT NULL DEFAULT 0,
+  use_global_processing INTEGER NOT NULL DEFAULT 1,
+  processing_config TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

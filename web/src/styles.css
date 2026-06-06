@@ -324,8 +324,32 @@ h1 {
 }
 
 .task-page-grid {
+  height: calc(100vh - 48px);
   grid-template-columns: minmax(0, 1fr);
-  align-items: start;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  min-height: 0;
+}
+
+.task-page-grid > .card {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.task-page-grid > .card > .card-header,
+.task-page-grid > .card > .task-status-tabs,
+.task-page-grid > .card > .task-filters,
+.task-page-grid > .card > .pagination-bar {
+  flex: 0 0 auto;
+}
+
+.task-page-grid > .card > .task-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 .card {
@@ -1100,6 +1124,10 @@ button:disabled {
   padding: 24px;
 }
 
+.recent-artifacts-modal {
+  width: min(1100px, 100%);
+}
+
 .alert-backdrop {
   z-index: 40;
 }
@@ -1738,6 +1766,19 @@ h3 {
 
   .settings-grid {
     height: auto;
+  }
+
+  .task-page-grid {
+    height: auto;
+  }
+
+  .task-page-grid > .card {
+    height: auto;
+    overflow: visible;
+  }
+
+  .task-page-grid > .card > .task-table-wrap {
+    overflow-x: auto;
   }
 
   .settings-grid > .card > .settings-form {

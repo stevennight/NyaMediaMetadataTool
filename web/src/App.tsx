@@ -572,6 +572,7 @@ export function App() {
   const [fileAuditReport, setFileAuditReport] = useState<FileAuditReport | null>(null);
   const [auditingFiles, setAuditingFiles] = useState(false);
   const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null);
+  const [recentArtifactsOpen, setRecentArtifactsOpen] = useState(false);
   const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([]);
   const [checkingTools, setCheckingTools] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
@@ -1997,7 +1998,7 @@ export function App() {
 
         {activePage === 'tasks' && (
         <section className="page-grid task-page-grid">
-          <Card title="任务列表" action={<div className="inline-actions"><button className="secondary" onClick={() => void retrySelectedTasks()} disabled={retryingTasks || selectedTaskIds.length === 0}>{retryingTasks ? '重试中' : `重试选中${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="secondary" onClick={() => void ignoreSelectedTasks()} disabled={ignoringTasks || selectedTaskIds.length === 0}>{ignoringTasks ? '忽略中' : `忽略失败${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button></div>}>
+          <Card title="任务列表" action={<div className="inline-actions"><button className="secondary" type="button" onClick={() => setRecentArtifactsOpen(true)}>最近产物</button><button className="secondary" onClick={() => void retrySelectedTasks()} disabled={retryingTasks || selectedTaskIds.length === 0}>{retryingTasks ? '重试中' : `重试选中${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="secondary" onClick={() => void ignoreSelectedTasks()} disabled={ignoringTasks || selectedTaskIds.length === 0}>{ignoringTasks ? '忽略中' : `忽略失败${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button></div>}>
             <div className="task-status-tabs" role="tablist" aria-label="任务状态过滤">
               {taskStatusFilters.map((status) => (
                 <button className={taskStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} role="tab" aria-selected={taskStatusFilter === status.value} onClick={() => selectTaskStatusFilter(status.value)}>
@@ -2055,9 +2056,7 @@ export function App() {
             </div>
           </Card>
 
-          <Card title="最近产物">
-            {artifacts.length ? artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} timezone={displayTimezone} />) : <p className="muted">暂无产物。</p>}
-          </Card>
+          {recentArtifactsOpen && <RecentArtifactsModal artifacts={artifacts} timezone={displayTimezone} onClose={() => setRecentArtifactsOpen(false)} />}
           {selectedTask && <TaskDetailModal detail={selectedTask} timezone={displayTimezone} onClose={() => setSelectedTask(null)} />}
         </section>
       )}
@@ -2149,6 +2148,20 @@ function DashboardFeature(props: { label: string; enabled?: boolean }) {
 
 function ArtifactRow(props: { artifact: Artifact; timezone: string }) {
   return <Row label={`${props.artifact.type} · ${formatStoredTime(props.artifact.createdAt, props.timezone)}`} value={props.artifact.path} />;
+}
+
+function RecentArtifactsModal(props: { artifacts: Artifact[]; timezone: string; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card recent-artifacts-modal" role="dialog" aria-modal="true" aria-labelledby="recent-artifacts-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <h2 id="recent-artifacts-title">最近产物</h2>
+          <IconCloseButton onClick={props.onClose} />
+        </div>
+        {props.artifacts.length ? props.artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} timezone={props.timezone} />) : <p className="muted">暂无产物。</p>}
+      </section>
+    </div>
+  );
 }
 
 function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose: () => void }) {

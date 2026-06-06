@@ -674,7 +674,7 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, err)
 				return
 			}
-			if !pathWithinRoot(input.Path, dir.Path) {
+			if containsParentTraversal(input.Path) || !pathWithinRoot(input.Path, dir.Path) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be inside the selected media directory"})
 				return
 			}
@@ -732,11 +732,37 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 }
 
 func pathWithinRoot(path string, root string) bool {
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil || !pathWithinCleanRoot(absolutePath, absoluteRoot) {
+		return false
+	}
+	resolvedPath, err := filepath.EvalSymlinks(absolutePath)
+	if err != nil {
+		return false
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	return err == nil && pathWithinCleanRoot(resolvedPath, resolvedRoot)
+}
+
+func pathWithinCleanRoot(path string, root string) bool {
 	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
 	if err != nil {
 		return false
 	}
 	return relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
+func containsParentTraversal(path string) bool {
+	for _, part := range strings.Split(strings.ReplaceAll(path, `\`, "/"), "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func scanOptionsFromStrategy(strategy string) bootstrap.ScanOptions {

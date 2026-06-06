@@ -22,6 +22,16 @@ type directoryListResponse struct {
 
 func (s *Server) handleListDirectories(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	root := strings.TrimSpace(r.URL.Query().Get("root"))
+	if root != "" {
+		if path == "" {
+			path = root
+		}
+		if containsParentTraversal(path) || !pathWithinRoot(path, root) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be inside the allowed root directory"})
+			return
+		}
+	}
 	if path == "" {
 		writeJSON(w, http.StatusOK, directoryListResponse{Entries: rootDirectories()})
 		return
@@ -46,7 +56,7 @@ func (s *Server) handleListDirectories(w http.ResponseWriter, r *http.Request) {
 	})
 
 	parent := filepath.Dir(cleaned)
-	if parent == cleaned {
+	if parent == cleaned || (root != "" && !pathWithinRoot(parent, root)) {
 		parent = ""
 	}
 	writeJSON(w, http.StatusOK, directoryListResponse{Path: cleaned, Parent: parent, Entries: dirs})

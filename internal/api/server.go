@@ -584,9 +584,16 @@ func (s *Server) handleTMDBEpisode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	show, err := client.FindShowByID(r.Context(), showID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"showId": detail.ShowID, "episodeId": detail.EpisodeID, "showName": detail.ShowName,
 		"showOriginalName": detail.ShowOriginalName, "showFirstAirDate": detail.ShowFirstAirDate,
+		"showOverview": show.Overview, "showStatus": show.Status, "showVoteAverage": show.VoteAverage,
+		"showGenres": show.Genres, "showPosterUrl": client.ImageURL(show.PosterPath),
 		"season": season, "episode": episode, "title": detail.Title, "overview": detail.Overview,
 		"airDate": detail.AirDate, "voteAverage": detail.VoteAverage, "stillUrl": client.ImageURL(detail.StillPath),
 	})

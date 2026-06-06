@@ -104,3 +104,31 @@ func TestSearchTVRetriesServerError(t *testing.T) {
 		t.Fatalf("expected 2 attempts, got %d", got)
 	}
 }
+
+func TestSuccessfulResponsesAreSharedAcrossClients(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		_, _ = w.Write([]byte(`{"results":[{"id":3,"name":"Cached Show"}]}`))
+	}))
+	defer server.Close()
+
+	cfg := config.ScrapingConfig{EnableTMDB: true, TMDBAPIKey: "test", TMDBBaseURL: server.URL, Language: "cache-test"}
+	first, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.SearchTV(context.Background(), "unique cache query"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.SearchTV(context.Background(), "unique cache query"); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected cached response across clients, got %d calls", got)
+	}
+}

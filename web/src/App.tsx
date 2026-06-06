@@ -157,6 +157,11 @@ type TmdbEpisodeDetail = {
   showName: string;
   showOriginalName: string;
   showFirstAirDate: string;
+  showOverview: string;
+  showStatus: string;
+  showVoteAverage: number;
+  showGenres: string[];
+  showPosterUrl: string;
   season: number;
   episode: number;
   title: string;
@@ -2574,17 +2579,32 @@ function TmdbEpisodeDetailModal(props: { detail: TmdbEpisodeDetail; language: st
           </div>
           <IconCloseButton onClick={props.onClose} />
         </div>
+        <div className="tmdb-show-summary">
+          {detail.showPosterUrl ? <img src={detail.showPosterUrl} alt={detail.showName || 'TMDB 剧集海报'} /> : null}
+          <div>
+            <h3>{detail.showName || detail.showOriginalName}</h3>
+            {detail.showOriginalName && detail.showOriginalName !== detail.showName ? <p className="muted">{detail.showOriginalName}</p> : null}
+            <div className="tmdb-episode-detail-meta">
+              <span>首播年份：{detail.showFirstAirDate?.slice(0, 4) || '-'}</span>
+              <span>状态：{detail.showStatus || '-'}</span>
+              <span>剧集评分：{detail.showVoteAverage ? detail.showVoteAverage.toFixed(1) : '-'}</span>
+              <span>类型：{detail.showGenres?.join(' / ') || '-'}</span>
+            </div>
+            <p className="tmdb-episode-overview">{detail.showOverview || '暂无剧集简介。'}</p>
+          </div>
+        </div>
+        <div className="tmdb-current-episode-heading">
+          <span>当前单集</span>
+        </div>
         <div className="tmdb-episode-detail-content">
           {detail.stillUrl ? <img src={detail.stillUrl} alt={detail.title || 'TMDB 单集剧照'} /> : null}
           <div className="tmdb-episode-detail-copy">
             <span className="pill ok">S{String(detail.season).padStart(2, '0')}E{String(detail.episode).padStart(2, '0')}</span>
             <h3>{detail.title || '暂无单集标题'}</h3>
-            {detail.showOriginalName && detail.showOriginalName !== detail.showName ? <p className="muted">{detail.showOriginalName}</p> : null}
             <div className="tmdb-episode-detail-meta">
               <span>单集 ID：{detail.episodeId || '-'}</span>
               <span>播出日期：{detail.airDate || '-'}</span>
-              <span>首播年份：{detail.showFirstAirDate?.slice(0, 4) || '-'}</span>
-              <span>评分：{detail.voteAverage ? detail.voteAverage.toFixed(1) : '-'}</span>
+              <span>单集评分：{detail.voteAverage ? detail.voteAverage.toFixed(1) : '-'}</span>
             </div>
             <p className="tmdb-episode-overview">{detail.overview || '暂无简介。'}</p>
           </div>

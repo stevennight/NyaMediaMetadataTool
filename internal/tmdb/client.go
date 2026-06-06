@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"NyaMediaMetadataTool/internal/config"
@@ -20,6 +21,17 @@ var ErrNotFound = errors.New("tmdb data not found")
 
 const tmdbRequestAttempts = 3
 const officialTMDBImageURL = "https://image.tmdb.org/t/p/original"
+const tmdbResponseCacheTTL = 20 * time.Minute
+
+type responseCacheEntry struct {
+	data      []byte
+	expiresAt time.Time
+}
+
+var tmdbResponseCache = struct {
+	sync.RWMutex
+	items map[string]responseCacheEntry
+}{items: map[string]responseCacheEntry{}}
 
 type Client struct {
 	baseURL          string
@@ -59,6 +71,7 @@ type Show struct {
 	ID               int
 	TVDBID           int
 	Name             string
+	OriginalName     string
 	OriginalLanguage string
 	Overview         string
 	FirstAirDate     string
@@ -134,6 +147,7 @@ type showResponse struct {
 	FirstAirDate     string        `json:"first_air_date"`
 	Status           string        `json:"status"`
 	VoteAverage      float64       `json:"vote_average"`
+	PosterPath       string        `json:"poster_path"`
 	Genres           []genreResult `json:"genres"`
 }
 
@@ -371,6 +385,27 @@ func (c *Client) FindEpisodeByShowID(ctx context.Context, showID int, season int
 	}, nil
 }
 
+func (c *Client) FindShowByID(ctx context.Context, showID int) (Show, error) {
+	if showID == 0 {
+		return Show{}, errors.New("tmdb show id is empty")
+	}
+	detail, err := c.getShowWithFallback(ctx, showID)
+	if err != nil {
+		return Show{}, err
+	}
+	genres := make([]string, 0, len(detail.Genres))
+	for _, genre := range detail.Genres {
+		if strings.TrimSpace(genre.Name) != "" {
+			genres = append(genres, strings.TrimSpace(genre.Name))
+		}
+	}
+	return Show{
+		ID: detail.ID, Name: firstNonEmpty(detail.Name, detail.OriginalName), OriginalName: detail.OriginalName,
+		OriginalLanguage: detail.OriginalLanguage, Overview: detail.Overview, FirstAirDate: detail.FirstAirDate,
+		Status: detail.Status, VoteAverage: detail.VoteAverage, Genres: genres, PosterPath: detail.PosterPath,
+	}, nil
+}
+
 func (c *Client) GetLocalizedEpisodeText(ctx context.Context, showID int, season int, episode int, language string) (LocalizedEpisodeText, error) {
 	showDetail, err := c.getShow(ctx, language, showID)
 	if err != nil {
@@ -514,6 +549,7 @@ func (c *Client) showAndSeasonFromDetails(ctx context.Context, showID int, fallb
 	return Show{
 			ID:               showDetail.ID,
 			Name:             firstNonEmpty(showDetail.Name, showDetail.OriginalName, fallbackName),
+			OriginalName:     showDetail.OriginalName,
 			OriginalLanguage: showDetail.OriginalLanguage,
 			Overview:         showDetail.Overview,
 			FirstAirDate:     firstNonEmpty(showDetail.FirstAirDate, fallbackFirstAirDate),
@@ -796,9 +832,14 @@ func (c *Client) get(ctx context.Context, language string, path string, query ur
 	if query == nil {
 		query = url.Values{}
 	}
+	query = cloneValues(query)
 	query.Set("language", language)
 	if c.region != "" {
 		query.Set("region", c.region)
+	}
+	cacheKey := c.baseURL + path + "?" + query.Encode()
+	if data, ok := cachedTMDBResponse(cacheKey); ok {
+		return json.Unmarshal(data, target)
 	}
 	if c.token == "" && c.apiKey != "" {
 		query.Set("api_key", c.apiKey)
@@ -846,9 +887,15 @@ func (c *Client) get(ctx context.Context, language string, path string, query ur
 			return lastErr
 		}
 
-		err = json.NewDecoder(resp.Body).Decode(target)
+		data, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		if readErr == nil {
+			err = json.Unmarshal(data, target)
+		} else {
+			err = readErr
+		}
 		if err == nil {
+			cacheTMDBResponse(cacheKey, data)
 			return nil
 		}
 		lastErr = fmt.Errorf("tmdb decode %s failed: %w", path, err)
@@ -860,12 +907,41 @@ func (c *Client) get(ctx context.Context, language string, path string, query ur
 	return lastErr
 }
 
+func cloneValues(input url.Values) url.Values {
+	result := make(url.Values, len(input))
+	for key, values := range input {
+		result[key] = append([]string(nil), values...)
+	}
+	return result
+}
+
+func cachedTMDBResponse(key string) ([]byte, bool) {
+	tmdbResponseCache.RLock()
+	entry, ok := tmdbResponseCache.items[key]
+	tmdbResponseCache.RUnlock()
+	if !ok || time.Now().After(entry.expiresAt) {
+		if ok {
+			tmdbResponseCache.Lock()
+			delete(tmdbResponseCache.items, key)
+			tmdbResponseCache.Unlock()
+		}
+		return nil, false
+	}
+	return append([]byte(nil), entry.data...), true
+}
+
+func cacheTMDBResponse(key string, data []byte) {
+	tmdbResponseCache.Lock()
+	tmdbResponseCache.items[key] = responseCacheEntry{data: append([]byte(nil), data...), expiresAt: time.Now().Add(tmdbResponseCacheTTL)}
+	tmdbResponseCache.Unlock()
+}
+
 func shouldRetryTMDBStatus(statusCode int) bool {
 	return statusCode == http.StatusTooManyRequests || statusCode >= 500
 }
 
 func shouldRetryTMDBDecode(err error) bool {
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(strings.ToLower(err.Error()), "unexpected end of json input")
 }
 
 func languageOrder(primary string, fallback []string) []string {
@@ -935,6 +1011,9 @@ func mergeShow(target *showResponse, source showResponse) {
 	}
 	if target.VoteAverage == 0 {
 		target.VoteAverage = source.VoteAverage
+	}
+	if target.PosterPath == "" {
+		target.PosterPath = source.PosterPath
 	}
 	if len(target.Genres) == 0 {
 		target.Genres = source.Genres

@@ -1721,7 +1721,7 @@ export function App() {
               <div className="dir-item" key={dir.id}>
                 <div>
                   <strong>{dir.path}</strong>
-                  <small>{dir.watchEnabled ? '自动监听' : '不监听'} · {dir.recursive ? '递归' : '当前层'} · {dir.useGlobalProcessing ? '跟随全局处理设置' : '独立处理设置'}</small>
+                  <small>{dir.watchEnabled ? '自动监听' : '不监听'} · {dir.useGlobalProcessing ? '跟随全局处理设置' : '独立处理设置'}</small>
                 </div>
                 <div className="inline-actions">
                   <button className="secondary" onClick={() => openEditWatchDir(dir)}>编辑</button>

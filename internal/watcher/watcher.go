@@ -12,6 +12,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"NyaMediaMetadataTool/internal/bootstrap"
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/store"
 )
@@ -299,7 +300,8 @@ func (w *Watcher) scheduleFile(ctx context.Context, path string) {
 		w.logger.Warn("watch upsert media file failed", "path", path, "error", err)
 		return
 	}
-	if err := w.store.EnqueueMediaTaskWithOverwrite(ctx, mediaFileID, w.cfg.Processing.OverwriteExisting); err != nil {
+	options := bootstrap.ScanOptionsFromStrategy(w.cfg.Processing.Strategy)
+	if err := w.store.EnqueueMediaTaskWithOptions(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly); err != nil {
 		w.logger.Warn("watch enqueue media task failed", "path", path, "error", err)
 	}
 }

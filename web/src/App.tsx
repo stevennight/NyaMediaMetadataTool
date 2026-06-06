@@ -21,7 +21,7 @@ type AppConfig = {
     bifWidth: number;
     bifInterval: number;
     bifHwAccel: string;
-    overwriteExisting: boolean;
+    strategy: RescanStrategy;
     enableSubtitles: boolean;
     enableMediaInfo: boolean;
     enableNfo: boolean;
@@ -1622,7 +1622,7 @@ export function App() {
                   <label className="extensions-field">扩展名<textarea value={extensionInput} onChange={(event) => updateConfig((draft) => { draft.processing.extensions = normalizeExtensions(event.target.value); })} placeholder={commonVideoExtensions.join('\n')} rows={8} /><small>每行一个后缀，或用逗号分隔，例如 `.mkv`、`.mp4`、`.rmvb`。</small></label>
                   <label>扫描处理并发<input type="number" min="1" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
                   <label>整理命名并发<input type="number" min="1" max="8" value={config.renaming?.concurrency ?? 3} onChange={(event) => updateConfig((draft) => { draft.renaming = { ...(draft.renaming ?? { concurrency: 3 }), concurrency: Number(event.target.value) }; })} /><small>用于生成预览、批量修正季集、批量应用剧集；设为 1 可降低 TMDB 风控风险。</small></label>
-                  <Toggle label="覆盖已有文件" checked={config.processing.overwriteExisting} onChange={(value) => updateConfig((draft) => { draft.processing.overwriteExisting = value; })} />
+                  <SelectField label="处理策略" value={config.processing.strategy || 'missing'} options={[{ code: 'missing', name: '只补缺失' }, { code: 'force', name: '强制重建' }]} onChange={(value) => updateConfig((draft) => { draft.processing.strategy = value as RescanStrategy; })} />
                   <Toggle label="字幕提取" checked={config.processing.enableSubtitles} onChange={(value) => updateConfig((draft) => { draft.processing.enableSubtitles = value; })} />
                   <Toggle label="MediaInfo" checked={config.processing.enableMediaInfo} onChange={(value) => updateConfig((draft) => { draft.processing.enableMediaInfo = value; })} />
                   <Toggle label="NFO" checked={config.processing.enableNfo} onChange={(value) => updateConfig((draft) => { draft.processing.enableNfo = value; })} />
@@ -2175,7 +2175,7 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
         </div>
         <Row label="任务" value={`${props.detail.task.type} #${props.detail.task.id}`} />
         {props.detail.task.mediaPath && <Row label="文件" value={props.detail.task.mediaPath} />}
-        <Row label="覆盖已有" value={props.detail.task.overwriteExisting ? '是' : '否'} />
+        <Row label="处理策略" value={props.detail.task.overwriteExisting ? '强制重建' : '只补缺失'} />
         <Row label="状态" value={props.detail.task.status} />
         <Row label="尝试次数" value={String(props.detail.task.attempts)} />
         <Row label="创建时间" value={formatStoredTime(props.detail.task.createdAt, props.timezone)} />

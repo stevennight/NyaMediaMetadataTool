@@ -25,11 +25,18 @@ type ScanOptions struct {
 
 func SyncAndScan(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger) error {
 	for _, dir := range cfg.WatchDirs {
-		if err := ScanWatchDir(ctx, cfg, st, logger, dir, ScanOptions{OverwriteExisting: cfg.Processing.OverwriteExisting}); err != nil {
+		if err := ScanWatchDir(ctx, cfg, st, logger, dir, ScanOptionsFromStrategy(cfg.Processing.Strategy)); err != nil {
 			logger.Warn("bootstrap scan failed", "path", dir.Path, "error", err)
 		}
 	}
 	return nil
+}
+
+func ScanOptionsFromStrategy(strategy string) ScanOptions {
+	if strings.TrimSpace(strategy) == config.ProcessingStrategyForce {
+		return ScanOptions{OverwriteExisting: true, Force: true}
+	}
+	return ScanOptions{MissingOnly: true}
 }
 
 func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, dir config.WatchDir, options ScanOptions) error {

@@ -304,3 +304,17 @@ func TestScanWatchDirAssignsOneScanRunToDirectoryTasks(t *testing.T) {
 		t.Fatal("expected overwrite strategy to be preserved on file tasks")
 	}
 }
+
+func TestScanOptionsFromStrategy(t *testing.T) {
+	t.Parallel()
+
+	missing := ScanOptionsFromStrategy(config.ProcessingStrategyMissing)
+	if missing.OverwriteExisting || !missing.MissingOnly || missing.Force {
+		t.Fatalf("unexpected missing strategy options: %+v", missing)
+	}
+
+	force := ScanOptionsFromStrategy(config.ProcessingStrategyForce)
+	if !force.OverwriteExisting || !force.Force || force.MissingOnly {
+		t.Fatalf("unexpected force strategy options: %+v", force)
+	}
+}

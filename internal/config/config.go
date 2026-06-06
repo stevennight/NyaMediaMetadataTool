@@ -4,9 +4,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	ProcessingStrategyMissing = "missing"
+	ProcessingStrategyForce   = "force"
 )
 
 type Config struct {
@@ -43,7 +49,8 @@ type ProcessingConfig struct {
 	BIFWidth            int           `json:"bifWidth" yaml:"bifWidth"`
 	BIFInterval         int           `json:"bifInterval" yaml:"bifInterval"`
 	BIFHWAccel          string        `json:"bifHwAccel" yaml:"bifHwAccel"`
-	OverwriteExisting   bool          `json:"overwriteExisting" yaml:"overwriteExisting"`
+	Strategy            string        `json:"strategy" yaml:"strategy"`
+	OverwriteExisting   bool          `json:"-" yaml:"overwriteExisting,omitempty"`
 	EnableSubtitles     bool          `json:"enableSubtitles" yaml:"enableSubtitles"`
 	EnableMediaInfo     bool          `json:"enableMediaInfo" yaml:"enableMediaInfo"`
 	EnableNFO           bool          `json:"enableNfo" yaml:"enableNfo"`
@@ -92,6 +99,8 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 
+	// Leave strategy unset while decoding so legacy overwriteExisting can migrate.
+	cfg.Processing.Strategy = ""
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
@@ -151,6 +160,19 @@ func (c *Config) applyDefaults() {
 	if c.Processing.BIFHWAccel == "" {
 		c.Processing.BIFHWAccel = "cpu"
 	}
+	switch strings.TrimSpace(c.Processing.Strategy) {
+	case ProcessingStrategyForce:
+		c.Processing.Strategy = ProcessingStrategyForce
+	case ProcessingStrategyMissing:
+		c.Processing.Strategy = ProcessingStrategyMissing
+	default:
+		if c.Processing.OverwriteExisting {
+			c.Processing.Strategy = ProcessingStrategyForce
+		} else {
+			c.Processing.Strategy = ProcessingStrategyMissing
+		}
+	}
+	c.Processing.OverwriteExisting = false
 	if len(c.Processing.Extensions) == 0 {
 		c.Processing.Extensions = []string{".mkv", ".mp4", ".ts", ".m2ts", ".mts", ".mov", ".m4v", ".avi", ".wmv", ".flv", ".webm", ".rmvb", ".rm", ".mpg", ".mpeg", ".vob", ".asf"}
 	}

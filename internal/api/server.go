@@ -692,14 +692,7 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 }
 
 func scanOptionsFromStrategy(strategy string) bootstrap.ScanOptions {
-	switch strings.TrimSpace(strategy) {
-	case "force":
-		return bootstrap.ScanOptions{OverwriteExisting: true, Force: true}
-	case "missing", "":
-		return bootstrap.ScanOptions{MissingOnly: true}
-	default:
-		return bootstrap.ScanOptions{MissingOnly: true}
-	}
+	return bootstrap.ScanOptionsFromStrategy(strategy)
 }
 
 func (s *Server) reloadWatchDirs(ctx context.Context) error {

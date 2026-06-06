@@ -135,6 +135,7 @@ type RenamePreviewItem = {
   source: string;
   identitySource: string;
   metadataSource: string;
+  variables: Record<string, string>;
   status: string;
   message: string;
   conflict: boolean;
@@ -400,6 +401,7 @@ function previewWorkerCount(configured: number) {
 
 function renameIdentitySourceLabel(source: string) {
   if (source === 'nfo') return 'NFO';
+  if (source === 'pattern') return '自定义规则';
   if (source === 'filename') return '文件名 / 目录';
   return source || '-';
 }
@@ -425,6 +427,7 @@ async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (i
 type RenamePreferences = {
   path?: string;
   template?: string;
+  matchPattern?: string;
   language?: string;
   releaseGroup?: string;
   templateHistory?: string[];
@@ -578,6 +581,7 @@ export function App() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [renamePath, setRenamePath] = useState(() => readRenamePreferences().path ?? '');
   const [renameTemplate, setRenameTemplate] = useState(() => readRenamePreferences().template ?? defaultRenameTemplate);
+  const [renameMatchPattern, setRenameMatchPattern] = useState(() => readRenamePreferences().matchPattern ?? '');
   const [renameReleaseGroup, setRenameReleaseGroup] = useState(() => readRenamePreferences().releaseGroup ?? '');
   const [renameLanguage, setRenameLanguage] = useState(() => readRenamePreferences().language ?? 'zh-CN');
   const [renameLanguageInitialized, setRenameLanguageInitialized] = useState(() => Boolean(readRenamePreferences().language));
@@ -885,7 +889,7 @@ export function App() {
       const response = await fetch('/api/rename/preview/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, language: renameLanguage, releaseGroup: renameReleaseGroup.trim() })
+        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, matchPattern: renameMatchPattern, language: renameLanguage, releaseGroup: renameReleaseGroup.trim() })
       });
       if (!response.ok) {
         setError(await response.text());
@@ -926,6 +930,7 @@ export function App() {
     writeRenamePreferences({
       path: renamePath.trim(),
       template,
+      matchPattern: renameMatchPattern.trim(),
       language: renameLanguage,
       releaseGroup: renameReleaseGroup.trim(),
       templateHistory: nextHistory
@@ -1014,6 +1019,7 @@ export function App() {
       body: JSON.stringify({
         path: item.path,
         template: renameTemplate,
+        matchPattern: renameMatchPattern,
         language: renameLanguage,
         show: options.show ?? item.show,
         title: item.title,
@@ -2188,7 +2194,7 @@ export function App() {
       {tmdbEpisodeDetail && <TmdbEpisodeDetailModal detail={tmdbEpisodeDetail} language={renameLanguage} onClose={() => setTmdbEpisodeDetail(null)} />}
       {renameHistoryOpen && <RenameHistoryModal history={renameHistory} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onOpenDetails={setSelectedHistoryBatch} onUndo={(id) => void undoRenameBatch(id)} />}
       {selectedHistoryBatch && <RenameHistoryDetailsModal batch={selectedHistoryBatch} undoCheck={undoCheckResult?.batch?.id === selectedHistoryBatch.id ? undoCheckResult : null} timezone={displayTimezone} onClose={() => setSelectedHistoryBatch(null)} />}
-      {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} placeholders={renamePlaceholders} onChange={setRenameTemplate} onClose={() => setRenameTemplateEditorOpen(false)} />}
+      {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} matchPattern={renameMatchPattern} sample={renamePreview[0]?.currentName || renamePath} placeholders={renamePlaceholders} onChange={setRenameTemplate} onMatchPatternChange={setRenameMatchPattern} onClose={() => setRenameTemplateEditorOpen(false)} />}
       {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} rootPath={directoryPicker.rootPath} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
       {error && <AlertDialog title="操作失败" message={error} onClose={() => setError('')} />}
@@ -2700,8 +2706,11 @@ function HistoryDetails(props: { batch: RenameHistoryBatch; undoCheck: RenameUnd
   );
 }
 
-function RenameTemplateEditorModal(props: { value: string; placeholders: string[]; onChange: (value: string) => void; onClose: () => void }) {
+function RenameTemplateEditorModal(props: { value: string; matchPattern: string; sample: string; placeholders: string[]; onChange: (value: string) => void; onMatchPatternChange: (value: string) => void; onClose: () => void }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [sample, setSample] = useState(() => props.sample.split(/[\\/]/).pop() || props.sample);
+  const matchResult = testMatchPattern(props.matchPattern, sample);
+  const customPlaceholders = Object.keys(matchResult.variables).filter((name) => !props.placeholders.includes(`{${name}}`)).map((name) => `{${name}}`);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -2744,12 +2753,38 @@ function RenameTemplateEditorModal(props: { value: string; placeholders: string[
           <p>{'{show:zh-CN}'} / {'{title:ja-JP}'} 这类语言标识可按语言取剧名/集标题。</p>
           <p>{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。</p>
         </div>
+        <details className="rename-match-rule">
+          <summary>自定义匹配规则</summary>
+          <div className="rename-match-rule-content">
+            <label>Go RE2 正则表达式
+              <textarea value={props.matchPattern} onChange={(event) => props.onMatchPatternChange(event.target.value)} placeholder={'^\\[(?P<group>[^\\]]+)\\]\\s*(?P<show>.+?)\\s*-\\s*(?P<episode>\\d+)'} />
+              <small>使用命名捕获组，例如 (?P&lt;group&gt;...)。NFO 优先级高于自定义规则。</small>
+            </label>
+            <label>测试文件名<input value={sample} onChange={(event) => setSample(event.target.value)} placeholder="[LoliHouse] MAO - 03.mkv" /></label>
+            <div className={matchResult.error ? 'rename-match-test bad' : matchResult.matched ? 'rename-match-test ok' : 'rename-match-test'}>
+              <strong>{matchResult.error ? '规则无法用于即时测试' : matchResult.matched ? '匹配成功' : '未匹配'}</strong>
+              {matchResult.error ? <span>{matchResult.error}</span> : Object.entries(matchResult.variables).map(([name, value]) => <span key={name}><code>{name}</code> = {value || '（空）'}</span>)}
+            </div>
+            {customPlaceholders.length ? <div className="placeholder-bar"><span>自定义变量：</span>{customPlaceholders.map((placeholder) => <button className="secondary" type="button" key={placeholder} onClick={() => insertPlaceholder(placeholder)}>{placeholder}</button>)}</div> : null}
+          </div>
+        </details>
         <div className="inline-actions modal-actions">
           <button onClick={props.onClose}>完成</button>
         </div>
       </section>
     </div>
   );
+}
+
+function testMatchPattern(pattern: string, sample: string): { matched: boolean; variables: Record<string, string>; error?: string } {
+  if (!pattern.trim()) return { matched: false, variables: {} };
+  try {
+    const jsPattern = pattern.replace(/\(\?P<([A-Za-z][A-Za-z0-9_]*)>/g, '(?<$1>');
+    const match = new RegExp(jsPattern).exec(sample.replace(/\.[^.]+$/, ''));
+    return { matched: Boolean(match), variables: match?.groups ?? {} };
+  } catch (err) {
+    return { matched: false, variables: {}, error: err instanceof Error ? err.message : '正则表达式无效' };
+  }
 }
 
 function TargetPathEditorModal(props: { value: string; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {

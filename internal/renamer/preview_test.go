@@ -195,7 +195,7 @@ func TestIdentifyEpisodePrefersNFOIdentityOverFilename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	parsed, ok, source := identifyEpisode(path, config.Default())
+	parsed, ok, source, _ := identifyEpisode(path, config.Default(), nil)
 	if !ok {
 		t.Fatal("expected NFO identity to be recognized")
 	}
@@ -220,12 +220,47 @@ func TestIdentifyEpisodeUsesTVShowNFOForSeriesIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	parsed, ok, source := identifyEpisode(path, config.Default())
+	parsed, ok, source, _ := identifyEpisode(path, config.Default(), nil)
 	if !ok {
 		t.Fatal("expected filename episode identity to be recognized")
 	}
 	if source != "nfo" || parsed.show != "Right Show" || parsed.year != "2024" || parsed.tmdbShowID != 67890 {
 		t.Fatalf("unexpected tvshow NFO identity: source=%q parsed=%+v", source, parsed)
+	}
+}
+
+func TestIdentifyEpisodeUsesPatternBeforeBuiltInFilenameValues(t *testing.T) {
+	t.Parallel()
+
+	pattern, err := compileMatchPattern(`^\[(?P<group>[^\]]+)\]\s*(?P<show>.+?)\s*-\s*(?P<episode>\d+)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "[Custom] Right Show - 07.mkv")
+	parsed, ok, source, variables := identifyEpisode(path, config.Default(), pattern)
+	if !ok {
+		t.Fatal("expected pattern episode to be recognized")
+	}
+	if source != "pattern" || parsed.show != "Right Show" || parsed.episode != 7 || variables["group"] != "Custom" {
+		t.Fatalf("unexpected pattern identity: source=%q parsed=%+v variables=%v", source, parsed, variables)
+	}
+}
+
+func TestApplyTemplateSupportsCustomVariables(t *testing.T) {
+	t.Parallel()
+
+	item := PreviewItem{Show: "Show", Season: 1, Episode: 2, Variables: map[string]string{"group": "Custom"}}
+	got := applyTemplate("[{group}] {show} - S{season:00}E{episode:00}", item)
+	if got != "[Custom] Show - S01E02" {
+		t.Fatalf("unexpected custom variable template: %q", got)
+	}
+}
+
+func TestCompileMatchPatternRejectsInvalidRE2(t *testing.T) {
+	t.Parallel()
+
+	if _, err := compileMatchPattern(`(?<=Show)\d+`); err == nil {
+		t.Fatal("expected unsupported lookbehind to fail")
 	}
 }
 
@@ -242,7 +277,7 @@ func TestBuildPreviewDoesNotUseNFOTitleAsMetadataFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	item := buildPreviewItem(context.Background(), config.Default(), nil, path, DefaultTemplate, previewOverrides{})
+	item := buildPreviewItem(context.Background(), config.Default(), nil, path, DefaultTemplate, nil, previewOverrides{})
 	if item.Title == "NFO Title" {
 		t.Fatal("expected NFO title not to be used as metadata fallback")
 	}

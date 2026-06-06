@@ -909,8 +909,24 @@ button:disabled {
   padding: 8px 10px;
 }
 
+.rename-edit-field {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+
+.rename-edit-field > span {
+  color: #78716c;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .rename-edit-cell small {
   color: #78716c;
+  padding-left: 44px;
 }
 
 .rename-episode-edit {

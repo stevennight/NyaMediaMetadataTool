@@ -1725,7 +1725,6 @@ export function App() {
                 </div>
                 <div className="inline-actions">
                   <button className="secondary" onClick={() => openEditWatchDir(dir)}>编辑</button>
-                  <button className="secondary" onClick={() => void updateWatchDir(dir, { watchEnabled: !dir.watchEnabled })}>{dir.watchEnabled ? '关闭监听' : '开启监听'}</button>
                   <button onClick={() => openRescanDialog('dir', dir.path)} disabled={rescanning}>扫描生成</button>
                   <button className="danger" onClick={() => deleteWatchDir(dir.id)}>删除</button>
                 </div>

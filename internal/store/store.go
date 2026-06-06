@@ -66,6 +66,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureTaskScanRunColumn(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureTaskProcessingConfigColumn(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureScanScopeTaskColumn(ctx); err != nil {
 		return err
 	}
@@ -84,6 +87,10 @@ func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
 
 func (s *Store) ensureTaskScanRunColumn(ctx context.Context) error {
 	return s.ensureTaskColumn(ctx, "scan_run_id", `ALTER TABLE tasks ADD COLUMN scan_run_id TEXT NOT NULL DEFAULT ''`)
+}
+
+func (s *Store) ensureTaskProcessingConfigColumn(ctx context.Context) error {
+	return s.ensureTaskColumn(ctx, "processing_config", `ALTER TABLE tasks ADD COLUMN processing_config TEXT NOT NULL DEFAULT ''`)
 }
 
 func (s *Store) ensureScanScopeTaskColumn(ctx context.Context) error {
@@ -205,6 +212,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   status TEXT NOT NULL,
   overwrite_existing INTEGER NOT NULL DEFAULT 0,
   scan_run_id TEXT NOT NULL DEFAULT '',
+  processing_config TEXT NOT NULL DEFAULT '',
   attempts INTEGER NOT NULL DEFAULT 0,
   error_summary TEXT NOT NULL DEFAULT '',
   started_at TEXT,

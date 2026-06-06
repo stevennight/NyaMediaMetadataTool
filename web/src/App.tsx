@@ -590,7 +590,9 @@ export function App() {
   const [rescanOpen, setRescanOpen] = useState(false);
   const [rescanScope, setRescanScope] = useState<RescanScope>('all');
   const [rescanTarget, setRescanTarget] = useState('');
-  const [rescanStrategy, setRescanStrategy] = useState<RescanStrategy>('missing');
+  const [rescanWatchDirId, setRescanWatchDirId] = useState('');
+  const [rescanUseCustomProcessing, setRescanUseCustomProcessing] = useState(false);
+  const [rescanProcessing, setRescanProcessing] = useState<OutputProcessingConfig>(() => defaultOutputProcessing());
   const [auditRoot, setAuditRoot] = useState(() => readAuditPreferences().root ?? '');
   const [auditTmdbId, setAuditTmdbId] = useState(() => readAuditPreferences().tmdbId ?? '');
   const [auditEmbyItemUrl, setAuditEmbyItemUrl] = useState(() => readAuditPreferences().embyItemUrl ?? '');
@@ -1244,14 +1246,18 @@ export function App() {
     setRescanning(true);
     setError('');
     try {
-      const payload: Record<string, string | number> = { strategy: rescanStrategy };
+      const payload: Record<string, unknown> = {
+        useCustomProcessing: rescanUseCustomProcessing,
+        processing: rescanProcessing
+      };
       if (rescanScope === 'dir') {
-        const selected = watchDirs.find((dir) => dir.path === rescanTarget);
+        const selected = watchDirs.find((dir) => String(dir.id) === rescanWatchDirId);
         if (!selected) {
           setError('请选择媒体目录');
           return;
         }
         payload.watchDirId = selected.id;
+        if (rescanTarget.trim()) payload.path = rescanTarget.trim();
       } else if (rescanScope === 'path') {
         if (!rescanTarget.trim()) {
           setError('请输入目录或文件路径');
@@ -1279,8 +1285,11 @@ export function App() {
 
   function openRescanDialog(scope: RescanScope, target = '') {
     setRescanScope(scope);
-    setRescanTarget(target);
-    setRescanStrategy('missing');
+    const selected = scope === 'dir' ? watchDirs.find((dir) => dir.path === target) : undefined;
+    setRescanWatchDirId(selected ? String(selected.id) : '');
+    setRescanTarget('');
+    setRescanUseCustomProcessing(false);
+    setRescanProcessing(outputProcessingFromConfig(config));
     setRescanOpen(true);
   }
 
@@ -1707,7 +1716,7 @@ export function App() {
 
         {activePage === 'watchDirs' && (
         <section className="page-grid">
-          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary" onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '补扫中' : '补扫'}</button><button onClick={() => { setNewWatchDirProcessing(outputProcessingFromConfig(config)); setAddWatchDirOpen(true); }}>添加媒体目录</button></div>}>
+          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary" onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '扫描中' : '扫描生成'}</button><button onClick={() => { setNewWatchDirProcessing(outputProcessingFromConfig(config)); setAddWatchDirOpen(true); }}>添加媒体目录</button></div>}>
             {watchDirs.length ? watchDirs.map((dir) => (
               <div className="dir-item" key={dir.id}>
                 <div>
@@ -1717,7 +1726,7 @@ export function App() {
                 <div className="inline-actions">
                   <button className="secondary" onClick={() => openEditWatchDir(dir)}>编辑</button>
                   <button className="secondary" onClick={() => void updateWatchDir(dir, { watchEnabled: !dir.watchEnabled })}>{dir.watchEnabled ? '关闭监听' : '开启监听'}</button>
-                  <button onClick={() => openRescanDialog('dir', dir.path)} disabled={rescanning}>补扫</button>
+                  <button onClick={() => openRescanDialog('dir', dir.path)} disabled={rescanning}>扫描生成</button>
                   <button className="danger" onClick={() => deleteWatchDir(dir.id)}>删除</button>
                 </div>
               </div>
@@ -2111,7 +2120,7 @@ export function App() {
           {selectedTask && <TaskDetailModal detail={selectedTask} timezone={displayTimezone} onClose={() => setSelectedTask(null)} />}
         </section>
       )}
-      {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onBrowsePath={() => setDirectoryPicker({ title: '选择补扫目录', value: rescanTarget, onSelect: setRescanTarget })} onSubmit={() => void rescan()} />}
+      {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} watchDirId={rescanWatchDirId} useCustomProcessing={rescanUseCustomProcessing} processing={rescanProcessing} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={(value) => { setRescanScope(value); setRescanTarget(''); setRescanWatchDirId(''); }} onTargetChange={setRescanTarget} onWatchDirIdChange={(value) => { setRescanWatchDirId(value); setRescanTarget(''); }} onUseCustomProcessingChange={(value) => { setRescanUseCustomProcessing(value); if (value) setRescanProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setRescanProcessing((value) => ({ ...value, ...patch }))} onBrowsePath={() => setDirectoryPicker({ title: '选择扫描路径', value: rescanTarget || (rescanScope === 'dir' ? watchDirs.find((dir) => String(dir.id) === rescanWatchDirId)?.path ?? '' : ''), onSelect: setRescanTarget })} onSubmit={() => void rescan()} />}
       {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
       {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
@@ -2258,13 +2267,17 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
 function RescanModal(props: {
   scope: RescanScope;
   target: string;
-  strategy: RescanStrategy;
+  watchDirId: string;
+  useCustomProcessing: boolean;
+  processing: OutputProcessingConfig;
   directories: WatchDir[];
   rescanning: boolean;
   onClose: () => void;
   onScopeChange: (value: RescanScope) => void;
   onTargetChange: (value: string) => void;
-  onStrategyChange: (value: RescanStrategy) => void;
+  onWatchDirIdChange: (value: string) => void;
+  onUseCustomProcessingChange: (value: boolean) => void;
+  onProcessingChange: (patch: Partial<OutputProcessingConfig>) => void;
   onBrowsePath: () => void;
   onSubmit: () => void;
 }) {
@@ -2272,7 +2285,7 @@ function RescanModal(props: {
     <div className="modal-backdrop">
       <section className="modal-card">
         <div className="card-header">
-          <h2>补扫</h2>
+          <h2>扫描生成</h2>
           <IconCloseButton onClick={props.onClose} />
         </div>
         <div className="task-filters rescan-modal-grid">
@@ -2280,36 +2293,44 @@ function RescanModal(props: {
             范围
             <select value={props.scope} onChange={(event) => props.onScopeChange(event.target.value as RescanScope)}>
               <option value="all">全部媒体目录</option>
-              <option value="dir">指定媒体目录</option>
-              <option value="path">指定路径</option>
+              <option value="dir">媒体目录或子路径</option>
+              <option value="path">任意路径</option>
             </select>
           </label>
           {props.scope === 'dir' && (
             <label>
               媒体目录
-              <select value={props.target} onChange={(event) => props.onTargetChange(event.target.value)}>
+              <select value={props.watchDirId} onChange={(event) => props.onWatchDirIdChange(event.target.value)}>
                 <option value="">请选择</option>
-                {props.directories.map((dir) => <option key={dir.id} value={dir.path}>{dir.path}</option>)}
+                {props.directories.map((dir) => <option key={dir.id} value={String(dir.id)}>{dir.path}</option>)}
               </select>
             </label>
           )}
-          {props.scope === 'path' && (
+          {(props.scope === 'path' || props.scope === 'dir') && (
             <label>
-              路径
-              <div className="path-input"><input value={props.target} onChange={(event) => props.onTargetChange(event.target.value)} placeholder="D:\\Media\\Anime\\S01" /><button type="button" onClick={props.onBrowsePath}>选择</button></div>
+              {props.scope === 'dir' ? '子路径（留空扫描整个媒体目录）' : '路径'}
+              <div className="path-input"><input value={props.target} onChange={(event) => props.onTargetChange(event.target.value)} placeholder="D:\\Media\\Anime\\S01" /><button type="button" onClick={props.onBrowsePath} disabled={props.scope === 'dir' && !props.watchDirId}>选择</button></div>
             </label>
           )}
-          <label>
-            策略
-            <select value={props.strategy} onChange={(event) => props.onStrategyChange(event.target.value as RescanStrategy)}>
-              <option value="missing">只补缺失</option>
-              <option value="force">强制重建</option>
-            </select>
-          </label>
+          <Toggle label="使用一次性处理设置" checked={props.useCustomProcessing} onChange={props.onUseCustomProcessingChange} />
+          {!props.useCustomProcessing && <p className="muted">继承所属媒体目录设置；路径不属于媒体目录时继承全局设置。</p>}
+          {props.useCustomProcessing && (
+            <>
+              <SelectField label="处理策略" value={props.processing.strategy} options={[{ code: 'missing', name: '只补缺失' }, { code: 'force', name: '强制重建' }]} onChange={(value) => props.onProcessingChange({ strategy: value as RescanStrategy })} />
+              <Toggle label="字幕提取" checked={props.processing.enableSubtitles} onChange={(value) => props.onProcessingChange({ enableSubtitles: value })} />
+              <Toggle label="MediaInfo" checked={props.processing.enableMediaInfo} onChange={(value) => props.onProcessingChange({ enableMediaInfo: value })} />
+              <Toggle label="NFO" checked={props.processing.enableNfo} onChange={(value) => props.onProcessingChange({ enableNfo: value })} />
+              <Toggle label="BIF" checked={props.processing.enableBif} onChange={(value) => props.onProcessingChange({ enableBif: value })} />
+              <label>BIF 宽度<input type="number" value={props.processing.bifWidth} onChange={(event) => props.onProcessingChange({ bifWidth: Number(event.target.value) })} /></label>
+              <label>BIF 间隔秒<input type="number" value={props.processing.bifInterval} onChange={(event) => props.onProcessingChange({ bifInterval: Number(event.target.value) })} /></label>
+              <SelectField label="BIF 加速" value={props.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => props.onProcessingChange({ bifHwAccel: value })} />
+              <Toggle label="接管剧集/季度图片" checked={props.processing.enableImageTakeover} onChange={(value) => props.onProcessingChange({ enableImageTakeover: value })} />
+            </>
+          )}
         </div>
         <div className="inline-actions modal-actions">
           <button className="secondary" onClick={props.onClose}>取消</button>
-          <button onClick={props.onSubmit} disabled={props.rescanning}>{props.rescanning ? '补扫中' : '开始补扫'}</button>
+          <button onClick={props.onSubmit} disabled={props.rescanning}>{props.rescanning ? '扫描中' : '开始扫描生成'}</button>
         </div>
       </section>
     </div>

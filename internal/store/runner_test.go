@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"NyaMediaMetadataTool/internal/config"
 )
 
 func TestIgnoreFailedTasksAndRetryIgnored(t *testing.T) {
@@ -65,6 +68,45 @@ func TestIgnoreFailedTasksAndRetryIgnored(t *testing.T) {
 	}
 	if retried.Status != "pending" || retried.ErrorSummary != "" {
 		t.Fatalf("expected pending retried task, got %+v", retried)
+	}
+}
+
+func TestTaskCarriesOneTimeProcessingConfig(t *testing.T) {
+	t.Parallel()
+
+	st := openTestStore(t)
+	defer st.Close()
+
+	ctx := context.Background()
+	videoPath := filepath.Join(t.TempDir(), "Series - S01E01.mkv")
+	if err := os.WriteFile(videoPath, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(videoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaID, err := st.UpsertMediaFile(ctx, videoPath, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processing := config.Default().Processing.OutputConfig()
+	processing.Strategy = config.ProcessingStrategyForce
+	processing.EnableBIF = false
+	if err := st.EnqueueMediaTaskWithProcessing(ctx, mediaID, true, true, "scan-1", &processing); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := st.ClaimNextPendingTask(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored config.OutputProcessingConfig
+	if err := json.Unmarshal([]byte(task.ProcessingConfig), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Strategy != config.ProcessingStrategyForce || stored.EnableBIF {
+		t.Fatalf("unexpected task processing snapshot: %+v", stored)
 	}
 }
 

@@ -318,3 +318,51 @@ func TestScanOptionsFromStrategy(t *testing.T) {
 		t.Fatalf("unexpected force strategy options: %+v", force)
 	}
 }
+
+func TestInheritedScanUsesMatchingWatchDirStrategy(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	videoPath := filepath.Join(root, "Series - S01E01.mkv")
+	if err := os.WriteFile(videoPath, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(videoPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	processing := config.Default().Processing.OutputConfig()
+	processing.Strategy = config.ProcessingStrategyForce
+	if _, err := st.CreateWatchDir(context.Background(), store.WatchDir{
+		Path:                root,
+		Recursive:           true,
+		WatchEnabled:        true,
+		UseGlobalProcessing: false,
+		Processing:          processing,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Processing.Strategy = config.ProcessingStrategyMissing
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	if err := ScanPath(context.Background(), cfg, st, logger, videoPath, ScanOptions{InheritProcessing: true}); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := st.ListTasks(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || !tasks[0].OverwriteExisting {
+		t.Fatalf("expected inherited force task, got %+v", tasks)
+	}
+}

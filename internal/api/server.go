@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -651,16 +652,33 @@ func (s *Server) handleDeleteWatchDir(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	cfg := s.snapshotConfig()
 	type request struct {
-		WatchDirID int64  `json:"watchDirId"`
-		Path       string `json:"path"`
-		Strategy   string `json:"strategy"`
+		WatchDirID          int64                         `json:"watchDirId"`
+		Path                string                        `json:"path"`
+		UseCustomProcessing bool                          `json:"useCustomProcessing"`
+		Processing          config.OutputProcessingConfig `json:"processing"`
 	}
 	var input request
 	_ = json.NewDecoder(r.Body).Decode(&input)
 	input.Path = strings.TrimSpace(input.Path)
-	options := scanOptionsFromStrategy(input.Strategy)
+	options := bootstrap.ScanOptions{InheritProcessing: true}
+	if input.UseCustomProcessing {
+		normalizeOutputProcessing(&input.Processing, cfg.Processing.OutputConfig())
+		options = scanOptionsFromStrategy(input.Processing.Strategy)
+		options.Processing = &input.Processing
+	}
 
 	if input.Path != "" {
+		if input.WatchDirID > 0 {
+			dir, err := s.store.GetWatchDir(r.Context(), input.WatchDirID)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			if !pathWithinRoot(input.Path, dir.Path) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be inside the selected media directory"})
+				return
+			}
+		}
 		if _, err := os.Stat(input.Path); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -713,8 +731,31 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "count": len(dirs)})
 }
 
+func pathWithinRoot(path string, root string) bool {
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
 func scanOptionsFromStrategy(strategy string) bootstrap.ScanOptions {
 	return bootstrap.ScanOptionsFromStrategy(strategy)
+}
+
+func normalizeOutputProcessing(processing *config.OutputProcessingConfig, global config.OutputProcessingConfig) {
+	if processing.Strategy != config.ProcessingStrategyMissing && processing.Strategy != config.ProcessingStrategyForce {
+		processing.Strategy = global.Strategy
+	}
+	if processing.BIFWidth <= 0 {
+		processing.BIFWidth = global.BIFWidth
+	}
+	if processing.BIFInterval <= 0 {
+		processing.BIFInterval = global.BIFInterval
+	}
+	if strings.TrimSpace(processing.BIFHWAccel) == "" {
+		processing.BIFHWAccel = global.BIFHWAccel
+	}
 }
 
 func (s *Server) reloadWatchDirs(ctx context.Context) error {

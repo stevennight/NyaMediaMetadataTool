@@ -17,6 +17,7 @@ type Task struct {
 	Status            string `json:"status"`
 	OverwriteExisting bool   `json:"overwriteExisting"`
 	ScanRunID         string `json:"scanRunId"`
+	ProcessingConfig  string `json:"-"`
 	Attempts          int    `json:"attempts"`
 	ErrorSummary      string `json:"errorSummary"`
 	StartedAt         string `json:"startedAt"`
@@ -85,7 +86,7 @@ LEFT JOIN media_files ON media_files.id = tasks.media_file_id
 	queryArgs = append(queryArgs, filters.PageSize, (filters.Page-1)*filters.PageSize)
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.overwrite_existing, tasks.scan_run_id, tasks.attempts, tasks.error_summary,
+SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.overwrite_existing, tasks.scan_run_id, tasks.processing_config, tasks.attempts, tasks.error_summary,
        COALESCE(tasks.started_at, ''), COALESCE(tasks.finished_at, ''), tasks.created_at, tasks.updated_at
 FROM tasks
 LEFT JOIN media_files ON media_files.id = tasks.media_file_id
@@ -111,6 +112,7 @@ OFFSET ?
 			&task.Status,
 			&task.OverwriteExisting,
 			&task.ScanRunID,
+			&task.ProcessingConfig,
 			&task.Attempts,
 			&task.ErrorSummary,
 			&task.StartedAt,
@@ -189,7 +191,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, error) {
 	var task Task
 	var mediaFileID sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
-SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.overwrite_existing, tasks.scan_run_id, tasks.attempts, tasks.error_summary,
+SELECT tasks.id, tasks.media_file_id, COALESCE(media_files.path, ''), tasks.type, tasks.status, tasks.overwrite_existing, tasks.scan_run_id, tasks.processing_config, tasks.attempts, tasks.error_summary,
        COALESCE(tasks.started_at, ''), COALESCE(tasks.finished_at, ''), tasks.created_at, tasks.updated_at
 FROM tasks
 LEFT JOIN media_files ON media_files.id = tasks.media_file_id
@@ -202,6 +204,7 @@ WHERE tasks.id = ?
 		&task.Status,
 		&task.OverwriteExisting,
 		&task.ScanRunID,
+		&task.ProcessingConfig,
 		&task.Attempts,
 		&task.ErrorSummary,
 		&task.StartedAt,

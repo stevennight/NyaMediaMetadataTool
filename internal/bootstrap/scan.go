@@ -21,6 +21,8 @@ type ScanOptions struct {
 	Force             bool
 	MissingOnly       bool
 	ScanRunID         string
+	Processing        *config.OutputProcessingConfig
+	InheritProcessing bool
 }
 
 func SyncAndScan(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger) error {
@@ -92,7 +94,7 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 			return nil
 		}
 
-		if err := st.EnqueueMediaTaskWithScanRun(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly, options.ScanRunID); err != nil {
+		if err := enqueueScannedMedia(ctx, cfg, st, path, mediaFileID, options); err != nil {
 			logger.Warn("enqueue media task failed", "path", path, "error", err)
 		}
 		return nil
@@ -125,7 +127,21 @@ func ScanPath(ctx context.Context, cfg config.Config, st *store.Store, logger *s
 	if err != nil {
 		return err
 	}
-	return st.EnqueueMediaTaskWithScanRun(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly, options.ScanRunID)
+	return enqueueScannedMedia(ctx, cfg, st, path, mediaFileID, options)
+}
+
+func enqueueScannedMedia(ctx context.Context, cfg config.Config, st *store.Store, path string, mediaFileID int64, options ScanOptions) error {
+	if options.InheritProcessing {
+		processing := cfg.Processing.OutputConfig()
+		if dir, err := st.FindWatchDirForPath(ctx, path); err == nil && !dir.UseGlobalProcessing {
+			processing = dir.Processing
+		}
+		resolved := ScanOptionsFromStrategy(processing.Strategy)
+		options.OverwriteExisting = resolved.OverwriteExisting
+		options.Force = resolved.Force
+		options.MissingOnly = resolved.MissingOnly
+	}
+	return st.EnqueueMediaTaskWithProcessing(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly, options.ScanRunID, options.Processing)
 }
 
 func newScanRunID() string {

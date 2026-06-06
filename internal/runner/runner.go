@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -126,6 +127,13 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	}
 	if dir, findErr := r.store.FindWatchDirForPath(ctx, media.Path); findErr == nil && !dir.UseGlobalProcessing {
 		cfg.Processing.ApplyOutputConfig(dir.Processing)
+	}
+	if task.ProcessingConfig != "" {
+		var processing config.OutputProcessingConfig
+		if err := json.Unmarshal([]byte(task.ProcessingConfig), &processing); err != nil {
+			return fmt.Errorf("decode task processing config: %w", err)
+		}
+		cfg.Processing.ApplyOutputConfig(processing)
 	}
 	cfg.Processing.OverwriteExisting = task.OverwriteExisting
 	failures := make([]string, 0)

@@ -1192,7 +1192,75 @@ button:disabled {
 }
 
 .rescan-modal-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+
+.rescan-modal {
+  width: min(760px, 100%);
+}
+
+.rescan-section {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.rescan-section label {
+  display: grid;
+  gap: 6px;
+  color: #44403c;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.rescan-section label > input,
+.rescan-section label > select {
+  width: 100%;
+}
+
+.rescan-section-heading {
+  display: grid;
+  gap: 3px;
+}
+
+.rescan-section-heading strong {
+  color: #292524;
+  font-size: 16px;
+}
+
+.rescan-section-heading small,
+.rescan-inherit-note {
+  color: #78716c;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.rescan-inherit-note {
+  margin: -4px 0 0;
+}
+
+.rescan-section .toggle-row {
+  border-top: 0;
+  padding: 4px 0;
+}
+
+.rescan-toggle-grid {
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 18px;
+}
+
+.rescan-bif-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(120, 113, 108, 0.14);
 }
 
 .modal-actions {
@@ -1752,6 +1820,11 @@ h3 {
   .audit-summary-grid,
   .rename-controls,
   .rescan-modal-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .rescan-toggle-grid,
+  .rescan-bif-grid {
     grid-template-columns: 1fr;
   }
 

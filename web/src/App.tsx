@@ -2228,7 +2228,7 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
   const logs = [...asArray<TaskLog>(props.detail.logs)].reverse();
   return (
     <div className="modal-backdrop">
-      <section className="modal-card">
+      <section className="modal-card rescan-modal">
         <div className="card-header">
           <h2>任务详情</h2>
           <IconCloseButton onClick={props.onClose} />
@@ -2288,44 +2288,66 @@ function RescanModal(props: {
           <h2>扫描生成</h2>
           <IconCloseButton onClick={props.onClose} />
         </div>
-        <div className="task-filters rescan-modal-grid">
-          <label>
-            范围
-            <select value={props.scope} onChange={(event) => props.onScopeChange(event.target.value as RescanScope)}>
-              <option value="all">全部媒体目录</option>
-              <option value="dir">媒体目录或子路径</option>
-              <option value="path">任意路径</option>
-            </select>
-          </label>
-          {props.scope === 'dir' && (
+        <div className="rescan-modal-grid">
+          <section className="rescan-section">
+            <div className="rescan-section-heading">
+              <strong>扫描范围</strong>
+              <small>选择需要扫描生成的文件范围。</small>
+            </div>
             <label>
-              媒体目录
-              <select value={props.watchDirId} onChange={(event) => props.onWatchDirIdChange(event.target.value)}>
-                <option value="">请选择</option>
-                {props.directories.map((dir) => <option key={dir.id} value={String(dir.id)}>{dir.path}</option>)}
+              范围
+              <select value={props.scope} onChange={(event) => props.onScopeChange(event.target.value as RescanScope)}>
+                <option value="all">全部媒体目录</option>
+                <option value="dir">媒体目录或子路径</option>
+                <option value="path">任意路径</option>
               </select>
             </label>
-          )}
-          {(props.scope === 'path' || props.scope === 'dir') && (
-            <label>
-              {props.scope === 'dir' ? '子路径（留空扫描整个媒体目录）' : '路径'}
-              <div className="path-input"><input value={props.target} onChange={(event) => props.onTargetChange(event.target.value)} placeholder="D:\\Media\\Anime\\S01" /><button type="button" onClick={props.onBrowsePath} disabled={props.scope === 'dir' && !props.watchDirId}>选择</button></div>
-            </label>
-          )}
-          <Toggle label="使用一次性处理设置" checked={props.useCustomProcessing} onChange={props.onUseCustomProcessingChange} />
-          {!props.useCustomProcessing && <p className="muted">继承所属媒体目录设置；路径不属于媒体目录时继承全局设置。</p>}
+            {props.scope === 'dir' && (
+              <label>
+                媒体目录
+                <select value={props.watchDirId} onChange={(event) => props.onWatchDirIdChange(event.target.value)}>
+                  <option value="">请选择</option>
+                  {props.directories.map((dir) => <option key={dir.id} value={String(dir.id)}>{dir.path}</option>)}
+                </select>
+              </label>
+            )}
+            {(props.scope === 'path' || props.scope === 'dir') && (
+              <label>
+                {props.scope === 'dir' ? '子路径（留空扫描整个媒体目录）' : '路径'}
+                <div className="path-input"><input value={props.target} onChange={(event) => props.onTargetChange(event.target.value)} placeholder="D:\\Media\\Anime\\S01" /><button type="button" onClick={props.onBrowsePath} disabled={props.scope === 'dir' && !props.watchDirId}>选择</button></div>
+              </label>
+            )}
+          </section>
+          <section className="rescan-section">
+            <div className="rescan-section-heading">
+              <strong>处理设置</strong>
+              <small>默认继承所属媒体目录设置，也可以为本次扫描单独配置。</small>
+            </div>
+            <Toggle label="使用一次性处理设置" checked={props.useCustomProcessing} onChange={props.onUseCustomProcessingChange} />
+            {!props.useCustomProcessing && <p className="rescan-inherit-note">路径不属于媒体目录时，将继承全局处理设置。</p>}
+          </section>
           {props.useCustomProcessing && (
-            <>
+            <section className="rescan-section rescan-custom-settings">
+              <div className="rescan-section-heading">
+                <strong>一次性处理设置</strong>
+                <small>这些设置只应用于本次扫描生成任务。</small>
+              </div>
               <SelectField label="处理策略" value={props.processing.strategy} options={[{ code: 'missing', name: '只补缺失' }, { code: 'force', name: '强制重建' }]} onChange={(value) => props.onProcessingChange({ strategy: value as RescanStrategy })} />
-              <Toggle label="字幕提取" checked={props.processing.enableSubtitles} onChange={(value) => props.onProcessingChange({ enableSubtitles: value })} />
-              <Toggle label="MediaInfo" checked={props.processing.enableMediaInfo} onChange={(value) => props.onProcessingChange({ enableMediaInfo: value })} />
-              <Toggle label="NFO" checked={props.processing.enableNfo} onChange={(value) => props.onProcessingChange({ enableNfo: value })} />
-              <Toggle label="BIF" checked={props.processing.enableBif} onChange={(value) => props.onProcessingChange({ enableBif: value })} />
-              <label>BIF 宽度<input type="number" value={props.processing.bifWidth} onChange={(event) => props.onProcessingChange({ bifWidth: Number(event.target.value) })} /></label>
-              <label>BIF 间隔秒<input type="number" value={props.processing.bifInterval} onChange={(event) => props.onProcessingChange({ bifInterval: Number(event.target.value) })} /></label>
-              <SelectField label="BIF 加速" value={props.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => props.onProcessingChange({ bifHwAccel: value })} />
-              <Toggle label="接管剧集/季度图片" checked={props.processing.enableImageTakeover} onChange={(value) => props.onProcessingChange({ enableImageTakeover: value })} />
-            </>
+              <div className="rescan-toggle-grid">
+                <Toggle label="字幕提取" checked={props.processing.enableSubtitles} onChange={(value) => props.onProcessingChange({ enableSubtitles: value })} />
+                <Toggle label="MediaInfo" checked={props.processing.enableMediaInfo} onChange={(value) => props.onProcessingChange({ enableMediaInfo: value })} />
+                <Toggle label="NFO" checked={props.processing.enableNfo} onChange={(value) => props.onProcessingChange({ enableNfo: value })} />
+                <Toggle label="BIF" checked={props.processing.enableBif} onChange={(value) => props.onProcessingChange({ enableBif: value })} />
+                <Toggle label="接管剧集/季度图片" checked={props.processing.enableImageTakeover} onChange={(value) => props.onProcessingChange({ enableImageTakeover: value })} />
+              </div>
+              {props.processing.enableBif && (
+                <div className="rescan-bif-grid">
+                  <label>BIF 宽度<input type="number" value={props.processing.bifWidth} onChange={(event) => props.onProcessingChange({ bifWidth: Number(event.target.value) })} /></label>
+                  <label>BIF 间隔秒<input type="number" value={props.processing.bifInterval} onChange={(event) => props.onProcessingChange({ bifInterval: Number(event.target.value) })} /></label>
+                  <SelectField label="BIF 加速" value={props.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => props.onProcessingChange({ bifHwAccel: value })} />
+                </div>
+              )}
+            </section>
           )}
         </div>
         <div className="inline-actions modal-actions">

@@ -675,7 +675,6 @@ button:disabled {
   grid-template-columns: minmax(180px, 0.4fr) minmax(260px, 0.8fr) auto auto;
   gap: 12px;
   align-items: end;
-  margin: 0 0 14px;
 }
 
 .audit-key-manager label {
@@ -689,10 +688,89 @@ button:disabled {
   width: 100%;
 }
 
+.emby-audit-form {
+  display: grid;
+  gap: 16px;
+}
+
+.audit-form-section {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.audit-form-section-heading {
+  display: grid;
+  gap: 3px;
+}
+
+.audit-form-section-heading strong {
+  color: #44403c;
+  font-size: 15px;
+}
+
+.audit-form-section-heading span {
+  color: #78716c;
+  font-size: 12px;
+}
+
+.emby-audit-targets,
+.emby-audit-credentials {
+  display: grid;
+  gap: 12px;
+}
+
+.emby-audit-targets {
+  grid-template-columns: minmax(300px, 1fr) minmax(340px, 1.25fr);
+}
+
+.emby-audit-credentials {
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+}
+
+.emby-audit-targets label,
+.emby-audit-credentials label {
+  display: grid;
+  gap: 6px;
+  color: #78716c;
+  font-size: 13px;
+}
+
+.emby-audit-targets input,
+.emby-audit-credentials input,
+.emby-audit-credentials select {
+  width: 100%;
+}
+
+.audit-key-panel {
+  padding: 12px 16px;
+  border: 1px dashed rgba(120, 113, 108, 0.24);
+  border-radius: 16px;
+  background: rgba(245, 245, 244, 0.38);
+}
+
+.audit-key-panel summary {
+  cursor: pointer;
+  color: #57534e;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.audit-key-panel[open] summary {
+  margin-bottom: 14px;
+}
+
 .audit-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
+}
+
+.emby-audit-summary-grid {
+  grid-template-columns: minmax(280px, 1.5fr) repeat(2, minmax(180px, 0.75fr));
 }
 
 .audit-stat {
@@ -2301,6 +2379,9 @@ h3 {
   .audit-key-manager,
   .audit-option-row,
   .audit-summary-grid,
+  .emby-audit-targets,
+  .emby-audit-credentials,
+  .emby-audit-summary-grid,
   .rename-controls,
   .rescan-modal-grid {
     grid-template-columns: 1fr;

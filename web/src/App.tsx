@@ -1979,19 +1979,37 @@ export function App() {
           </Card>}
 
           {auditTab === 'emby' && <Card title="Emby 与本地核对" action={<button onClick={() => runSeriesAudit('emby')} disabled={auditingEmby}>{auditingEmby ? '核对中' : '开始核对'}</button>}>
-            <div className="audit-controls">
-              <label>本地剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择本地剧集根目录', value: auditRoot, onSelect: setAuditRoot })}>选择</button></div></label>
-              <label>Emby 剧集页面 URL<input value={auditEmbyItemUrl} onChange={(event) => setAuditEmbyItemUrl(event.target.value)} placeholder="https://emby.example.com/web/index.html#!/item?id=662" /></label>
-              <label>Emby API Key<select value={auditSelectedEmbyKeyId} onChange={(event) => { setAuditSelectedEmbyKeyId(event.target.value); if (event.target.value) setAuditEmbyApiKey(''); }}><option value="">手动输入</option>{auditEmbyAPIKeys.map((key) => <option key={key.id} value={key.id}>{key.title}</option>)}</select></label>
-              <label>临时 API Key<input type="password" value={auditEmbyApiKey} onChange={(event) => { setAuditEmbyApiKey(event.target.value); if (event.target.value) setAuditSelectedEmbyKeyId(''); }} placeholder="可选，不保存" /></label>
+            <div className="emby-audit-form">
+              <section className="audit-form-section">
+                <div className="audit-form-section-heading">
+                  <strong>核对目标</strong>
+                  <span>选择本地剧集，并粘贴对应的 Emby 剧集详情页地址。</span>
+                </div>
+                <div className="emby-audit-targets">
+                  <label>本地剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择本地剧集根目录', value: auditRoot, onSelect: setAuditRoot })}>选择</button></div></label>
+                  <label>Emby 剧集页面 URL<input value={auditEmbyItemUrl} onChange={(event) => setAuditEmbyItemUrl(event.target.value)} placeholder="https://emby.example.com/web/index.html#!/item?id=662" /></label>
+                </div>
+              </section>
+              <section className="audit-form-section">
+                <div className="audit-form-section-heading">
+                  <strong>访问凭证</strong>
+                  <span>选择已保存的 Key，或输入仅用于本次核对的临时 Key。</span>
+                </div>
+                <div className="emby-audit-credentials">
+                  <label>已保存的 API Key<select value={auditSelectedEmbyKeyId} onChange={(event) => { setAuditSelectedEmbyKeyId(event.target.value); if (event.target.value) setAuditEmbyApiKey(''); }}><option value="">使用临时 Key</option>{auditEmbyAPIKeys.map((key) => <option key={key.id} value={key.id}>{key.title}</option>)}</select></label>
+                  <label>临时 API Key<input type="password" value={auditEmbyApiKey} onChange={(event) => { setAuditEmbyApiKey(event.target.value); if (event.target.value) setAuditSelectedEmbyKeyId(''); }} placeholder="不保存，仅用于本次核对" /></label>
+                </div>
+              </section>
+              <details className="audit-key-panel">
+                <summary>管理已保存的 API Key</summary>
+                <div className="audit-key-manager">
+                  <label>Key 标题<input value={newEmbyKeyTitle} onChange={(event) => setNewEmbyKeyTitle(event.target.value)} placeholder="例如：主 Emby" /></label>
+                  <label>API Key<input type="password" value={newEmbyKeyValue} onChange={(event) => setNewEmbyKeyValue(event.target.value)} placeholder="粘贴后点保存" /></label>
+                  <button type="button" onClick={saveEmbyAPIKey} disabled={savingEmbyKey}>{savingEmbyKey ? '保存中' : '保存 Key'}</button>
+                  {auditSelectedEmbyKeyId ? <button className="secondary" type="button" onClick={() => deleteEmbyAPIKey(Number(auditSelectedEmbyKeyId))}>删除选中 Key</button> : null}
+                </div>
+              </details>
             </div>
-            <div className="audit-key-manager">
-              <label>保存 Key 标题<input value={newEmbyKeyTitle} onChange={(event) => setNewEmbyKeyTitle(event.target.value)} placeholder="例如：主 Emby" /></label>
-              <label>保存 API Key<input type="password" value={newEmbyKeyValue} onChange={(event) => setNewEmbyKeyValue(event.target.value)} placeholder="粘贴后点保存" /></label>
-              <button type="button" onClick={saveEmbyAPIKey} disabled={savingEmbyKey}>{savingEmbyKey ? '保存中' : '保存 Key'}</button>
-              {auditSelectedEmbyKeyId ? <button className="secondary" type="button" onClick={() => deleteEmbyAPIKey(Number(auditSelectedEmbyKeyId))}>删除选中 Key</button> : null}
-            </div>
-            <p className="muted">对比本地与 Emby 中剧集、季度和单集的元数据及视频源。直接粘贴 Emby 剧集详情页地址即可。</p>
           </Card>}
 
           {auditTab === 'files' && <Card title="文件对齐检查" action={<button onClick={runFileAudit} disabled={auditingFiles}>{auditingFiles ? '检查中' : '开始检查'}</button>}>
@@ -2057,7 +2075,7 @@ export function App() {
           {auditTab === 'emby' && embyAuditReport && (
             <>
               <Card title="Emby 与本地核对摘要">
-                <div className="audit-summary-grid">
+                <div className="audit-summary-grid emby-audit-summary-grid">
                   <div className="audit-stat"><span>剧集</span><strong>{embyAuditReport.showTitle || '-'}</strong><small>{embyAuditReport.root}</small></div>
                   <div className="audit-stat"><span>本地单集</span><strong>{embyAuditReport.localEpisodes.length}</strong><small>参与核对</small></div>
                   <div className="audit-stat"><span>Emby 差异</span><strong>{embyAuditReport.embyComparisons?.length ?? 0}</strong><small>{embyAuditReport.embyComparisons?.length ? '需要检查' : '未发现'}</small></div>

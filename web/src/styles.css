@@ -958,7 +958,7 @@ button:disabled {
 .rename-row-actions {
   display: flex;
   flex-wrap: nowrap;
-  min-width: 170px;
+  min-width: 92px;
 }
 
 .rename-row-actions button {

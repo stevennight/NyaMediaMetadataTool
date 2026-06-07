@@ -21,7 +21,7 @@ type AppConfig = {
     bifWidth: number;
     bifInterval: number;
     bifHwAccel: string;
-    overwriteExisting: boolean;
+    strategy: RescanStrategy;
     enableSubtitles: boolean;
     enableMediaInfo: boolean;
     enableNfo: boolean;
@@ -51,7 +51,19 @@ type AppConfig = {
   watchDirs: WatchDir[];
 };
 
-type WatchDir = { id: number; path: string; recursive: boolean; enabled: boolean };
+type OutputProcessingConfig = {
+  strategy: RescanStrategy;
+  bifWidth: number;
+  bifInterval: number;
+  bifHwAccel: string;
+  enableSubtitles: boolean;
+  enableMediaInfo: boolean;
+  enableNfo: boolean;
+  enableBif: boolean;
+  enableImageTakeover: boolean;
+};
+
+type WatchDir = { id: number; path: string; recursive: boolean; enabled: boolean; watchEnabled: boolean; scanOnStart: boolean; useGlobalProcessing: boolean; processing: OutputProcessingConfig };
 
 type ToolStatus = {
   name: string;
@@ -121,6 +133,9 @@ type RenamePreviewItem = {
   tmdbShowId: number;
   tmdbEpisodeId: number;
   source: string;
+  identitySource: string;
+  metadataSource: string;
+  variables: Record<string, string>;
   status: string;
   message: string;
   conflict: boolean;
@@ -137,10 +152,31 @@ type TMDBSearchResult = {
   overview: string;
 };
 
+type TmdbEpisodeDetail = {
+  showId: number;
+  episodeId: number;
+  showName: string;
+  showOriginalName: string;
+  showFirstAirDate: string;
+  showOverview: string;
+  showStatus: string;
+  showVoteAverage: number;
+  showGenres: string[];
+  showPosterUrl: string;
+  season: number;
+  episode: number;
+  title: string;
+  overview: string;
+  airDate: string;
+  voteAverage: number;
+  stillUrl: string;
+};
+
 type RenamePreviewStreamMessage = {
-  type: 'item' | 'done' | 'error';
+  type: 'start' | 'item' | 'done' | 'error';
   item?: RenamePreviewItem;
   count?: number;
+  total?: number;
   error?: string;
 };
 
@@ -224,6 +260,36 @@ type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
 type SelectOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'rename' | 'audit';
+type SettingsTab = 'basic' | 'processing' | 'scraping';
+
+function defaultOutputProcessing(): OutputProcessingConfig {
+  return {
+    strategy: 'missing',
+    bifWidth: 320,
+    bifInterval: 10,
+    bifHwAccel: 'cpu',
+    enableSubtitles: true,
+    enableMediaInfo: true,
+    enableNfo: true,
+    enableBif: true,
+    enableImageTakeover: false
+  };
+}
+
+function outputProcessingFromConfig(config: AppConfig | null): OutputProcessingConfig {
+  if (!config) return defaultOutputProcessing();
+  return {
+    strategy: config.processing.strategy || 'missing',
+    bifWidth: config.processing.bifWidth,
+    bifInterval: config.processing.bifInterval,
+    bifHwAccel: config.processing.bifHwAccel || 'cpu',
+    enableSubtitles: config.processing.enableSubtitles,
+    enableMediaInfo: config.processing.enableMediaInfo,
+    enableNfo: config.processing.enableNfo,
+    enableBif: config.processing.enableBif,
+    enableImageTakeover: config.processing.enableImageTakeover
+  };
+}
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
 type AuditTab = 'series' | 'files';
 
@@ -333,6 +399,20 @@ function previewWorkerCount(configured: number) {
   return configured;
 }
 
+function renameIdentitySourceLabel(source: string) {
+  if (source === 'nfo') return 'NFO';
+  if (source === 'pattern') return '自定义规则';
+  if (source === 'filename') return '文件名 / 目录';
+  return source || '-';
+}
+
+function renameMetadataSourceLabel(source: string) {
+  if (source === 'tmdb') return 'TMDB 已获取';
+  if (source === 'tmdb-error') return 'TMDB 查询失败';
+  if (source === 'tmdb-unavailable') return 'TMDB 不可用';
+  return source || '-';
+}
+
 async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<void>) {
   let nextIndex = 0;
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
@@ -347,8 +427,8 @@ async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (i
 type RenamePreferences = {
   path?: string;
   template?: string;
+  matchPattern?: string;
   language?: string;
-  useTmdb?: boolean;
   releaseGroup?: string;
   templateHistory?: string[];
 };
@@ -489,6 +569,7 @@ export function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('basic');
   const [taskTotal, setTaskTotal] = useState(0);
   const [taskPage, setTaskPage] = useState(1);
   const [taskPageSize] = useState(20);
@@ -500,22 +581,27 @@ export function App() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [renamePath, setRenamePath] = useState(() => readRenamePreferences().path ?? '');
   const [renameTemplate, setRenameTemplate] = useState(() => readRenamePreferences().template ?? defaultRenameTemplate);
-  const [renameUseTmdb, setRenameUseTmdb] = useState(() => readRenamePreferences().useTmdb ?? true);
+  const [renameMatchPattern, setRenameMatchPattern] = useState(() => readRenamePreferences().matchPattern ?? '');
   const [renameReleaseGroup, setRenameReleaseGroup] = useState(() => readRenamePreferences().releaseGroup ?? '');
   const [renameLanguage, setRenameLanguage] = useState(() => readRenamePreferences().language ?? 'zh-CN');
   const [renameLanguageInitialized, setRenameLanguageInitialized] = useState(() => Boolean(readRenamePreferences().language));
   const [renameTemplateHistory, setRenameTemplateHistory] = useState(() => asArray<string>(readRenamePreferences().templateHistory).filter(Boolean));
+  const [renameTemplateHistoryOpen, setRenameTemplateHistoryOpen] = useState(false);
   const [renamePreview, setRenamePreview] = useState<RenamePreviewItem[]>([]);
   const [renamePreviewCount, setRenamePreviewCount] = useState(0);
+  const [renamePreviewTotal, setRenamePreviewTotal] = useState(0);
   const [renameHistory, setRenameHistory] = useState<RenameHistoryBatch[]>([]);
-  const [expandedHistoryIds, setExpandedHistoryIds] = useState<string[]>([]);
+  const [renameHistoryOpen, setRenameHistoryOpen] = useState(false);
+  const [selectedHistoryBatch, setSelectedHistoryBatch] = useState<RenameHistoryBatch | null>(null);
   const [undoCheckResult, setUndoCheckResult] = useState<RenameUndoCheckResult | null>(null);
   const [loadingRenameHistory, setLoadingRenameHistory] = useState(false);
   const [undoingHistoryId, setUndoingHistoryId] = useState('');
   const [selectedRenamePaths, setSelectedRenamePaths] = useState<string[]>([]);
   const [tmdbQuery, setTmdbQuery] = useState('');
   const [tmdbResults, setTmdbResults] = useState<TMDBSearchResult[]>([]);
-  const [tmdbResultsCollapsed, setTmdbResultsCollapsed] = useState(false);
+  const [tmdbMatchOpen, setTmdbMatchOpen] = useState(false);
+  const [tmdbEpisodeDetail, setTmdbEpisodeDetail] = useState<TmdbEpisodeDetail | null>(null);
+  const [loadingTmdbEpisodeDetail, setLoadingTmdbEpisodeDetail] = useState(false);
   const [searchingTmdb, setSearchingTmdb] = useState(false);
   const [applyingTmdbShowId, setApplyingTmdbShowId] = useState<number | null>(null);
   const [tmdbApplyProgress, setTmdbApplyProgress] = useState(0);
@@ -532,14 +618,23 @@ export function App() {
   const [targetPathEditor, setTargetPathEditor] = useState<{ path: string; value: string } | null>(null);
   const [renameTemplateEditorOpen, setRenameTemplateEditorOpen] = useState(false);
   const [previewingRename, setPreviewingRename] = useState(false);
-  const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; onSelect: (path: string) => void } | null>(null);
+  const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; rootPath?: string; onSelect: (path: string) => void } | null>(null);
   const [newWatchDir, setNewWatchDir] = useState('');
-  const [newWatchDirEnabled, setNewWatchDirEnabled] = useState(true);
+  const [newWatchDirWatchEnabled, setNewWatchDirWatchEnabled] = useState(true);
+  const [newWatchDirUseGlobalProcessing, setNewWatchDirUseGlobalProcessing] = useState(true);
+  const [newWatchDirProcessing, setNewWatchDirProcessing] = useState<OutputProcessingConfig>(() => defaultOutputProcessing());
   const [addWatchDirOpen, setAddWatchDirOpen] = useState(false);
+  const [editingWatchDir, setEditingWatchDir] = useState<WatchDir | null>(null);
+  const [editingWatchDirPath, setEditingWatchDirPath] = useState('');
+  const [editingWatchDirWatchEnabled, setEditingWatchDirWatchEnabled] = useState(true);
+  const [editingWatchDirUseGlobalProcessing, setEditingWatchDirUseGlobalProcessing] = useState(true);
+  const [editingWatchDirProcessing, setEditingWatchDirProcessing] = useState<OutputProcessingConfig>(() => defaultOutputProcessing());
   const [rescanOpen, setRescanOpen] = useState(false);
   const [rescanScope, setRescanScope] = useState<RescanScope>('all');
   const [rescanTarget, setRescanTarget] = useState('');
-  const [rescanStrategy, setRescanStrategy] = useState<RescanStrategy>('missing');
+  const [rescanWatchDirId, setRescanWatchDirId] = useState('');
+  const [rescanUseCustomProcessing, setRescanUseCustomProcessing] = useState(false);
+  const [rescanProcessing, setRescanProcessing] = useState<OutputProcessingConfig>(() => defaultOutputProcessing());
   const [auditRoot, setAuditRoot] = useState(() => readAuditPreferences().root ?? '');
   const [auditTmdbId, setAuditTmdbId] = useState(() => readAuditPreferences().tmdbId ?? '');
   const [auditEmbyItemUrl, setAuditEmbyItemUrl] = useState(() => readAuditPreferences().embyItemUrl ?? '');
@@ -566,6 +661,7 @@ export function App() {
   const [fileAuditReport, setFileAuditReport] = useState<FileAuditReport | null>(null);
   const [auditingFiles, setAuditingFiles] = useState(false);
   const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null);
+  const [recentArtifactsOpen, setRecentArtifactsOpen] = useState(false);
   const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([]);
   const [checkingTools, setCheckingTools] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
@@ -584,6 +680,16 @@ export function App() {
   const renameBatchConcurrency = previewWorkerCount(config?.renaming?.concurrency ?? 3);
   const renameErrorCount = renamePreview.filter((item) => item.status === 'error' || item.conflict).length;
   const renameWarningCount = renamePreview.filter((item) => item.status === 'warning').length;
+  const availableToolCount = tools.filter((tool) => tool.available).length;
+  const enabledWatchDirCount = watchDirs.filter((dir) => dir.enabled).length;
+  const activeTaskCount = tasks.filter((task) => task.status === 'pending' || task.status === 'running').length;
+  const failedTaskCount = tasks.filter((task) => task.status === 'failed').length;
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(''), 3600);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   useEffect(() => {
     async function load() {
@@ -767,7 +873,7 @@ export function App() {
     }
   }
 
-  async function previewRename() {
+  async function previewRename(bypassTmdbCache = false) {
     if (!renamePath.trim()) {
       setError('请输入目录或文件路径');
       return;
@@ -778,12 +884,13 @@ export function App() {
     setNotice('');
     setRenamePreview([]);
     setRenamePreviewCount(0);
+    setRenamePreviewTotal(0);
     setSelectedRenamePaths([]);
     try {
       const response = await fetch('/api/rename/preview/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, useTmdb: renameUseTmdb, language: renameLanguage, releaseGroup: renameReleaseGroup.trim() })
+        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, matchPattern: renameMatchPattern, bypassTmdbCache, language: renameLanguage, releaseGroup: renameReleaseGroup.trim() })
       });
       if (!response.ok) {
         setError(await response.text());
@@ -824,24 +931,53 @@ export function App() {
     writeRenamePreferences({
       path: renamePath.trim(),
       template,
+      matchPattern: renameMatchPattern.trim(),
       language: renameLanguage,
-      useTmdb: renameUseTmdb,
       releaseGroup: renameReleaseGroup.trim(),
       templateHistory: nextHistory
     });
   }
 
+  function deleteRenameTemplateHistory(template: string) {
+    const nextHistory = renameTemplateHistory.filter((item) => item !== template);
+    setRenameTemplateHistory(nextHistory);
+    writeRenamePreferences({ ...readRenamePreferences(), templateHistory: nextHistory });
+    if (!nextHistory.length) setRenameTemplateHistoryOpen(false);
+  }
+
   function handleRenamePreviewMessage(line: string) {
     if (!line.trim()) return;
     const message = JSON.parse(line) as RenamePreviewStreamMessage;
-    if (message.type === 'item' && message.item) {
+    if (message.type === 'start') {
+      setRenamePreviewTotal(message.total ?? 0);
+    } else if (message.type === 'item' && message.item) {
       setRenamePreview((items) => [...items, message.item as RenamePreviewItem]);
       setRenamePreviewCount(message.count ?? 0);
+      setRenamePreviewTotal(message.total ?? 0);
     } else if (message.type === 'error') {
       setError(message.error || '生成预览失败');
     } else if (message.type === 'done') {
       setRenamePreviewCount(message.count ?? 0);
+      setRenamePreviewTotal(message.total ?? message.count ?? 0);
       setNotice(`预览生成完成，共 ${message.count ?? 0} 个文件。`);
+    }
+  }
+
+  async function openTmdbEpisodeDetail(item: RenamePreviewItem, refresh = false) {
+    setLoadingTmdbEpisodeDetail(true);
+    setError('');
+    try {
+      const params = new URLSearchParams({ showId: String(item.tmdbShowId), season: String(item.season), episode: String(item.episode), language: renameLanguage, refresh: String(refresh) });
+      const response = await fetch(`/api/tmdb/episode?${params.toString()}`);
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      setTmdbEpisodeDetail(await response.json() as TmdbEpisodeDetail);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '获取 TMDB 详情失败');
+    } finally {
+      setLoadingTmdbEpisodeDetail(false);
     }
   }
 
@@ -891,7 +1027,8 @@ export function App() {
       body: JSON.stringify({
         path: item.path,
         template: renameTemplate,
-        useTmdb: options.forceTmdb ?? false,
+        matchPattern: renameMatchPattern,
+        bypassTmdbCache: options.forceTmdb ?? false,
         language: renameLanguage,
         show: options.show ?? item.show,
         title: item.title,
@@ -938,7 +1075,6 @@ export function App() {
       }
       const result = await response.json();
       setTmdbResults(asArray<TMDBSearchResult>(result.items));
-      setTmdbResultsCollapsed(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : '搜索 TMDB 失败');
     } finally {
@@ -968,7 +1104,7 @@ export function App() {
           setTmdbApplyProgress(completed);
         }
       });
-      setTmdbResultsCollapsed(true);
+      setTmdbMatchOpen(false);
     } finally {
       applyingTmdbShowRef.current = false;
       setApplyingTmdbShowId(null);
@@ -1081,8 +1217,8 @@ export function App() {
     const check = await checkResponse.json() as RenameUndoCheckResult;
     setUndoCheckResult(check);
     if (!check.canUndo) {
-      setError('该批次存在不可撤销项，已停止撤销。请展开历史查看详情。');
-      setExpandedHistoryIds((ids) => [...new Set([...ids, id])]);
+      setError('该批次存在不可撤销项，已停止撤销。已打开详情供检查。');
+      setSelectedHistoryBatch(check.batch);
       return;
     }
     if (!window.confirm(`确认撤销该批次的 ${check.items.length} 个文件移动？`)) {
@@ -1106,17 +1242,13 @@ export function App() {
     }
   }
 
-  function toggleHistoryDetails(id: string) {
-    setExpandedHistoryIds((ids) => ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]);
-  }
-
   async function addWatchDir() {
     if (!newWatchDir.trim()) return;
     setError('');
     const response = await fetch('/api/watch-dirs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, enabled: newWatchDirEnabled })
+      body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, watchEnabled: newWatchDirWatchEnabled, scanOnStart: false, useGlobalProcessing: newWatchDirUseGlobalProcessing, processing: newWatchDirProcessing })
     });
     if (!response.ok) {
       setError(await response.text());
@@ -1125,14 +1257,38 @@ export function App() {
     const created = await response.json();
     setWatchDirs((items) => [...items, created]);
     setNewWatchDir('');
-    setNewWatchDirEnabled(true);
+    setNewWatchDirWatchEnabled(true);
+    setNewWatchDirUseGlobalProcessing(true);
+    setNewWatchDirProcessing(outputProcessingFromConfig(config));
     setAddWatchDirOpen(false);
-    setNotice('媒体目录已添加。自动监听和启动扫描将在服务重启后按新配置生效，可立即手动补扫。');
+    setNotice('媒体目录已添加，自动监听配置已热更新。');
+  }
+
+  function openEditWatchDir(dir: WatchDir) {
+    setEditingWatchDir(dir);
+    setEditingWatchDirPath(dir.path);
+    setEditingWatchDirWatchEnabled(dir.watchEnabled);
+    setEditingWatchDirUseGlobalProcessing(dir.useGlobalProcessing);
+    setEditingWatchDirProcessing(dir.processing?.strategy ? dir.processing : outputProcessingFromConfig(config));
+  }
+
+  async function submitEditWatchDir() {
+    if (!editingWatchDir || !editingWatchDirPath.trim()) return;
+    const updated = await updateWatchDir(editingWatchDir, {
+      path: editingWatchDirPath.trim(),
+      watchEnabled: editingWatchDirWatchEnabled,
+      scanOnStart: false,
+      useGlobalProcessing: editingWatchDirUseGlobalProcessing,
+      processing: editingWatchDirProcessing
+    });
+    if (!updated) return;
+    setEditingWatchDir(null);
+    setEditingWatchDirPath('');
   }
 
   async function updateWatchDir(dir: WatchDir, patch: Partial<WatchDir>) {
     setError('');
-    const next = { ...dir, ...patch };
+    const next = { ...dir, ...patch, scanOnStart: false };
     const response = await fetch(`/api/watch-dirs/${dir.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -1140,11 +1296,12 @@ export function App() {
     });
     if (!response.ok) {
       setError(await response.text());
-      return;
+      return false;
     }
     const updated = await response.json();
     setWatchDirs((items) => items.map((item) => item.id === dir.id ? updated : item));
-    setNotice('目录配置已更新，自动监听变更需要重启服务后生效；补扫可立即手动执行。');
+    setNotice('目录配置已更新，自动监听配置已热更新。');
+    return true;
   }
 
   async function deleteWatchDir(id: number) {
@@ -1161,14 +1318,18 @@ export function App() {
     setRescanning(true);
     setError('');
     try {
-      const payload: Record<string, string | number> = { strategy: rescanStrategy };
+      const payload: Record<string, unknown> = {
+        useCustomProcessing: rescanUseCustomProcessing,
+        processing: rescanProcessing
+      };
       if (rescanScope === 'dir') {
-        const selected = watchDirs.find((dir) => dir.path === rescanTarget);
+        const selected = watchDirs.find((dir) => String(dir.id) === rescanWatchDirId);
         if (!selected) {
           setError('请选择媒体目录');
           return;
         }
         payload.watchDirId = selected.id;
+        if (rescanTarget.trim()) payload.path = rescanTarget.trim();
       } else if (rescanScope === 'path') {
         if (!rescanTarget.trim()) {
           setError('请输入目录或文件路径');
@@ -1182,9 +1343,10 @@ export function App() {
         body: JSON.stringify(payload)
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
+      setNotice('补扫已加入队列。');
       await loadTasks(1);
     } catch (err) {
       setError(err instanceof Error ? err.message : '补扫失败');
@@ -1195,8 +1357,11 @@ export function App() {
 
   function openRescanDialog(scope: RescanScope, target = '') {
     setRescanScope(scope);
-    setRescanTarget(target);
-    setRescanStrategy('missing');
+    const selected = scope === 'dir' ? watchDirs.find((dir) => dir.path === target) : undefined;
+    setRescanWatchDirId(selected ? String(selected.id) : '');
+    setRescanTarget('');
+    setRescanUseCustomProcessing(false);
+    setRescanProcessing(outputProcessingFromConfig(config));
     setRescanOpen(true);
   }
 
@@ -1508,38 +1673,60 @@ export function App() {
       </aside>
 
       <section className="content-panel">
-        {error && <section className="error-card">{error}</section>}
-        {notice && <section className="notice-card">{notice}</section>}
+        {notice && <section className="toast-card" role="status">{notice}</section>}
 
         {activePage === 'dashboard' && (
-        <section className="page-grid dashboard-grid">
-          <Card title="当前配置">
-            <Row label="监听地址" value={config?.server.addr ?? '-'} />
-            <Row label="显示时区" value={displayTimezone} />
-            <Row label="数据库" value={config?.database.path ?? '-'} />
-            <Row label="扫描处理并发" value={String(config?.processing.concurrency ?? '-')} />
-            <Row label="整理命名并发" value={String(config?.renaming?.concurrency ?? '-')} />
-            <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
-            <Row label="TMDB 地址" value={config?.scraping.tmdbBaseUrl ?? '-'} />
-            <Row label="TMDB 接口超时" value={`${config?.scraping.tmdbRequestTimeoutSeconds ?? '-'}s`} />
-            <Row label="字幕提取" value={config?.processing.enableSubtitles ? '开启' : '关闭'} />
-            <Row label="MediaInfo" value={config?.processing.enableMediaInfo ? '开启' : '关闭'} />
-            <Row label="NFO" value={config?.processing.enableNfo ? '开启' : '关闭'} />
-            <Row label="BIF" value={config?.processing.enableBif ? '开启' : '关闭'} />
-            <Row label="接管图片" value={config?.processing.enableImageTakeover ? '开启' : '关闭'} />
-          </Card>
+        <section className="dashboard-page">
+          <section className="dashboard-overview">
+            <div className="dashboard-heading">
+              <p className="eyebrow">Dashboard</p>
+              <h2>媒体元数据控制台</h2>
+              <p>查看服务状态、任务队列、目录监听和本地工具可用性。</p>
+            </div>
+            <div className="dashboard-metrics" aria-label="运行概览">
+              <DashboardMetric label="服务状态" value={health?.status ?? 'loading'} tone={health?.status === 'ok' ? 'good' : 'warn'} />
+              <DashboardMetric label="任务总数" value={String(taskTotal)} />
+              <DashboardMetric label="活跃任务" value={String(activeTaskCount)} tone={activeTaskCount ? 'warn' : 'neutral'} />
+              <DashboardMetric label="失败任务" value={String(failedTaskCount)} tone={failedTaskCount ? 'bad' : 'good'} />
+              <DashboardMetric label="媒体目录" value={`${enabledWatchDirCount}/${watchDirs.length}`} />
+              <DashboardMetric label="可用工具" value={`${availableToolCount}/${tools.length || 4}`} tone={tools.length && availableToolCount !== tools.length ? 'bad' : 'good'} />
+            </div>
+          </section>
 
-          <Card title="工具状态" action={<button onClick={checkTools} disabled={checkingTools}>{checkingTools ? '检测中' : '一键检测'}</button>}>
-            {tools.length ? tools.map((tool) => (
-              <div className="tool" key={tool.name}>
-                <div>
-                  <strong>{tool.name}</strong>
-                  <small>{tool.version || tool.error || '未检测'}</small>
-                </div>
-                <span className={tool.available ? 'pill ok' : 'pill bad'}>{tool.available ? '可用' : '不可用'}</span>
+          <section className="dashboard-content-grid">
+            <Card title="配置摘要">
+              <Row label="监听地址" value={config?.server.addr ?? '-'} />
+              <Row label="显示时区" value={displayTimezone} />
+              <Row label="数据库" value={config?.database.path ?? '-'} />
+              <Row label="扫描并发" value={String(config?.processing.concurrency ?? '-')} />
+              <Row label="重命名并发" value={String(config?.renaming?.concurrency ?? '-')} />
+              <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
+              <Row label="TMDB" value={config?.scraping.enableTmdb ? `${config?.scraping.tmdbBaseUrl ?? '-'} · ${config?.scraping.tmdbRequestTimeoutSeconds ?? '-'}s` : '关闭'} />
+            </Card>
+
+            <Card title="处理能力">
+              <div className="feature-grid">
+                <DashboardFeature label="字幕提取" enabled={config?.processing.enableSubtitles} />
+                <DashboardFeature label="MediaInfo" enabled={config?.processing.enableMediaInfo} />
+                <DashboardFeature label="NFO" enabled={config?.processing.enableNfo} />
+                <DashboardFeature label="BIF" enabled={config?.processing.enableBif} />
+                <DashboardFeature label="图片接管" enabled={config?.processing.enableImageTakeover} />
+                <DashboardFeature label="人物刮削" enabled={config?.scraping.enablePeople} />
               </div>
-            )) : <p className="muted">尚未检测工具状态。</p>}
-          </Card>
+            </Card>
+
+            <Card title="工具状态" action={<button onClick={checkTools} disabled={checkingTools}>{checkingTools ? '检测中' : '重新检测'}</button>}>
+              {tools.length ? tools.map((tool) => (
+                <div className="tool" key={tool.name}>
+                  <div>
+                    <strong>{tool.name}</strong>
+                    <small>{tool.version || tool.error || '未检测'}</small>
+                  </div>
+                  <span className={tool.available ? 'pill ok' : 'pill bad'}>{tool.available ? '可用' : '不可用'}</span>
+                </div>
+              )) : <p className="muted">尚未检测工具状态。</p>}
+            </Card>
+          </section>
         </section>
       )}
 
@@ -1548,8 +1735,12 @@ export function App() {
           <Card title="设置" action={<button onClick={saveConfig} disabled={savingConfig || !config}>{savingConfig ? '保存中' : '保存配置'}</button>}>
             {config ? (
               <div className="config-form settings-form">
-                <section className="settings-section">
-                  <h3>基础</h3>
+                <div className="settings-tabs" role="tablist" aria-label="设置分类">
+                  <button className={settingsTab === 'basic' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'basic'} onClick={() => setSettingsTab('basic')}>基础</button>
+                  <button className={settingsTab === 'processing' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'processing'} onClick={() => setSettingsTab('processing')}>处理</button>
+                  <button className={settingsTab === 'scraping' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'scraping'} onClick={() => setSettingsTab('scraping')}>刮削</button>
+                </div>
+                <section className={`settings-section ${settingsTab === 'basic' ? 'active' : ''}`}>
                   <label>显示时区<input list="timezone-options" value={config.server.timezone} onChange={(event) => updateConfig((draft) => { draft.server.timezone = event.target.value; })} placeholder="Asia/Shanghai" /></label>
                   <datalist id="timezone-options">
                     {timeZoneOptions.map((timezone) => <option key={timezone} value={timezone} />)}
@@ -1558,27 +1749,25 @@ export function App() {
                   <label>ffprobe<input value={config.tools.ffprobe} onChange={(event) => updateConfig((draft) => { draft.tools.ffprobe = event.target.value; })} /></label>
                   <label>mkvextract<input value={config.tools.mkvextract} onChange={(event) => updateConfig((draft) => { draft.tools.mkvextract = event.target.value; })} /></label>
                   <label>mediainfo<input value={config.tools.mediainfo} onChange={(event) => updateConfig((draft) => { draft.tools.mediainfo = event.target.value; })} /></label>
+                </section>
+                <section className={`settings-section ${settingsTab === 'processing' ? 'active' : ''}`}>
                   <label className="extensions-field">扩展名<textarea value={extensionInput} onChange={(event) => updateConfig((draft) => { draft.processing.extensions = normalizeExtensions(event.target.value); })} placeholder={commonVideoExtensions.join('\n')} rows={8} /><small>每行一个后缀，或用逗号分隔，例如 `.mkv`、`.mp4`、`.rmvb`。</small></label>
                   <label>扫描处理并发<input type="number" min="1" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
                   <label>整理命名并发<input type="number" min="1" max="8" value={config.renaming?.concurrency ?? 3} onChange={(event) => updateConfig((draft) => { draft.renaming = { ...(draft.renaming ?? { concurrency: 3 }), concurrency: Number(event.target.value) }; })} /><small>用于生成预览、批量修正季集、批量应用剧集；设为 1 可降低 TMDB 风控风险。</small></label>
-                  <label>BIF 宽度<input type="number" value={config.processing.bifWidth} onChange={(event) => updateConfig((draft) => { draft.processing.bifWidth = Number(event.target.value); })} /></label>
-                  <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
-                  <SelectField label="BIF 加速" value={config.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => updateConfig((draft) => { draft.processing.bifHwAccel = value; })} />
-                </section>
-                <section className="settings-section">
-                  <h3>处理开关</h3>
-                  <Toggle label="覆盖已有文件" checked={config.processing.overwriteExisting} onChange={(value) => updateConfig((draft) => { draft.processing.overwriteExisting = value; })} />
+                  <SelectField label="处理策略" value={config.processing.strategy || 'missing'} options={[{ code: 'missing', name: '只补缺失' }, { code: 'force', name: '强制重建' }]} onChange={(value) => updateConfig((draft) => { draft.processing.strategy = value as RescanStrategy; })} />
                   <Toggle label="字幕提取" checked={config.processing.enableSubtitles} onChange={(value) => updateConfig((draft) => { draft.processing.enableSubtitles = value; })} />
                   <Toggle label="MediaInfo" checked={config.processing.enableMediaInfo} onChange={(value) => updateConfig((draft) => { draft.processing.enableMediaInfo = value; })} />
                   <Toggle label="NFO" checked={config.processing.enableNfo} onChange={(value) => updateConfig((draft) => { draft.processing.enableNfo = value; })} />
                   <Toggle label="BIF" checked={config.processing.enableBif} onChange={(value) => updateConfig((draft) => { draft.processing.enableBif = value; })} />
+                  <label>BIF 宽度<input type="number" value={config.processing.bifWidth} onChange={(event) => updateConfig((draft) => { draft.processing.bifWidth = Number(event.target.value); })} /></label>
+                  <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
+                  <SelectField label="BIF 加速" value={config.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => updateConfig((draft) => { draft.processing.bifHwAccel = value; })} />
                   <Toggle label="接管剧集/季度图片" checked={config.processing.enableImageTakeover} onChange={(value) => updateConfig((draft) => { draft.processing.enableImageTakeover = value; })} />
+                </section>
+                <section className={`settings-section settings-section-wide ${settingsTab === 'scraping' ? 'active' : ''}`}>
                   <Toggle label="TMDB 刮削" checked={config.scraping.enableTmdb} onChange={(value) => updateConfig((draft) => { draft.scraping.enableTmdb = value; })} />
                   <Toggle label="刮削演员/职员" checked={config.scraping.enablePeople} onChange={(value) => updateConfig((draft) => { draft.scraping.enablePeople = value; })} />
                   <Toggle label="优先原语言海报" checked={config.scraping.preferOriginalLanguagePoster} onChange={(value) => updateConfig((draft) => { draft.scraping.preferOriginalLanguagePoster = value; })} />
-                </section>
-                <section className="settings-section settings-section-wide">
-                  <h3>刮削</h3>
                   <label>Fanart API Key<input type="password" value={config.scraping.fanartApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartApiKey = event.target.value; })} placeholder="用于 clearart/clearlogo" /></label>
                   <label>Fanart 地址<input value={config.scraping.fanartBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartBaseUrl = event.target.value; })} placeholder="https://webservice.fanart.tv" /><small>程序会自动追加 `/v3`，这里只填前缀，支持子目录。</small></label>
                   <label>TMDB Token<input type="password" value={config.scraping.tmdbToken} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbToken = event.target.value; })} placeholder="Bearer token" /></label>
@@ -1599,16 +1788,16 @@ export function App() {
 
         {activePage === 'watchDirs' && (
         <section className="page-grid">
-          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary" onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '补扫中' : '补扫'}</button><button onClick={() => setAddWatchDirOpen(true)}>添加媒体目录</button></div>}>
+          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary" onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '扫描中' : '扫描生成'}</button><button onClick={() => { setNewWatchDirProcessing(outputProcessingFromConfig(config)); setAddWatchDirOpen(true); }}>添加媒体目录</button></div>}>
             {watchDirs.length ? watchDirs.map((dir) => (
               <div className="dir-item" key={dir.id}>
                 <div>
                   <strong>{dir.path}</strong>
-                  <small>{dir.enabled ? '自动监听' : '仅手动补扫'} · {dir.recursive ? '递归' : '当前层'}</small>
+                  <small>{dir.watchEnabled ? '自动监听' : '不监听'} · {dir.useGlobalProcessing ? '跟随全局处理设置' : '独立处理设置'}</small>
                 </div>
                 <div className="inline-actions">
-                  <button className="secondary" onClick={() => void updateWatchDir(dir, { enabled: !dir.enabled })}>{dir.enabled ? '关闭监听' : '开启监听'}</button>
-                  <button onClick={() => openRescanDialog('dir', dir.path)} disabled={rescanning}>补扫</button>
+                  <button className="secondary" onClick={() => openEditWatchDir(dir)}>编辑</button>
+                  <button onClick={() => openRescanDialog('dir', dir.path)} disabled={rescanning}>扫描生成</button>
                   <button className="danger" onClick={() => deleteWatchDir(dir.id)}>删除</button>
                 </div>
               </div>
@@ -1619,48 +1808,44 @@ export function App() {
 
         {activePage === 'rename' && (
         <section className="page-grid rename-page-grid">
-          <Card title="整理命名" action={<button onClick={previewRename} disabled={previewingRename}>{previewingRename ? `扫描中 ${renamePreviewCount}` : '生成预览'}</button>}>
+          <Card title="整理命名" action={<button className="secondary" type="button" onClick={() => setRenameHistoryOpen(true)}>重命名历史{renameHistory.length ? ` (${renameHistory.length})` : ''}</button>}>
             <div className="rename-controls">
-              <label>目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}>选择</button></div></label>
-              <label>命名模板
+              <label className="rename-control-primary">目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}>选择</button></div></label>
+              <label className="rename-control-primary">命名模板
                 <div className="template-input-row">
                   <button className="target-path-preview rename-template-preview" type="button" onClick={() => setRenameTemplateEditorOpen(true)}>{renameTemplate || defaultRenameTemplate}</button>
-                  <select value="" onChange={(event) => { if (event.target.value) setRenameTemplate(event.target.value); }} disabled={!renameTemplateHistory.length} title="最近模板">
-                    <option value="">最近模板</option>
-                    {renameTemplateHistory.map((template) => <option key={template} value={template}>{template}</option>)}
-                  </select>
+                  <div className="template-history-picker">
+                    <button className="secondary template-history-trigger" type="button" onClick={() => setRenameTemplateHistoryOpen((value) => !value)} disabled={!renameTemplateHistory.length}>最近模板</button>
+                    {renameTemplateHistoryOpen ? <div className="template-history-menu">
+                      {renameTemplateHistory.map((template) => <div className="template-history-item" key={template}>
+                        <button className="template-history-use" type="button" title={template} onClick={() => { setRenameTemplate(template); setRenameTemplateHistoryOpen(false); }}>{template}</button>
+                        <button className="template-history-delete" type="button" title="删除最近模板" aria-label={`删除模板 ${template}`} onClick={() => deleteRenameTemplateHistory(template)}><span aria-hidden="true">&times;</span></button>
+                      </div>)}
+                    </div> : null}
+                  </div>
                 </div>
               </label>
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <label>字幕组<input value={renameReleaseGroup} onChange={(event) => setRenameReleaseGroup(event.target.value)} placeholder="留空则从原文件名识别" /></label>
-              <Toggle label="生成预览时查询 TMDB" checked={renameUseTmdb} onChange={setRenameUseTmdb} />
+              <div className="rename-preview-action">
+                <button className="secondary" type="button" onClick={() => void previewRename(true)} disabled={previewingRename}>忽略缓存重新生成</button>
+                <button type="button" onClick={() => void previewRename()} disabled={previewingRename}>{previewingRename ? renamePreviewTotal ? `生成预览 ${renamePreviewCount} / ${renamePreviewTotal}` : '正在扫描文件…' : '生成预览'}</button>
+              </div>
             </div>
-            <p className="muted">查询语言用于缺少 NFO 或 NFO 语言不匹配时查询 TMDB 元数据。预览确认后可勾选文件执行重命名，并同步同基名附属文件。</p>
           </Card>
 
-          <Card title="重命名预览">
+          <Card title="重命名预览" action={<div className="rename-preview-summary"><span>共 <strong>{renamePreview.length}</strong> 项</span><span>已选 <strong>{selectedRenamePaths.length}</strong></span><span className={renameWarningCount ? 'warn' : ''}>警告 <strong>{renameWarningCount}</strong></span><span className={renameErrorCount ? 'bad' : ''}>错误 <strong>{renameErrorCount}</strong></span></div>}>
             <div className="rename-match-bar">
-              <div className="inline-actions rename-bulk-actions">
-                <button className="secondary" type="button" onClick={selectAllRenameItems} disabled={!renamePreview.length}>全选</button>
-                <button className="secondary" type="button" onClick={invertRenameSelection} disabled={!renamePreview.length}>反选</button>
-                <button className="secondary" type="button" onClick={openBatchEpisodeDialog} disabled={!selectedRenamePaths.length}>批量修正季集</button>
-                <button type="button" onClick={applySelectedRenames} disabled={applyingRename || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
-                <span className="rename-preview-stats">并发 {renameBatchConcurrency} · 错误 {renameErrorCount} · 警告 {renameWarningCount}</span>
-              </div>
-              <div className="path-input">
-                <input value={tmdbQuery} onChange={(event) => setTmdbQuery(event.target.value)} placeholder="搜索 TMDB 剧集，例如 Frieren" />
-                <button type="button" onClick={searchTmdbShows} disabled={searchingTmdb}>{searchingTmdb ? '搜索中' : '搜索剧集'}</button>
-                {tmdbResults.length ? <button className="secondary" type="button" onClick={() => setTmdbResultsCollapsed((value) => !value)}>{tmdbResultsCollapsed ? `展开结果 (${tmdbResults.length})` : '收起结果'}</button> : null}
-              </div>
-              {tmdbResults.length && !tmdbResultsCollapsed ? (
-                <div className="tmdb-results">
-                  {tmdbResults.map((show) => (
-                    <button type="button" key={show.id} onClick={() => applyTmdbShowToSelected(show)} disabled={applyingTmdbShowId !== null} title="套用到勾选项并按各自行季集重新获取标题">
-                      {applyingTmdbShowId === show.id ? `应用中 ${tmdbApplyProgress}/${tmdbApplyTotal}` : show.name || show.originalName} <small>{show.firstAirDate?.slice(0, 4) || '----'} · #{show.id}</small>
-                    </button>
-                  ))}
+              <div className="rename-action-row">
+                <div className="inline-actions rename-bulk-actions">
+                  <button className="secondary" type="button" onClick={selectAllRenameItems} disabled={!renamePreview.length}>全选</button>
+                  <button className="secondary" type="button" onClick={invertRenameSelection} disabled={!renamePreview.length}>反选</button>
+                  <button className="secondary" type="button" onClick={openBatchEpisodeDialog} disabled={!selectedRenamePaths.length}>批量修正季集</button>
+                  <button className="secondary" type="button" onClick={() => setTmdbMatchOpen(true)} disabled={!selectedRenamePaths.length}>更改匹配剧集</button>
+                  <span className="rename-preview-stats">并发 {renameBatchConcurrency}</span>
                 </div>
-              ) : tmdbResults.length ? null : <p className="muted">勾选文件后搜索剧集，点击候选即可套用到选中项并重新预览。</p>}
+                <button className="rename-apply-button" type="button" onClick={applySelectedRenames} disabled={applyingRename || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
+              </div>
             </div>
             <div className="task-table-wrap">
               <table className="task-table rename-table">
@@ -1668,7 +1853,6 @@ export function App() {
                   <tr>
                     <th>选择</th>
                     <th>状态</th>
-                    <th>来源</th>
                     <th>识别结果</th>
                     <th>原文件名</th>
                     <th>新文件名</th>
@@ -1682,16 +1866,33 @@ export function App() {
                     return (
                     <tr className={selectedRenamePaths.includes(item.path) ? 'rename-row selected' : 'rename-row'} key={item.path} onClick={(event) => handleRenameRowClick(event, item, index)} title="点击行选择，Shift+点击连续选择">
                       <td><span className={selectedRenamePaths.includes(item.path) ? 'rename-row-index selected' : 'rename-row-index'} aria-hidden="true"><strong>{index + 1}</strong></span></td>
-                      <td><span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{item.status}</span></td>
-                      <td>{item.source || '-'}</td>
-                      <td className="rename-edit-cell">
-                        <input value={item.show || ''} onChange={(event) => updateRenameItem(item.path, { show: event.target.value })} placeholder="剧名" />
-                        <div className="rename-episode-edit">
-                          <input type="number" min="0" value={item.season ?? 0} onChange={(event) => updateRenameItem(item.path, { season: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false }); }} title="季，回车重新查 TMDB" />
-                          <input type="number" min="0" value={item.episode ?? 0} onChange={(event) => updateRenameItem(item.path, { episode: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false }); }} title="集，回车重新查 TMDB" />
+                      <td>
+                        <div className="rename-status-cell">
+                          <span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{item.status}</span>
+                          <small title={`身份来源：${renameIdentitySourceLabel(item.identitySource || item.source)}`}>{renameIdentitySourceLabel(item.identitySource || item.source)}</small>
+                          <small title={`元数据：${renameMetadataSourceLabel(item.metadataSource)}`}>{item.metadataSource === 'tmdb' ? 'TMDB' : renameMetadataSourceLabel(item.metadataSource)}</small>
                         </div>
-                        <input value={item.title || ''} onChange={(event) => updateRenameItem(item.path, { title: event.target.value })} placeholder="标题" />
-                        {item.tmdbShowId ? <small>TMDB #{item.tmdbShowId}</small> : null}
+                      </td>
+                      <td className="rename-edit-cell">
+                        <label className="rename-edit-field">
+                          <span>剧名</span>
+                          <input className="rename-readonly-input" value={item.show || ''} readOnly title="请勾选文件后使用“更改匹配剧集”修改剧集" placeholder="剧名" />
+                        </label>
+                        <div className="rename-episode-edit">
+                          <label className="rename-edit-field">
+                            <span>季</span>
+                            <input type="number" min="0" value={item.season ?? 0} onChange={(event) => updateRenameItem(item.path, { season: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false }); }} title="季，回车重新查 TMDB" />
+                          </label>
+                          <label className="rename-edit-field">
+                            <span>集</span>
+                            <input type="number" min="0" value={item.episode ?? 0} onChange={(event) => updateRenameItem(item.path, { episode: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false }); }} title="集，回车重新查 TMDB" />
+                          </label>
+                        </div>
+                        <label className="rename-edit-field">
+                          <span>标题</span>
+                          <input className="rename-readonly-input" value={item.title || ''} readOnly title="如需自定义标题，请直接编辑“新文件名”" placeholder="标题" />
+                        </label>
+                        {item.tmdbShowId ? <button className="tmdb-detail-link" type="button" onClick={() => void openTmdbEpisodeDetail(item)} disabled={loadingTmdbEpisodeDetail}>TMDB #{item.tmdbShowId}</button> : null}
                       </td>
                       <td className="path-cell">{item.currentName}</td>
                       <td className="rename-target-cell">
@@ -1702,36 +1903,17 @@ export function App() {
                       <td className="path-cell">{item.conflict ? '目标文件已存在' : item.message || '-'}</td>
                       <td>
                         <div className="inline-actions rename-row-actions">
-                          <button className="secondary" type="button" onClick={() => recalculateRenameItem({ ...item, manualName: false }, { keepManualName: false })} disabled={applyingTmdbShowId !== null || applyingBatchEpisode || recalculatingItem}>按模板</button>
-                          <button type="button" onClick={() => recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false })} disabled={applyingTmdbShowId !== null || applyingBatchEpisode || recalculatingItem}>{recalculatingItem ? '查询中' : '查 TMDB'}</button>
+                          <button type="button" title="根据当前剧名、季、集重新查询 TMDB 并生成预览" onClick={() => recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false })} disabled={applyingTmdbShowId !== null || applyingBatchEpisode || recalculatingItem}>{recalculatingItem ? '生成中' : '重新生成'}</button>
                         </div>
                       </td>
                     </tr>
                   );
                   }) : (
-                    <tr><td colSpan={8} className="empty-cell">尚未生成预览。</td></tr>
+                    <tr><td colSpan={7} className="empty-cell">尚未生成预览。</td></tr>
                   )}
                 </tbody>
               </table>
             </div>
-          </Card>
-
-          <Card title="重命名历史" action={<button className="secondary" onClick={() => void loadRenameHistory()} disabled={loadingRenameHistory}>{loadingRenameHistory ? '刷新中' : '刷新历史'}</button>}>
-            {renameHistory.length ? renameHistory.map((batch) => (
-              <div className="history-item" key={batch.id}>
-                <div className="history-summary">
-                  <button className="secondary" type="button" onClick={() => toggleHistoryDetails(batch.id)}>{expandedHistoryIds.includes(batch.id) ? '收起' : '详情'}</button>
-                  <div>
-                    <strong>{formatStoredTime(batch.createdAt, displayTimezone)}</strong>
-                    <small>{batch.items.length} 项 · {batch.id}{batch.undone ? ` · 已撤销 ${batch.undoneAt ? formatStoredTime(batch.undoneAt, displayTimezone) : ''}` : ''}</small>
-                  </div>
-                  <div className="inline-actions">
-                    <button className="secondary" onClick={() => void undoRenameBatch(batch.id)} disabled={batch.undone || undoingHistoryId === batch.id}>{batch.undone ? '已撤销' : undoingHistoryId === batch.id ? '撤销中' : '撤销'}</button>
-                  </div>
-                </div>
-                {expandedHistoryIds.includes(batch.id) && <HistoryDetails batch={batch} undoCheck={undoCheckResult?.batch?.id === batch.id ? undoCheckResult : null} />}
-              </div>
-            )) : <p className="muted">暂无重命名历史。</p>}
           </Card>
         </section>
       )}
@@ -1958,7 +2140,7 @@ export function App() {
 
         {activePage === 'tasks' && (
         <section className="page-grid task-page-grid">
-          <Card title="任务列表" action={<div className="inline-actions"><button className="secondary" onClick={() => void retrySelectedTasks()} disabled={retryingTasks || selectedTaskIds.length === 0}>{retryingTasks ? '重试中' : `重试选中${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="secondary" onClick={() => void ignoreSelectedTasks()} disabled={ignoringTasks || selectedTaskIds.length === 0}>{ignoringTasks ? '忽略中' : `忽略失败${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button></div>}>
+          <Card title="任务列表" action={<div className="inline-actions"><button className="secondary" type="button" onClick={() => setRecentArtifactsOpen(true)}>最近产物</button><button className="secondary" onClick={() => void retrySelectedTasks()} disabled={retryingTasks || selectedTaskIds.length === 0}>{retryingTasks ? '重试中' : `重试选中${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="secondary" onClick={() => void ignoreSelectedTasks()} disabled={ignoringTasks || selectedTaskIds.length === 0}>{ignoringTasks ? '忽略中' : `忽略失败${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button></div>}>
             <div className="task-status-tabs" role="tablist" aria-label="任务状态过滤">
               {taskStatusFilters.map((status) => (
                 <button className={taskStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} role="tab" aria-selected={taskStatusFilter === status.value} onClick={() => selectTaskStatusFilter(status.value)}>
@@ -2016,20 +2198,52 @@ export function App() {
             </div>
           </Card>
 
-          <Card title="最近产物">
-            {artifacts.length ? artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} timezone={displayTimezone} />) : <p className="muted">暂无产物。</p>}
-          </Card>
+          {recentArtifactsOpen && <RecentArtifactsModal artifacts={artifacts} timezone={displayTimezone} onClose={() => setRecentArtifactsOpen(false)} />}
           {selectedTask && <TaskDetailModal detail={selectedTask} timezone={displayTimezone} onClose={() => setSelectedTask(null)} />}
         </section>
       )}
-      {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} strategy={rescanStrategy} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={setRescanScope} onTargetChange={setRescanTarget} onStrategyChange={setRescanStrategy} onBrowsePath={() => setDirectoryPicker({ title: '选择补扫目录', value: rescanTarget, onSelect: setRescanTarget })} onSubmit={() => void rescan()} />}
-      {addWatchDirOpen && <AddWatchDirModal path={newWatchDir} enabled={newWatchDirEnabled} onPathChange={setNewWatchDir} onEnabledChange={setNewWatchDirEnabled} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
+      {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} watchDirId={rescanWatchDirId} useCustomProcessing={rescanUseCustomProcessing} processing={rescanProcessing} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={(value) => { setRescanScope(value); setRescanTarget(''); setRescanWatchDirId(''); }} onTargetChange={setRescanTarget} onWatchDirIdChange={(value) => { setRescanWatchDirId(value); setRescanTarget(''); }} onUseCustomProcessingChange={(value) => { setRescanUseCustomProcessing(value); if (value) setRescanProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setRescanProcessing((value) => ({ ...value, ...patch }))} onBrowsePath={() => { const rootPath = rescanScope === 'dir' ? watchDirs.find((dir) => String(dir.id) === rescanWatchDirId)?.path ?? '' : ''; setDirectoryPicker({ title: '选择扫描路径', value: rescanTarget || rootPath, rootPath: rootPath || undefined, onSelect: setRescanTarget }); }} onSubmit={() => void rescan()} />}
+      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
+      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
-      {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} placeholders={renamePlaceholders} onChange={setRenameTemplate} onClose={() => setRenameTemplateEditorOpen(false)} />}
+      {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
+      {tmdbEpisodeDetail && <TmdbEpisodeDetailModal detail={tmdbEpisodeDetail} language={renameLanguage} refreshing={loadingTmdbEpisodeDetail} onRefresh={() => void openTmdbEpisodeDetail({ tmdbShowId: tmdbEpisodeDetail.showId, season: tmdbEpisodeDetail.season, episode: tmdbEpisodeDetail.episode } as RenamePreviewItem, true)} onClose={() => setTmdbEpisodeDetail(null)} />}
+      {renameHistoryOpen && <RenameHistoryModal history={renameHistory} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onOpenDetails={setSelectedHistoryBatch} onUndo={(id) => void undoRenameBatch(id)} />}
+      {selectedHistoryBatch && <RenameHistoryDetailsModal batch={selectedHistoryBatch} undoCheck={undoCheckResult?.batch?.id === selectedHistoryBatch.id ? undoCheckResult : null} timezone={displayTimezone} onClose={() => setSelectedHistoryBatch(null)} />}
+      {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} matchPattern={renameMatchPattern} sample={renamePreview[0]?.currentName || renamePath} placeholders={renamePlaceholders} onChange={setRenameTemplate} onMatchPatternChange={setRenameMatchPattern} onClose={() => setRenameTemplateEditorOpen(false)} />}
       {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
-      {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
+      {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} rootPath={directoryPicker.rootPath} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
+      {error && <AlertDialog title="操作失败" message={error} onClose={() => setError('')} />}
       </section>
     </main>
+  );
+}
+
+function AlertDialog(props: { title: string; message: string; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop alert-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card alert-dialog" role="alertdialog" aria-modal="true" aria-labelledby="alert-dialog-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header alert-header">
+          <div className="alert-title">
+            <span aria-hidden="true">!</span>
+            <h2 id="alert-dialog-title">{props.title}</h2>
+          </div>
+          <IconCloseButton onClick={props.onClose} />
+        </div>
+        <div className="alert-message">{props.message}</div>
+        <div className="inline-actions modal-actions">
+          <button onClick={props.onClose} autoFocus>知道了</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function IconCloseButton(props: { onClick: () => void; disabled?: boolean }) {
+  return (
+    <button className="icon-close-button" type="button" onClick={props.onClick} disabled={props.disabled} aria-label="关闭" title="关闭">
+      <span aria-hidden="true">&times;</span>
+    </button>
   );
 }
 
@@ -2058,22 +2272,54 @@ function Row(props: { label: string; value: string }) {
   );
 }
 
+function DashboardMetric(props: { label: string; value: string; tone?: 'neutral' | 'good' | 'warn' | 'bad' }) {
+  return (
+    <div className={`dashboard-metric ${props.tone ?? 'neutral'}`}>
+      <span>{props.label}</span>
+      <strong>{props.value}</strong>
+    </div>
+  );
+}
+
+function DashboardFeature(props: { label: string; enabled?: boolean }) {
+  return (
+    <div className={props.enabled ? 'dashboard-feature enabled' : 'dashboard-feature'}>
+      <span>{props.label}</span>
+      <strong>{props.enabled ? '开启' : '关闭'}</strong>
+    </div>
+  );
+}
+
 function ArtifactRow(props: { artifact: Artifact; timezone: string }) {
   return <Row label={`${props.artifact.type} · ${formatStoredTime(props.artifact.createdAt, props.timezone)}`} value={props.artifact.path} />;
+}
+
+function RecentArtifactsModal(props: { artifacts: Artifact[]; timezone: string; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card recent-artifacts-modal" role="dialog" aria-modal="true" aria-labelledby="recent-artifacts-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <h2 id="recent-artifacts-title">最近产物</h2>
+          <IconCloseButton onClick={props.onClose} />
+        </div>
+        {props.artifacts.length ? props.artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} timezone={props.timezone} />) : <p className="muted">暂无产物。</p>}
+      </section>
+    </div>
+  );
 }
 
 function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose: () => void }) {
   const logs = [...asArray<TaskLog>(props.detail.logs)].reverse();
   return (
     <div className="modal-backdrop">
-      <section className="modal-card">
+      <section className="modal-card rescan-modal">
         <div className="card-header">
           <h2>任务详情</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <Row label="任务" value={`${props.detail.task.type} #${props.detail.task.id}`} />
         {props.detail.task.mediaPath && <Row label="文件" value={props.detail.task.mediaPath} />}
-        <Row label="覆盖已有" value={props.detail.task.overwriteExisting ? '是' : '否'} />
+        <Row label="处理策略" value={props.detail.task.overwriteExisting ? '强制重建' : '只补缺失'} />
         <Row label="状态" value={props.detail.task.status} />
         <Row label="尝试次数" value={String(props.detail.task.attempts)} />
         <Row label="创建时间" value={formatStoredTime(props.detail.task.createdAt, props.timezone)} />
@@ -2105,13 +2351,17 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
 function RescanModal(props: {
   scope: RescanScope;
   target: string;
-  strategy: RescanStrategy;
+  watchDirId: string;
+  useCustomProcessing: boolean;
+  processing: OutputProcessingConfig;
   directories: WatchDir[];
   rescanning: boolean;
   onClose: () => void;
   onScopeChange: (value: RescanScope) => void;
   onTargetChange: (value: string) => void;
-  onStrategyChange: (value: RescanStrategy) => void;
+  onWatchDirIdChange: (value: string) => void;
+  onUseCustomProcessingChange: (value: boolean) => void;
+  onProcessingChange: (patch: Partial<OutputProcessingConfig>) => void;
   onBrowsePath: () => void;
   onSubmit: () => void;
 }) {
@@ -2119,55 +2369,91 @@ function RescanModal(props: {
     <div className="modal-backdrop">
       <section className="modal-card">
         <div className="card-header">
-          <h2>补扫</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <h2>扫描生成</h2>
+          <IconCloseButton onClick={props.onClose} />
         </div>
-        <div className="task-filters rescan-modal-grid">
-          <label>
-            范围
-            <select value={props.scope} onChange={(event) => props.onScopeChange(event.target.value as RescanScope)}>
-              <option value="all">全部媒体目录</option>
-              <option value="dir">指定媒体目录</option>
-              <option value="path">指定路径</option>
-            </select>
-          </label>
-          {props.scope === 'dir' && (
+        <div className="rescan-modal-grid">
+          <section className="rescan-section">
+            <div className="rescan-section-heading">
+              <strong>扫描范围</strong>
+              <small>选择需要扫描生成的文件范围。</small>
+            </div>
             <label>
-              媒体目录
-              <select value={props.target} onChange={(event) => props.onTargetChange(event.target.value)}>
-                <option value="">请选择</option>
-                {props.directories.map((dir) => <option key={dir.id} value={dir.path}>{dir.path}</option>)}
+              范围
+              <select value={props.scope} onChange={(event) => props.onScopeChange(event.target.value as RescanScope)}>
+                <option value="all">全部媒体目录</option>
+                <option value="dir">媒体目录或子路径</option>
+                <option value="path">任意路径</option>
               </select>
             </label>
+            {props.scope === 'dir' && (
+              <label>
+                媒体目录
+                <select value={props.watchDirId} onChange={(event) => props.onWatchDirIdChange(event.target.value)}>
+                  <option value="">请选择</option>
+                  {props.directories.map((dir) => <option key={dir.id} value={String(dir.id)}>{dir.path}</option>)}
+                </select>
+              </label>
+            )}
+            {(props.scope === 'path' || props.scope === 'dir') && (
+              <label>
+                {props.scope === 'dir' ? '子路径（留空扫描整个媒体目录）' : '路径'}
+                <div className="path-input"><input value={props.target} onChange={(event) => props.onTargetChange(event.target.value)} placeholder="D:\\Media\\Anime\\S01" /><button type="button" onClick={props.onBrowsePath} disabled={props.scope === 'dir' && !props.watchDirId}>选择</button></div>
+              </label>
+            )}
+          </section>
+          <section className="rescan-section">
+            <div className="rescan-section-heading">
+              <strong>处理设置</strong>
+              <small>默认继承所属媒体目录设置，也可以为本次扫描单独配置。</small>
+            </div>
+            <Toggle label="使用一次性处理设置" checked={props.useCustomProcessing} onChange={props.onUseCustomProcessingChange} />
+            {!props.useCustomProcessing && <p className="rescan-inherit-note">路径不属于媒体目录时，将继承全局处理设置。</p>}
+          </section>
+          {props.useCustomProcessing && (
+            <section className="rescan-section rescan-custom-settings">
+              <div className="rescan-section-heading">
+                <strong>一次性处理设置</strong>
+                <small>这些设置只应用于本次扫描生成任务。</small>
+              </div>
+              <SelectField label="处理策略" value={props.processing.strategy} options={[{ code: 'missing', name: '只补缺失' }, { code: 'force', name: '强制重建' }]} onChange={(value) => props.onProcessingChange({ strategy: value as RescanStrategy })} />
+              <div className="rescan-toggle-grid">
+                <Toggle label="字幕提取" checked={props.processing.enableSubtitles} onChange={(value) => props.onProcessingChange({ enableSubtitles: value })} />
+                <Toggle label="MediaInfo" checked={props.processing.enableMediaInfo} onChange={(value) => props.onProcessingChange({ enableMediaInfo: value })} />
+                <Toggle label="NFO" checked={props.processing.enableNfo} onChange={(value) => props.onProcessingChange({ enableNfo: value })} />
+                <Toggle label="BIF" checked={props.processing.enableBif} onChange={(value) => props.onProcessingChange({ enableBif: value })} />
+                <Toggle label="接管剧集/季度图片" checked={props.processing.enableImageTakeover} onChange={(value) => props.onProcessingChange({ enableImageTakeover: value })} />
+              </div>
+              {props.processing.enableBif && (
+                <div className="rescan-bif-grid">
+                  <label>BIF 宽度<input type="number" value={props.processing.bifWidth} onChange={(event) => props.onProcessingChange({ bifWidth: Number(event.target.value) })} /></label>
+                  <label>BIF 间隔秒<input type="number" value={props.processing.bifInterval} onChange={(event) => props.onProcessingChange({ bifInterval: Number(event.target.value) })} /></label>
+                  <SelectField label="BIF 加速" value={props.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => props.onProcessingChange({ bifHwAccel: value })} />
+                </div>
+              )}
+            </section>
           )}
-          {props.scope === 'path' && (
-            <label>
-              路径
-              <div className="path-input"><input value={props.target} onChange={(event) => props.onTargetChange(event.target.value)} placeholder="D:\\Media\\Anime\\S01" /><button type="button" onClick={props.onBrowsePath}>选择</button></div>
-            </label>
-          )}
-          <label>
-            策略
-            <select value={props.strategy} onChange={(event) => props.onStrategyChange(event.target.value as RescanStrategy)}>
-              <option value="missing">只补缺失</option>
-              <option value="force">强制重建</option>
-            </select>
-          </label>
         </div>
         <div className="inline-actions modal-actions">
           <button className="secondary" onClick={props.onClose}>取消</button>
-          <button onClick={props.onSubmit} disabled={props.rescanning}>{props.rescanning ? '补扫中' : '开始补扫'}</button>
+          <button onClick={props.onSubmit} disabled={props.rescanning}>{props.rescanning ? '扫描中' : '开始扫描生成'}</button>
         </div>
       </section>
     </div>
   );
 }
 
-function AddWatchDirModal(props: {
+function WatchDirModal(props: {
+  title: string;
+  submitLabel: string;
   path: string;
-  enabled: boolean;
+  watchEnabled: boolean;
+  useGlobalProcessing: boolean;
+  processing: OutputProcessingConfig;
   onPathChange: (value: string) => void;
-  onEnabledChange: (value: boolean) => void;
+  onWatchEnabledChange: (value: boolean) => void;
+  onUseGlobalProcessingChange: (value: boolean) => void;
+  onProcessingChange: (patch: Partial<OutputProcessingConfig>) => void;
   onClose: () => void;
   onBrowsePath: () => void;
   onSubmit: () => void;
@@ -2176,20 +2462,34 @@ function AddWatchDirModal(props: {
     <div className="modal-backdrop">
       <section className="modal-card watch-dir-modal">
         <div className="card-header">
-          <h2>添加媒体目录</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <h2>{props.title}</h2>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <div className="config-form watch-dir-modal-form">
           <label>
             媒体目录路径
             <div className="path-input"><input value={props.path} onChange={(event) => props.onPathChange(event.target.value)} placeholder="D:\\Media\\Anime" autoFocus /><button type="button" onClick={props.onBrowsePath}>选择</button></div>
           </label>
-          <Toggle label="自动监听并启动时扫描" checked={props.enabled} onChange={props.onEnabledChange} />
+          <Toggle label="自动监听" checked={props.watchEnabled} onChange={props.onWatchEnabledChange} />
+          <Toggle label="跟随全局处理设置" checked={props.useGlobalProcessing} onChange={props.onUseGlobalProcessingChange} />
+          {!props.useGlobalProcessing && (
+            <>
+              <SelectField label="处理策略" value={props.processing.strategy} options={[{ code: 'missing', name: '只补缺失' }, { code: 'force', name: '强制重建' }]} onChange={(value) => props.onProcessingChange({ strategy: value as RescanStrategy })} />
+              <Toggle label="字幕提取" checked={props.processing.enableSubtitles} onChange={(value) => props.onProcessingChange({ enableSubtitles: value })} />
+              <Toggle label="MediaInfo" checked={props.processing.enableMediaInfo} onChange={(value) => props.onProcessingChange({ enableMediaInfo: value })} />
+              <Toggle label="NFO" checked={props.processing.enableNfo} onChange={(value) => props.onProcessingChange({ enableNfo: value })} />
+              <Toggle label="BIF" checked={props.processing.enableBif} onChange={(value) => props.onProcessingChange({ enableBif: value })} />
+              <label>BIF 宽度<input type="number" value={props.processing.bifWidth} onChange={(event) => props.onProcessingChange({ bifWidth: Number(event.target.value) })} /></label>
+              <label>BIF 间隔秒<input type="number" value={props.processing.bifInterval} onChange={(event) => props.onProcessingChange({ bifInterval: Number(event.target.value) })} /></label>
+              <SelectField label="BIF 加速" value={props.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => props.onProcessingChange({ bifHwAccel: value })} />
+              <Toggle label="接管剧集/季度图片" checked={props.processing.enableImageTakeover} onChange={(value) => props.onProcessingChange({ enableImageTakeover: value })} />
+            </>
+          )}
         </div>
-        <p className="muted">添加后会递归处理该目录。自动监听和启动扫描需要服务读取新配置后生效，手动补扫可立即执行。</p>
+        <p className="muted">保存后默认递归处理该目录。自动监听会在保存后立即热更新，无需重启服务。</p>
         <div className="inline-actions modal-actions">
           <button className="secondary" onClick={props.onClose}>取消</button>
-          <button onClick={props.onSubmit} disabled={!props.path.trim()}>添加</button>
+          <button onClick={props.onSubmit} disabled={!props.path.trim()}>{props.submitLabel}</button>
         </div>
       </section>
     </div>
@@ -2216,7 +2516,7 @@ function BatchEpisodeModal(props: {
       <section className="modal-card batch-episode-modal">
         <div className="card-header">
           <h2>批量修正季集</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <p className="muted">将应用到当前勾选的 {props.count} 个文件，并按修正后的季集重新查询 TMDB 预览。</p>
         <div className="config-form batch-episode-form">
@@ -2232,6 +2532,167 @@ function BatchEpisodeModal(props: {
         <div className="inline-actions modal-actions">
           <button className="secondary" onClick={props.onClose}>取消</button>
           <button onClick={props.onSubmit} disabled={props.applying}>{props.applying ? `应用中 ${props.progress}/${props.count}` : '应用并查 TMDB'}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TmdbMatchModal(props: {
+  count: number;
+  query: string;
+  results: TMDBSearchResult[];
+  searching: boolean;
+  applyingShowId: number | null;
+  applyProgress: number;
+  applyTotal: number;
+  onQueryChange: (value: string) => void;
+  onSearch: () => void;
+  onApply: (show: TMDBSearchResult) => void;
+  onClose: () => void;
+}) {
+  const applying = props.applyingShowId !== null;
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={applying ? undefined : props.onClose}>
+      <section className="modal-card tmdb-match-modal" role="dialog" aria-modal="true" aria-labelledby="tmdb-match-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <div>
+            <h2 id="tmdb-match-title">更改匹配剧集</h2>
+            <small>将应用到当前选中的 {props.count} 个文件，并重新生成预览。</small>
+          </div>
+          <IconCloseButton onClick={props.onClose} disabled={applying} />
+        </div>
+        <form className="tmdb-match-search" onSubmit={(event) => { event.preventDefault(); props.onSearch(); }}>
+          <input autoFocus value={props.query} onChange={(event) => props.onQueryChange(event.target.value)} placeholder="搜索 TMDB 剧集，例如 Frieren" />
+          <button type="submit" disabled={props.searching || applying || !props.query.trim()}>{props.searching ? '搜索中' : '搜索剧集'}</button>
+        </form>
+        <div className="tmdb-match-results">
+          {props.results.length ? props.results.map((show) => (
+            <button className="tmdb-match-result" type="button" key={show.id} onClick={() => props.onApply(show)} disabled={applying} title="套用到选中项并按各自行季集重新获取标题">
+              <span>
+                <strong>{show.name || show.originalName}</strong>
+                {show.originalName && show.originalName !== show.name ? <small>{show.originalName}</small> : null}
+              </span>
+              <span className="tmdb-match-meta">{show.firstAirDate?.slice(0, 4) || '年份未知'} · TMDB #{show.id}</span>
+              {show.overview ? <p>{show.overview}</p> : null}
+              {props.applyingShowId === show.id ? <em>应用中 {props.applyProgress}/{props.applyTotal}</em> : <em>选择并应用</em>}
+            </button>
+          )) : (
+            <div className="tmdb-match-empty">
+              <strong>{props.searching ? '正在搜索剧集…' : '搜索并选择正确的剧集'}</strong>
+              <span>选择后会更新当前勾选项，并按照各自季集重新查询标题。</span>
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TmdbEpisodeDetailModal(props: { detail: TmdbEpisodeDetail; language: string; refreshing: boolean; onRefresh: () => void; onClose: () => void }) {
+  const detail = props.detail;
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card tmdb-episode-detail-modal" role="dialog" aria-modal="true" aria-labelledby="tmdb-episode-detail-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <div>
+            <h2 id="tmdb-episode-detail-title">{detail.showName || detail.showOriginalName}</h2>
+            <small>TMDB #{detail.showId} · 查询语言 {props.language}</small>
+          </div>
+          <div className="inline-actions">
+            <button className="secondary" type="button" onClick={props.onRefresh} disabled={props.refreshing}>{props.refreshing ? '刷新中' : '刷新'}</button>
+            <IconCloseButton onClick={props.onClose} />
+          </div>
+        </div>
+        <div className="tmdb-show-summary">
+          {detail.showPosterUrl ? <img src={detail.showPosterUrl} alt={detail.showName || 'TMDB 剧集海报'} /> : null}
+          <div>
+            <h3>{detail.showName || detail.showOriginalName}</h3>
+            {detail.showOriginalName && detail.showOriginalName !== detail.showName ? <p className="muted">{detail.showOriginalName}</p> : null}
+            <div className="tmdb-episode-detail-meta">
+              <span>首播年份：{detail.showFirstAirDate?.slice(0, 4) || '-'}</span>
+              <span>状态：{detail.showStatus || '-'}</span>
+              <span>剧集评分：{detail.showVoteAverage ? detail.showVoteAverage.toFixed(1) : '-'}</span>
+              <span>类型：{detail.showGenres?.join(' / ') || '-'}</span>
+            </div>
+            <p className="tmdb-episode-overview">{detail.showOverview || '暂无剧集简介。'}</p>
+          </div>
+        </div>
+        <div className="tmdb-current-episode-heading">
+          <span>当前单集</span>
+        </div>
+        <div className="tmdb-episode-detail-content">
+          {detail.stillUrl ? <img src={detail.stillUrl} alt={detail.title || 'TMDB 单集剧照'} /> : null}
+          <div className="tmdb-episode-detail-copy">
+            <span className="pill ok">S{String(detail.season).padStart(2, '0')}E{String(detail.episode).padStart(2, '0')}</span>
+            <h3>{detail.title || '暂无单集标题'}</h3>
+            <div className="tmdb-episode-detail-meta">
+              <span>单集 ID：{detail.episodeId || '-'}</span>
+              <span>播出日期：{detail.airDate || '-'}</span>
+              <span>单集评分：{detail.voteAverage ? detail.voteAverage.toFixed(1) : '-'}</span>
+            </div>
+            <p className="tmdb-episode-overview">{detail.overview || '暂无简介。'}</p>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RenameHistoryModal(props: {
+  history: RenameHistoryBatch[];
+  undoingId: string;
+  loading: boolean;
+  timezone: string;
+  onClose: () => void;
+  onRefresh: () => void;
+  onOpenDetails: (batch: RenameHistoryBatch) => void;
+  onUndo: (id: string) => void;
+}) {
+  return (
+    <div className="modal-backdrop">
+      <section className="modal-card rename-history-modal">
+        <div className="card-header">
+          <h2>重命名历史</h2>
+          <div className="inline-actions">
+            <button className="secondary" onClick={props.onRefresh} disabled={props.loading}>{props.loading ? '刷新中' : '刷新历史'}</button>
+            <IconCloseButton onClick={props.onClose} />
+          </div>
+        </div>
+        <div className="rename-history-list">
+          {props.history.length ? props.history.map((batch) => (
+            <div className="history-item" key={batch.id}>
+              <div className="history-summary">
+                <button className="secondary" type="button" onClick={() => props.onOpenDetails(batch)}>详情</button>
+                <div>
+                  <strong>{formatStoredTime(batch.createdAt, props.timezone)}</strong>
+                  <small>{batch.items.length} 项 · {batch.id}{batch.undone ? ` · 已撤销 ${batch.undoneAt ? formatStoredTime(batch.undoneAt, props.timezone) : ''}` : ''}</small>
+                </div>
+                <div className="inline-actions">
+                  <button className="secondary" onClick={() => props.onUndo(batch.id)} disabled={batch.undone || props.undoingId === batch.id}>{batch.undone ? '已撤销' : props.undoingId === batch.id ? '撤销中' : '撤销'}</button>
+                </div>
+              </div>
+            </div>
+          )) : <p className="muted">暂无重命名历史。</p>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RenameHistoryDetailsModal(props: { batch: RenameHistoryBatch; undoCheck: RenameUndoCheckResult | null; timezone: string; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop detail-backdrop">
+      <section className="modal-card rename-history-detail-modal">
+        <div className="card-header">
+          <div>
+            <h2>历史详情</h2>
+            <small>{formatStoredTime(props.batch.createdAt, props.timezone)} · {props.batch.items.length} 项 · {props.batch.id}</small>
+          </div>
+          <IconCloseButton onClick={props.onClose} />
+        </div>
+        <div className="rename-history-detail-scroll">
+          <HistoryDetails batch={props.batch} undoCheck={props.undoCheck} />
         </div>
       </section>
     </div>
@@ -2264,8 +2725,11 @@ function HistoryDetails(props: { batch: RenameHistoryBatch; undoCheck: RenameUnd
   );
 }
 
-function RenameTemplateEditorModal(props: { value: string; placeholders: string[]; onChange: (value: string) => void; onClose: () => void }) {
+function RenameTemplateEditorModal(props: { value: string; matchPattern: string; sample: string; placeholders: string[]; onChange: (value: string) => void; onMatchPatternChange: (value: string) => void; onClose: () => void }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [sample, setSample] = useState(() => props.sample.split(/[\\/]/).pop() || props.sample);
+  const matchResult = testMatchPattern(props.matchPattern, sample);
+  const customPlaceholders = Object.keys(matchResult.variables).filter((name) => !props.placeholders.includes(`{${name}}`)).map((name) => `{${name}}`);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -2296,18 +2760,36 @@ function RenameTemplateEditorModal(props: { value: string; placeholders: string[
       <section className="modal-card rename-template-modal">
         <div className="card-header">
           <h2>编辑命名模板</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <textarea ref={textareaRef} value={props.value} onChange={(event) => props.onChange(event.target.value)} placeholder={defaultRenameTemplate} autoFocus />
         <div className="placeholder-bar modal-placeholder-bar">
           <span>插入占位符：</span>
           {props.placeholders.map((placeholder) => <button className="secondary" type="button" key={placeholder} onClick={() => insertPlaceholder(placeholder)}>{placeholder}</button>)}
+          <button className="secondary" type="button" onClick={() => insertPlaceholder('{if:releaseGroup| - {releaseGroup}|}')}>可选字幕组</button>
+          <button className="secondary" type="button" onClick={() => insertPlaceholder('{if:变量|有值时输出|无值时输出}')}>自定义条件</button>
         </div>
         <div className="muted template-help">
           <p>可填写文件名、相对路径或完整路径。</p>
           <p>{'{show:zh-CN}'} / {'{title:ja-JP}'} 这类语言标识可按语言取剧名/集标题。</p>
           <p>{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。</p>
+          <p>{'{if:releaseGroup| - {releaseGroup}|未知字幕组}'} 可根据变量是否有值选择输出内容；暂不支持嵌套和 `|` 转义。</p>
         </div>
+        <details className="rename-match-rule">
+          <summary>自定义匹配规则</summary>
+          <div className="rename-match-rule-content">
+            <label>Go RE2 正则表达式
+              <textarea value={props.matchPattern} onChange={(event) => props.onMatchPatternChange(event.target.value)} placeholder={'^\\[(?P<group>[^\\]]+)\\]\\s*(?P<show>.+?)\\s*-\\s*(?P<episode>\\d+)'} />
+              <small>使用命名捕获组，例如 (?P&lt;group&gt;...)。NFO 优先级高于自定义规则。</small>
+            </label>
+            <label>测试文件名<input value={sample} onChange={(event) => setSample(event.target.value)} placeholder="[LoliHouse] MAO - 03.mkv" /></label>
+            <div className={matchResult.error ? 'rename-match-test bad' : matchResult.matched ? 'rename-match-test ok' : 'rename-match-test'}>
+              <strong>{matchResult.error ? '规则无法用于即时测试' : matchResult.matched ? '匹配成功' : '未匹配'}</strong>
+              {matchResult.error ? <span>{matchResult.error}</span> : Object.entries(matchResult.variables).map(([name, value]) => <span key={name}><code>{name}</code> = {value || '（空）'}</span>)}
+            </div>
+            {customPlaceholders.length ? <div className="placeholder-bar"><span>自定义变量：</span>{customPlaceholders.map((placeholder) => <button className="secondary" type="button" key={placeholder} onClick={() => insertPlaceholder(placeholder)}>{placeholder}</button>)}</div> : null}
+          </div>
+        </details>
         <div className="inline-actions modal-actions">
           <button onClick={props.onClose}>完成</button>
         </div>
@@ -2316,13 +2798,24 @@ function RenameTemplateEditorModal(props: { value: string; placeholders: string[
   );
 }
 
+function testMatchPattern(pattern: string, sample: string): { matched: boolean; variables: Record<string, string>; error?: string } {
+  if (!pattern.trim()) return { matched: false, variables: {} };
+  try {
+    const jsPattern = pattern.replace(/\(\?P<([A-Za-z][A-Za-z0-9_]*)>/g, '(?<$1>');
+    const match = new RegExp(jsPattern).exec(sample.replace(/\.[^.]+$/, ''));
+    return { matched: Boolean(match), variables: match?.groups ?? {} };
+  } catch (err) {
+    return { matched: false, variables: {}, error: err instanceof Error ? err.message : '正则表达式无效' };
+  }
+}
+
 function TargetPathEditorModal(props: { value: string; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   return (
     <div className="modal-backdrop">
       <section className="modal-card target-path-modal">
         <div className="card-header">
           <h2>编辑目标路径</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <textarea value={props.value} onChange={(event) => props.onChange(event.target.value)} autoFocus />
         <p className="muted">可以填写文件名、相对路径或完整路径。执行前仍会检查目标冲突。</p>
@@ -2335,7 +2828,7 @@ function TargetPathEditorModal(props: { value: string; onChange: (value: string)
   );
 }
 
-function DirectoryPicker(props: { title: string; initialPath: string; onSelect: (path: string) => void; onClose: () => void }) {
+function DirectoryPicker(props: { title: string; initialPath: string; rootPath?: string; onSelect: (path: string) => void; onClose: () => void }) {
   const [currentPath, setCurrentPath] = useState(props.initialPath);
   const [data, setData] = useState<DirectoryList>({ path: '', parent: '', entries: [] });
   const [loading, setLoading] = useState(false);
@@ -2351,6 +2844,7 @@ function DirectoryPicker(props: { title: string; initialPath: string; onSelect: 
     try {
       const params = new URLSearchParams();
       if (path.trim()) params.set('path', path.trim());
+      if (props.rootPath?.trim()) params.set('root', props.rootPath.trim());
       const response = await fetch(`/api/fs/directories?${params.toString()}`);
       if (!response.ok) {
         setError(await response.text());
@@ -2371,10 +2865,10 @@ function DirectoryPicker(props: { title: string; initialPath: string; onSelect: 
       <section className="modal-card">
         <div className="card-header">
           <h2>{props.title}</h2>
-          <button className="secondary" onClick={props.onClose}>关闭</button>
+          <IconCloseButton onClick={props.onClose} />
         </div>
         <div className="form-row">
-          <input value={currentPath} onChange={(event) => setCurrentPath(event.target.value)} placeholder="选择磁盘或输入路径" />
+          <input value={currentPath} onChange={(event) => setCurrentPath(event.target.value)} placeholder="选择磁盘或输入路径" readOnly={Boolean(props.rootPath)} />
           <button onClick={() => load(currentPath)} disabled={loading}>{loading ? '读取中' : '打开'}</button>
         </div>
         {error && <section className="error-card directory-error">{error}</section>}
@@ -2401,6 +2895,10 @@ function Toggle(props: { label: string; checked: boolean; onChange: (value: bool
     <label className="toggle-row">
       <span>{props.label}</span>
       <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} />
+      <span className="toggle-switch" aria-hidden="true">
+        <span className="toggle-switch-label">{props.checked ? '开' : '关'}</span>
+        <span className="toggle-switch-thumb" />
+      </span>
     </label>
   );
 }
@@ -2521,6 +3019,17 @@ function LanguageMultiPicker(props: { label: string; values: string[]; onChange:
 
 function asArray<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  const text = await response.text();
+  if (!text) return response.statusText || '请求失败';
+  try {
+    const data = JSON.parse(text) as { error?: string };
+    return data.error || text;
+  } catch {
+    return text;
+  }
 }
 
 function formatEpisodeList(values: number[] | null | undefined): string {

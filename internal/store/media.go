@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"time"
+
+	"NyaMediaMetadataTool/internal/config"
 )
 
 func (s *Store) UpsertMediaFile(ctx context.Context, path string, info os.FileInfo) (int64, error) {
@@ -43,9 +46,21 @@ func (s *Store) EnqueueMediaTaskWithOptions(ctx context.Context, mediaFileID int
 }
 
 func (s *Store) EnqueueMediaTaskWithScanRun(ctx context.Context, mediaFileID int64, overwriteExisting bool, force bool, scanRunID string) error {
+	return s.EnqueueMediaTaskWithProcessing(ctx, mediaFileID, overwriteExisting, force, scanRunID, nil)
+}
+
+func (s *Store) EnqueueMediaTaskWithProcessing(ctx context.Context, mediaFileID int64, overwriteExisting bool, force bool, scanRunID string, processing *config.OutputProcessingConfig) error {
+	processingJSON := ""
+	if processing != nil {
+		data, err := json.Marshal(processing)
+		if err != nil {
+			return err
+		}
+		processingJSON = string(data)
+	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO tasks (media_file_id, type, status, overwrite_existing, scan_run_id)
-SELECT ?, 'media_process', 'pending', ?, ?
+INSERT INTO tasks (media_file_id, type, status, overwrite_existing, scan_run_id, processing_config)
+SELECT ?, 'media_process', 'pending', ?, ?, ?
 WHERE (? OR EXISTS (
   SELECT 1
   FROM media_files
@@ -57,7 +72,7 @@ AND NOT EXISTS (
   FROM tasks
   WHERE media_file_id = ? AND type = 'media_process' AND status IN ('pending', 'running')
 )
-	`, mediaFileID, boolToIntMedia(overwriteExisting), scanRunID, force, mediaFileID, mediaFileID)
+	`, mediaFileID, boolToIntMedia(overwriteExisting), scanRunID, processingJSON, force, mediaFileID, mediaFileID)
 	return err
 }
 

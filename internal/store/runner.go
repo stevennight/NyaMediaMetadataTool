@@ -26,7 +26,7 @@ func (s *Store) ClaimNextPendingTask(ctx context.Context) (Task, error) {
 	var task Task
 	var mediaFileID sql.NullInt64
 	err = tx.QueryRowContext(ctx, `
-SELECT id, media_file_id, type, status, overwrite_existing, scan_run_id, attempts, error_summary,
+SELECT id, media_file_id, type, status, overwrite_existing, scan_run_id, processing_config, attempts, error_summary,
        COALESCE(started_at, ''), COALESCE(finished_at, ''), created_at, updated_at
 FROM tasks
 WHERE status = 'pending'
@@ -39,6 +39,7 @@ LIMIT 1
 		&task.Status,
 		&task.OverwriteExisting,
 		&task.ScanRunID,
+		&task.ProcessingConfig,
 		&task.Attempts,
 		&task.ErrorSummary,
 		&task.StartedAt,

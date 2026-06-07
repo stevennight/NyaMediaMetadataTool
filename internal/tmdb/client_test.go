@@ -2,6 +2,7 @@ package tmdb
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,5 +103,66 @@ func TestSearchTVRetriesServerError(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("expected 2 attempts, got %d", got)
+	}
+}
+
+func TestSuccessfulResponsesAreSharedAcrossClients(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		_, _ = w.Write([]byte(`{"results":[{"id":3,"name":"Cached Show"}]}`))
+	}))
+	defer server.Close()
+
+	cfg := config.ScrapingConfig{EnableTMDB: true, TMDBAPIKey: "test", TMDBBaseURL: server.URL, Language: "cache-test"}
+	first, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.SearchTV(context.Background(), "unique cache query"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.SearchTV(context.Background(), "unique cache query"); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected cached response across clients, got %d calls", got)
+	}
+}
+
+func TestBypassCacheRefreshesSharedResponse(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&calls, 1)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"results":[{"id":%d,"name":"Show"}]}`, call)))
+	}))
+	defer server.Close()
+
+	cfg := config.ScrapingConfig{EnableTMDB: true, TMDBAPIKey: "test", TMDBBaseURL: server.URL, Language: "bypass-cache-test"}
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := client.SearchTV(context.Background(), "unique bypass query")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := client.WithBypassCache().SearchTV(context.Background(), "unique bypass query")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, err := client.SearchTV(context.Background(), "unique bypass query")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first[0].ID != 1 || refreshed[0].ID != 2 || cached[0].ID != 2 {
+		t.Fatalf("unexpected cache sequence: first=%v refreshed=%v cached=%v", first, refreshed, cached)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 network calls, got %d", got)
 	}
 }

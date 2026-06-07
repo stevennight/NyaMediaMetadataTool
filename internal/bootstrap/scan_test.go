@@ -40,7 +40,7 @@ func TestSyncAndScanEnqueuesStableMediaFile(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true}}
+	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true, ScanOnStart: true}}
 	cfg.Processing.StableDelay = time.Second
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -81,7 +81,7 @@ func TestSyncAndScanSkipsUnstableMediaFile(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true}}
+	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true, ScanOnStart: true}}
 	cfg.Processing.StableDelay = time.Hour
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -136,7 +136,7 @@ func TestSyncAndScanSkipsIgnoredDirectory(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true}}
+	cfg.WatchDirs = []config.WatchDir{{Path: root, Recursive: true, Enabled: true, ScanOnStart: true}}
 	cfg.Processing.StableDelay = time.Second
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -283,7 +283,7 @@ func TestScanWatchDirAssignsOneScanRunToDirectoryTasks(t *testing.T) {
 	cfg := config.Default()
 	cfg.Processing.StableDelay = time.Second
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	if err := ScanWatchDir(context.Background(), cfg, st, logger, config.WatchDir{Path: root, Recursive: true, Enabled: true}, ScanOptions{OverwriteExisting: true}); err != nil {
+	if err := ScanWatchDir(context.Background(), cfg, st, logger, config.WatchDir{Path: root, Recursive: true, Enabled: true, ScanOnStart: true}, ScanOptions{OverwriteExisting: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -302,5 +302,67 @@ func TestScanWatchDirAssignsOneScanRunToDirectoryTasks(t *testing.T) {
 	}
 	if !tasks[0].OverwriteExisting || !tasks[1].OverwriteExisting {
 		t.Fatal("expected overwrite strategy to be preserved on file tasks")
+	}
+}
+
+func TestScanOptionsFromStrategy(t *testing.T) {
+	t.Parallel()
+
+	missing := ScanOptionsFromStrategy(config.ProcessingStrategyMissing)
+	if missing.OverwriteExisting || !missing.MissingOnly || missing.Force {
+		t.Fatalf("unexpected missing strategy options: %+v", missing)
+	}
+
+	force := ScanOptionsFromStrategy(config.ProcessingStrategyForce)
+	if !force.OverwriteExisting || !force.Force || force.MissingOnly {
+		t.Fatalf("unexpected force strategy options: %+v", force)
+	}
+}
+
+func TestInheritedScanUsesMatchingWatchDirStrategy(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	videoPath := filepath.Join(root, "Series - S01E01.mkv")
+	if err := os.WriteFile(videoPath, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(videoPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	processing := config.Default().Processing.OutputConfig()
+	processing.Strategy = config.ProcessingStrategyForce
+	if _, err := st.CreateWatchDir(context.Background(), store.WatchDir{
+		Path:                root,
+		Recursive:           true,
+		WatchEnabled:        true,
+		UseGlobalProcessing: false,
+		Processing:          processing,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Processing.Strategy = config.ProcessingStrategyMissing
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	if err := ScanPath(context.Background(), cfg, st, logger, videoPath, ScanOptions{InheritProcessing: true}); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := st.ListTasks(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || !tasks[0].OverwriteExisting {
+		t.Fatalf("expected inherited force task, got %+v", tasks)
 	}
 }

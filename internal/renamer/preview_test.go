@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"NyaMediaMetadataTool/internal/config"
@@ -81,6 +82,35 @@ func TestPreviewWorkerCountRespectsLowConcurrency(t *testing.T) {
 	}
 }
 
+func TestPreviewEachProgressReportsTotalBeforeItems(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for _, name := range []string{"Show - S01E01.mkv", "Show - S01E02.mkv"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("demo"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total := -1
+	items := 0
+	err := PreviewEachProgress(context.Background(), config.Default(), PreviewRequest{Path: root}, func(value int) error {
+		if items != 0 {
+			t.Fatal("expected total before preview items")
+		}
+		total = value
+		return nil
+	}, func(PreviewItem) error {
+		items++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || items != 2 {
+		t.Fatalf("total=%d items=%d, want 2 and 2", total, items)
+	}
+}
+
 func TestParseEpisodeUsesShowDirectoryMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -145,6 +175,142 @@ func TestParseEpisodeKeepsReleaseGroupWhenEpisodeDoesNotParse(t *testing.T) {
 	}
 	if parsed.releaseGroup != "Kamigami" {
 		t.Fatalf("releaseGroup = %q, want Kamigami", parsed.releaseGroup)
+	}
+}
+
+func TestIdentifyEpisodePrefersNFOIdentityOverFilename(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	seasonDir := filepath.Join(root, "Wrong Show", "Season 1")
+	path := filepath.Join(seasonDir, "Wrong Show - S01E02.mkv")
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nfo := `<episodedetails><showtitle>Right Show</showtitle><season>3</season><episode>7</episode><uniqueid type="tmdb">12345</uniqueid></episodedetails>`
+	if err := os.WriteFile(strings.TrimSuffix(path, filepath.Ext(path))+".nfo", []byte(nfo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, ok, source, _ := identifyEpisode(path, config.Default(), nil)
+	if !ok {
+		t.Fatal("expected NFO identity to be recognized")
+	}
+	if source != "nfo" || parsed.show != "Right Show" || parsed.season != 3 || parsed.episode != 7 || parsed.tmdbShowID != 12345 {
+		t.Fatalf("unexpected NFO identity: source=%q parsed=%+v", source, parsed)
+	}
+}
+
+func TestIdentifyEpisodeUsesTVShowNFOForSeriesIdentity(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	seasonDir := filepath.Join(root, "Unknown", "Season 1")
+	path := filepath.Join(seasonDir, "S01E04.mkv")
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "Unknown", "tvshow.nfo"), []byte(`<tvshow><title>Right Show</title><year>2024</year><tmdbid>67890</tmdbid></tvshow>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, ok, source, _ := identifyEpisode(path, config.Default(), nil)
+	if !ok {
+		t.Fatal("expected filename episode identity to be recognized")
+	}
+	if source != "nfo" || parsed.show != "Right Show" || parsed.year != "2024" || parsed.tmdbShowID != 67890 {
+		t.Fatalf("unexpected tvshow NFO identity: source=%q parsed=%+v", source, parsed)
+	}
+}
+
+func TestIdentifyEpisodeUsesPatternBeforeBuiltInFilenameValues(t *testing.T) {
+	t.Parallel()
+
+	pattern, err := compileMatchPattern(`^\[(?P<group>[^\]]+)\]\s*(?P<show>.+?)\s*-\s*(?P<episode>\d+)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "[Custom] Right Show - 07.mkv")
+	parsed, ok, source, variables := identifyEpisode(path, config.Default(), pattern)
+	if !ok {
+		t.Fatal("expected pattern episode to be recognized")
+	}
+	if source != "pattern" || parsed.show != "Right Show" || parsed.episode != 7 || variables["group"] != "Custom" {
+		t.Fatalf("unexpected pattern identity: source=%q parsed=%+v variables=%v", source, parsed, variables)
+	}
+}
+
+func TestApplyTemplateSupportsCustomVariables(t *testing.T) {
+	t.Parallel()
+
+	item := PreviewItem{Show: "Show", Season: 1, Episode: 2, Variables: map[string]string{"group": "Custom"}}
+	got := applyTemplate("[{group}] {show} - S{season:00}E{episode:00}", item)
+	if got != "[Custom] Show - S01E02" {
+		t.Fatalf("unexpected custom variable template: %q", got)
+	}
+}
+
+func TestApplyTemplateSupportsConditionalSegments(t *testing.T) {
+	t.Parallel()
+
+	template := "{show}{if:releaseGroup| - {releaseGroup}| - 未知字幕组}"
+	withGroup := applyTemplate(template, PreviewItem{Show: "Show", ReleaseGroup: "Group"})
+	if withGroup != "Show - Group" {
+		t.Fatalf("conditional with value = %q", withGroup)
+	}
+	withoutGroup := applyTemplate(template, PreviewItem{Show: "Show"})
+	if withoutGroup != "Show - 未知字幕组" {
+		t.Fatalf("conditional else = %q", withoutGroup)
+	}
+}
+
+func TestApplyTemplateConditionalSegmentSupportsEmptyElseAndCustomVariable(t *testing.T) {
+	t.Parallel()
+
+	template := "{show}{if:edition| [{edition}]|}"
+	withEdition := applyTemplate(template, PreviewItem{Show: "Show", Variables: map[string]string{"edition": "Director"}})
+	if withEdition != "Show [Director]" {
+		t.Fatalf("custom conditional with value = %q", withEdition)
+	}
+	withoutEdition := applyTemplate(template, PreviewItem{Show: "Show"})
+	if withoutEdition != "Show" {
+		t.Fatalf("custom conditional empty else = %q", withoutEdition)
+	}
+}
+
+func TestCompileMatchPatternRejectsInvalidRE2(t *testing.T) {
+	t.Parallel()
+
+	if _, err := compileMatchPattern(`(?<=Show)\d+`); err == nil {
+		t.Fatal("expected unsupported lookbehind to fail")
+	}
+}
+
+func TestBuildPreviewDoesNotUseNFOTitleAsMetadataFallback(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "Show - S01E01 - Filename Title.mkv")
+	if err := os.WriteFile(path, []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nfo := `<episodedetails><title>NFO Title</title><showtitle>Show</showtitle><season>1</season><episode>1</episode></episodedetails>`
+	if err := os.WriteFile(strings.TrimSuffix(path, filepath.Ext(path))+".nfo", []byte(nfo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	item := buildPreviewItem(context.Background(), config.Default(), nil, path, DefaultTemplate, nil, previewOverrides{})
+	if item.Title == "NFO Title" {
+		t.Fatal("expected NFO title not to be used as metadata fallback")
+	}
+	if item.MetadataSource != "tmdb-unavailable" || item.Status != "warning" {
+		t.Fatalf("unexpected metadata status: %+v", item)
 	}
 }
 

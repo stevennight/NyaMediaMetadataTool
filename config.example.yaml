@@ -36,7 +36,7 @@ processing:
   bifWidth: 320
   bifInterval: 10
   bifHwAccel: cpu
-  overwriteExisting: false
+  strategy: missing
   enableSubtitles: true
   enableMediaInfo: true
   enableNfo: true

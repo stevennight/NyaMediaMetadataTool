@@ -4,9 +4,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	ProcessingStrategyMissing = "missing"
+	ProcessingStrategyForce   = "force"
 )
 
 type Config struct {
@@ -43,12 +49,51 @@ type ProcessingConfig struct {
 	BIFWidth            int           `json:"bifWidth" yaml:"bifWidth"`
 	BIFInterval         int           `json:"bifInterval" yaml:"bifInterval"`
 	BIFHWAccel          string        `json:"bifHwAccel" yaml:"bifHwAccel"`
-	OverwriteExisting   bool          `json:"overwriteExisting" yaml:"overwriteExisting"`
+	Strategy            string        `json:"strategy" yaml:"strategy"`
+	OverwriteExisting   bool          `json:"-" yaml:"overwriteExisting,omitempty"`
 	EnableSubtitles     bool          `json:"enableSubtitles" yaml:"enableSubtitles"`
 	EnableMediaInfo     bool          `json:"enableMediaInfo" yaml:"enableMediaInfo"`
 	EnableNFO           bool          `json:"enableNfo" yaml:"enableNfo"`
 	EnableBIF           bool          `json:"enableBif" yaml:"enableBif"`
 	EnableImageTakeover bool          `json:"enableImageTakeover" yaml:"enableImageTakeover"`
+}
+
+type OutputProcessingConfig struct {
+	Strategy            string `json:"strategy"`
+	BIFWidth            int    `json:"bifWidth"`
+	BIFInterval         int    `json:"bifInterval"`
+	BIFHWAccel          string `json:"bifHwAccel"`
+	EnableSubtitles     bool   `json:"enableSubtitles"`
+	EnableMediaInfo     bool   `json:"enableMediaInfo"`
+	EnableNFO           bool   `json:"enableNfo"`
+	EnableBIF           bool   `json:"enableBif"`
+	EnableImageTakeover bool   `json:"enableImageTakeover"`
+}
+
+func (c ProcessingConfig) OutputConfig() OutputProcessingConfig {
+	return OutputProcessingConfig{
+		Strategy:            c.Strategy,
+		BIFWidth:            c.BIFWidth,
+		BIFInterval:         c.BIFInterval,
+		BIFHWAccel:          c.BIFHWAccel,
+		EnableSubtitles:     c.EnableSubtitles,
+		EnableMediaInfo:     c.EnableMediaInfo,
+		EnableNFO:           c.EnableNFO,
+		EnableBIF:           c.EnableBIF,
+		EnableImageTakeover: c.EnableImageTakeover,
+	}
+}
+
+func (c *ProcessingConfig) ApplyOutputConfig(output OutputProcessingConfig) {
+	c.Strategy = output.Strategy
+	c.BIFWidth = output.BIFWidth
+	c.BIFInterval = output.BIFInterval
+	c.BIFHWAccel = output.BIFHWAccel
+	c.EnableSubtitles = output.EnableSubtitles
+	c.EnableMediaInfo = output.EnableMediaInfo
+	c.EnableNFO = output.EnableNFO
+	c.EnableBIF = output.EnableBIF
+	c.EnableImageTakeover = output.EnableImageTakeover
 }
 
 type RenamingConfig struct {
@@ -74,9 +119,11 @@ type ScrapingConfig struct {
 }
 
 type WatchDir struct {
-	Path      string `json:"path" yaml:"path"`
-	Recursive bool   `json:"recursive" yaml:"recursive"`
-	Enabled   bool   `json:"enabled" yaml:"enabled"`
+	Path         string `json:"path" yaml:"path"`
+	Recursive    bool   `json:"recursive" yaml:"recursive"`
+	Enabled      bool   `json:"enabled" yaml:"enabled"`
+	WatchEnabled bool   `json:"watchEnabled" yaml:"watchEnabled"`
+	ScanOnStart  bool   `json:"scanOnStart" yaml:"scanOnStart"`
 }
 
 func Load(path string) (Config, error) {
@@ -90,6 +137,8 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 
+	// Leave strategy unset while decoding so legacy overwriteExisting can migrate.
+	cfg.Processing.Strategy = ""
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
@@ -149,6 +198,19 @@ func (c *Config) applyDefaults() {
 	if c.Processing.BIFHWAccel == "" {
 		c.Processing.BIFHWAccel = "cpu"
 	}
+	switch strings.TrimSpace(c.Processing.Strategy) {
+	case ProcessingStrategyForce:
+		c.Processing.Strategy = ProcessingStrategyForce
+	case ProcessingStrategyMissing:
+		c.Processing.Strategy = ProcessingStrategyMissing
+	default:
+		if c.Processing.OverwriteExisting {
+			c.Processing.Strategy = ProcessingStrategyForce
+		} else {
+			c.Processing.Strategy = ProcessingStrategyMissing
+		}
+	}
+	c.Processing.OverwriteExisting = false
 	if len(c.Processing.Extensions) == 0 {
 		c.Processing.Extensions = []string{".mkv", ".mp4", ".ts", ".m2ts", ".mts", ".mov", ".m4v", ".avi", ".wmv", ".flv", ".webm", ".rmvb", ".rm", ".mpg", ".mpeg", ".vob", ".asf"}
 	}

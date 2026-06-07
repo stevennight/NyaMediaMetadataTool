@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +30,7 @@ type Server struct {
 	configPath string
 	store      *store.Store
 	tasks      TaskCanceller
+	watcher    WatchDirReloader
 	logger     *slog.Logger
 	mux        *http.ServeMux
 }
@@ -36,12 +39,17 @@ type TaskCanceller interface {
 	CancelRunningTasks() int
 }
 
-func NewServer(cfg config.Config, configPath string, store *store.Store, tasks TaskCanceller, logger *slog.Logger) http.Handler {
+type WatchDirReloader interface {
+	ReloadWatchDirs(ctx context.Context) error
+}
+
+func NewServer(cfg config.Config, configPath string, store *store.Store, tasks TaskCanceller, watcher WatchDirReloader, logger *slog.Logger) http.Handler {
 	server := &Server{
 		cfg:        cfg,
 		configPath: configPath,
 		store:      store,
 		tasks:      tasks,
+		watcher:    watcher,
 		logger:     logger,
 		mux:        http.NewServeMux(),
 	}
@@ -79,6 +87,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/rename/history/{id}/undo-check", s.handleRenameHistoryUndoCheck)
 	s.mux.HandleFunc("POST /api/rename/history/{id}/undo", s.handleRenameHistoryUndo)
 	s.mux.HandleFunc("GET /api/tmdb/search-tv", s.handleTMDBSearchTV)
+	s.mux.HandleFunc("GET /api/tmdb/episode", s.handleTMDBEpisode)
 	s.mux.HandleFunc("GET /api/watch-dirs", s.handleListWatchDirs)
 	s.mux.HandleFunc("POST /api/watch-dirs", s.handleCreateWatchDir)
 	s.mux.HandleFunc("PUT /api/watch-dirs/", s.handleUpdateWatchDir)
@@ -325,9 +334,19 @@ func (s *Server) handleRenamePreviewStream(w http.ResponseWriter, r *http.Reques
 	flusher, _ := w.(http.Flusher)
 	encoder := json.NewEncoder(w)
 	count := 0
-	err := renamer.PreviewEach(r.Context(), s.snapshotConfig(), input, func(item renamer.PreviewItem) error {
+	total := 0
+	err := renamer.PreviewEachProgress(r.Context(), s.snapshotConfig(), input, func(value int) error {
+		total = value
+		if err := encoder.Encode(map[string]any{"type": "start", "count": 0, "total": total}); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}, func(item renamer.PreviewItem) error {
 		count++
-		if err := encoder.Encode(map[string]any{"type": "item", "item": item, "count": count}); err != nil {
+		if err := encoder.Encode(map[string]any{"type": "item", "item": item, "count": count, "total": total}); err != nil {
 			return err
 		}
 		if flusher != nil {
@@ -336,9 +355,9 @@ func (s *Server) handleRenamePreviewStream(w http.ResponseWriter, r *http.Reques
 		return nil
 	})
 	if err != nil {
-		_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "count": count})
+		_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "count": count, "total": total})
 	} else {
-		_ = encoder.Encode(map[string]any{"type": "done", "count": count})
+		_ = encoder.Encode(map[string]any{"type": "done", "count": count, "total": total})
 	}
 	if flusher != nil {
 		flusher.Flush()
@@ -535,6 +554,54 @@ func (s *Server) handleTMDBSearchTV(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": results})
 }
 
+func (s *Server) handleTMDBEpisode(w http.ResponseWriter, r *http.Request) {
+	showID, err := strconv.Atoi(r.URL.Query().Get("showId"))
+	if err != nil || showID <= 0 {
+		writeError(w, http.StatusBadRequest, errors.New("valid showId is required"))
+		return
+	}
+	season, err := strconv.Atoi(r.URL.Query().Get("season"))
+	if err != nil || season < 0 {
+		writeError(w, http.StatusBadRequest, errors.New("valid season is required"))
+		return
+	}
+	episode, err := strconv.Atoi(r.URL.Query().Get("episode"))
+	if err != nil || episode < 0 {
+		writeError(w, http.StatusBadRequest, errors.New("valid episode is required"))
+		return
+	}
+	cfg := s.snapshotConfig()
+	if language := strings.TrimSpace(r.URL.Query().Get("language")); language != "" {
+		cfg.Scraping.Language = language
+	}
+	client, err := tmdb.NewClient(cfg.Scraping)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.EqualFold(r.URL.Query().Get("refresh"), "true") {
+		client = client.WithBypassCache()
+	}
+	detail, err := client.FindEpisodeByShowID(r.Context(), showID, season, episode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	show, err := client.FindShowByID(r.Context(), showID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"showId": detail.ShowID, "episodeId": detail.EpisodeID, "showName": detail.ShowName,
+		"showOriginalName": detail.ShowOriginalName, "showFirstAirDate": detail.ShowFirstAirDate,
+		"showOverview": show.Overview, "showStatus": show.Status, "showVoteAverage": show.VoteAverage,
+		"showGenres": show.Genres, "showPosterUrl": client.ImageURL(show.PosterPath),
+		"season": season, "episode": episode, "title": detail.Title, "overview": detail.Overview,
+		"airDate": detail.AirDate, "voteAverage": detail.VoteAverage, "stillUrl": client.ImageURL(detail.StillPath),
+	})
+}
+
 func (s *Server) handleListWatchDirs(w http.ResponseWriter, r *http.Request) {
 	dirs, err := s.store.ListWatchDirs(r.Context())
 	if err != nil {
@@ -555,8 +622,13 @@ func (s *Server) handleCreateWatchDir(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
 		return
 	}
+	normalizeWatchDirProcessing(&input, s.snapshotConfig().Processing.OutputConfig())
 	created, err := s.store.CreateWatchDir(r.Context(), input)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.reloadWatchDirs(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -579,6 +651,7 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
 		return
 	}
+	normalizeWatchDirProcessing(&input, s.snapshotConfig().Processing.OutputConfig())
 	updated, err := s.store.UpdateWatchDir(r.Context(), input)
 	if err != nil {
 		if errors.Is(err, store.ErrWatchDirNotFound) {
@@ -588,7 +661,31 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if err := s.reloadWatchDirs(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func normalizeWatchDirProcessing(dir *store.WatchDir, global config.OutputProcessingConfig) {
+	if strings.TrimSpace(dir.Processing.Strategy) == "" {
+		dir.Processing = global
+		dir.UseGlobalProcessing = true
+		return
+	}
+	if dir.Processing.Strategy != config.ProcessingStrategyMissing && dir.Processing.Strategy != config.ProcessingStrategyForce {
+		dir.Processing.Strategy = global.Strategy
+	}
+	if dir.Processing.BIFWidth <= 0 {
+		dir.Processing.BIFWidth = global.BIFWidth
+	}
+	if dir.Processing.BIFInterval <= 0 {
+		dir.Processing.BIFInterval = global.BIFInterval
+	}
+	if strings.TrimSpace(dir.Processing.BIFHWAccel) == "" {
+		dir.Processing.BIFHWAccel = global.BIFHWAccel
+	}
 }
 
 func (s *Server) handleDeleteWatchDir(w http.ResponseWriter, r *http.Request) {
@@ -604,22 +701,47 @@ func (s *Server) handleDeleteWatchDir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if err := s.reloadWatchDirs(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	cfg := s.snapshotConfig()
 	type request struct {
-		WatchDirID int64  `json:"watchDirId"`
-		Path       string `json:"path"`
-		Strategy   string `json:"strategy"`
+		WatchDirID          int64                         `json:"watchDirId"`
+		Path                string                        `json:"path"`
+		UseCustomProcessing bool                          `json:"useCustomProcessing"`
+		Processing          config.OutputProcessingConfig `json:"processing"`
 	}
 	var input request
 	_ = json.NewDecoder(r.Body).Decode(&input)
 	input.Path = strings.TrimSpace(input.Path)
-	options := scanOptionsFromStrategy(input.Strategy)
+	options := bootstrap.ScanOptions{InheritProcessing: true}
+	if input.UseCustomProcessing {
+		normalizeOutputProcessing(&input.Processing, cfg.Processing.OutputConfig())
+		options = scanOptionsFromStrategy(input.Processing.Strategy)
+		options.Processing = &input.Processing
+	}
 
 	if input.Path != "" {
+		if input.WatchDirID > 0 {
+			dir, err := s.store.GetWatchDir(r.Context(), input.WatchDirID)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			if containsParentTraversal(input.Path) || !pathWithinRoot(input.Path, dir.Path) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be inside the selected media directory"})
+				return
+			}
+		}
+		if _, err := os.Stat(input.Path); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
 		go func() {
 			if err := bootstrap.ScanPath(context.Background(), cfg, s.store, s.logger, input.Path, options); err != nil {
 				s.logger.Warn("manual path rescan failed", "path", input.Path, "error", err)
@@ -649,10 +771,16 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 		}
 		dirs = allDirs
 	}
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir.Path); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
 
 	go func() {
 		for _, dir := range dirs {
-			cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: true}
+			cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: true, WatchEnabled: dir.WatchEnabled, ScanOnStart: true}
 			if err := bootstrap.ScanWatchDir(context.Background(), cfg, s.store, s.logger, cfgDir, options); err != nil {
 				s.logger.Warn("manual rescan failed", "path", dir.Path, "error", err)
 			}
@@ -662,15 +790,64 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "count": len(dirs)})
 }
 
-func scanOptionsFromStrategy(strategy string) bootstrap.ScanOptions {
-	switch strings.TrimSpace(strategy) {
-	case "force":
-		return bootstrap.ScanOptions{OverwriteExisting: true, Force: true}
-	case "missing", "":
-		return bootstrap.ScanOptions{MissingOnly: true}
-	default:
-		return bootstrap.ScanOptions{MissingOnly: true}
+func pathWithinRoot(path string, root string) bool {
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return false
 	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil || !pathWithinCleanRoot(absolutePath, absoluteRoot) {
+		return false
+	}
+	resolvedPath, err := filepath.EvalSymlinks(absolutePath)
+	if err != nil {
+		return false
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	return err == nil && pathWithinCleanRoot(resolvedPath, resolvedRoot)
+}
+
+func pathWithinCleanRoot(path string, root string) bool {
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
+func containsParentTraversal(path string) bool {
+	for _, part := range strings.Split(strings.ReplaceAll(path, `\`, "/"), "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func scanOptionsFromStrategy(strategy string) bootstrap.ScanOptions {
+	return bootstrap.ScanOptionsFromStrategy(strategy)
+}
+
+func normalizeOutputProcessing(processing *config.OutputProcessingConfig, global config.OutputProcessingConfig) {
+	if processing.Strategy != config.ProcessingStrategyMissing && processing.Strategy != config.ProcessingStrategyForce {
+		processing.Strategy = global.Strategy
+	}
+	if processing.BIFWidth <= 0 {
+		processing.BIFWidth = global.BIFWidth
+	}
+	if processing.BIFInterval <= 0 {
+		processing.BIFInterval = global.BIFInterval
+	}
+	if strings.TrimSpace(processing.BIFHWAccel) == "" {
+		processing.BIFHWAccel = global.BIFHWAccel
+	}
+}
+
+func (s *Server) reloadWatchDirs(ctx context.Context) error {
+	if s.watcher == nil {
+		return nil
+	}
+	return s.watcher.ReloadWatchDirs(ctx)
 }
 
 func (s *Server) snapshotConfig() config.Config {

@@ -815,6 +815,19 @@ button:disabled {
   background: rgba(245, 158, 11, 0.18);
 }
 
+.rename-status-cell {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  min-width: 110px;
+}
+
+.rename-status-cell small {
+  color: #78716c;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
 .rename-row input,
 .rename-row textarea,
 .rename-row select,

@@ -1840,8 +1840,6 @@ export function App() {
                   <tr>
                     <th>选择</th>
                     <th>状态</th>
-                    <th>身份来源</th>
-                    <th>元数据</th>
                     <th>识别结果</th>
                     <th>原文件名</th>
                     <th>新文件名</th>
@@ -1855,9 +1853,13 @@ export function App() {
                     return (
                     <tr className={selectedRenamePaths.includes(item.path) ? 'rename-row selected' : 'rename-row'} key={item.path} onClick={(event) => handleRenameRowClick(event, item, index)} title="点击行选择，Shift+点击连续选择">
                       <td><span className={selectedRenamePaths.includes(item.path) ? 'rename-row-index selected' : 'rename-row-index'} aria-hidden="true"><strong>{index + 1}</strong></span></td>
-                      <td><span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{item.status}</span></td>
-                      <td>{renameIdentitySourceLabel(item.identitySource || item.source)}</td>
-                      <td>{renameMetadataSourceLabel(item.metadataSource)}</td>
+                      <td>
+                        <div className="rename-status-cell">
+                          <span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{item.status}</span>
+                          <small title={`身份来源：${renameIdentitySourceLabel(item.identitySource || item.source)}`}>{renameIdentitySourceLabel(item.identitySource || item.source)}</small>
+                          <small title={`元数据：${renameMetadataSourceLabel(item.metadataSource)}`}>{item.metadataSource === 'tmdb' ? 'TMDB' : renameMetadataSourceLabel(item.metadataSource)}</small>
+                        </div>
+                      </td>
                       <td className="rename-edit-cell">
                         <label className="rename-edit-field">
                           <span>剧名</span>
@@ -1894,7 +1896,7 @@ export function App() {
                     </tr>
                   );
                   }) : (
-                    <tr><td colSpan={9} className="empty-cell">尚未生成预览。</td></tr>
+                    <tr><td colSpan={7} className="empty-cell">尚未生成预览。</td></tr>
                   )}
                 </tbody>
               </table>

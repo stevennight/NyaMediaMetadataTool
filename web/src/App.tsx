@@ -2144,7 +2144,7 @@ export function App() {
                 </div>
               </Card>
 
-              <Card title="异常明细（产物缺失）">
+              <Card title="异常明细">
                 <p className="muted">只显示存在产物缺失的视频文件或目录。同一集存在多个视频版本时，每个版本分别核对并显示。</p>
                 <div className="task-table-wrap">
                   <table className="task-table audit-table">

@@ -1385,15 +1385,18 @@ export function App() {
     setError('');
     setNotice('');
     try {
-      const response = await fetch('/api/audit/series', {
+      const response = await fetch(mode === 'missing' ? '/api/audit/missing' : '/api/audit/emby', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           root: auditRoot.trim(),
-          tmdbShowId: mode === 'missing' ? Number(auditTmdbId) || 0 : 0,
-          embyItemUrl: mode === 'emby' ? auditEmbyItemUrl.trim() : '',
-          embyApiKey: mode === 'emby' ? auditEmbyApiKey.trim() : '',
-          embyApiKeyId: mode === 'emby' ? Number(auditSelectedEmbyKeyId) || 0 : 0,
+          ...(mode === 'missing' ? {
+            tmdbShowId: Number(auditTmdbId) || 0,
+          } : {
+            embyItemUrl: auditEmbyItemUrl.trim(),
+            embyApiKey: auditEmbyApiKey.trim(),
+            embyApiKeyId: Number(auditSelectedEmbyKeyId) || 0,
+          }),
         })
       });
       if (!response.ok) {
@@ -1404,8 +1407,8 @@ export function App() {
       if (mode === 'missing') {
         setMissingAuditReport(report);
         const missingCount = report.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0);
-        const artifactCount = report.artifactIssues?.length ?? 0;
-        setNotice(`剧集缺漏核对完成：缺失 ${missingCount} 集，本地产物缺失 ${artifactCount} 项。`);
+        const artifactCount = groupArtifactIssues(report.artifactIssues).length;
+        setNotice(`剧集缺漏核对完成：缺失 ${missingCount} 集，发现 ${artifactCount} 个产物异常文件或目录。`);
       } else {
         setEmbyAuditReport(report);
         setNotice(`Emby 与本地核对完成：发现 ${report.embyComparisons?.length ?? 0} 项差异。`);
@@ -2082,7 +2085,7 @@ export function App() {
                   <div className="audit-stat"><span>剧集</span><strong>{missingAuditReport.showTitle || '-'}</strong><small>{missingAuditReport.tmdbShowId ? `TMDB #${missingAuditReport.tmdbShowId}` : '未识别 TMDB ID'}</small></div>
                   <div className="audit-stat"><span>本地单集</span><strong>{missingAuditReport.localEpisodes.length}</strong><small>{missingAuditReport.root}</small></div>
                   <div className="audit-stat"><span>缺失集数</span><strong>{missingAuditReport.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0)}</strong><small>{missingAuditReport.seasonReports.length} 个季度</small></div>
-                  <div className="audit-stat"><span>产物缺失</span><strong>{missingAuditReport.artifactIssues?.length ?? 0}</strong><small>{missingAuditReport.artifactIssues?.length ? '需要补齐' : '未发现'}</small></div>
+                  <div className="audit-stat"><span>产物异常对象</span><strong>{groupArtifactIssues(missingAuditReport.artifactIssues).length}</strong><small>{missingAuditReport.artifactIssues?.length ? '需要补齐' : '未发现'}</small></div>
                 </div>
               </Card>
 
@@ -2100,7 +2103,7 @@ export function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {missingAuditReport.seasonReports.length ? missingAuditReport.seasonReports.map((season) => (
+                      {missingAuditReport.seasonReports.some((season) => season.missingEpisodes?.length) ? missingAuditReport.seasonReports.filter((season) => season.missingEpisodes?.length).map((season) => (
                         <tr key={season.season}>
                           <td>S{String(season.season).padStart(2, '0')}</td>
                           <td>{formatEpisodeList(season.existingEpisodes)}</td>
@@ -2109,60 +2112,31 @@ export function App() {
                           <td><span className={season.missingEpisodes?.length ? 'pill bad' : 'pill ok'}>{season.missingEpisodes?.length ? formatEpisodeList(season.missingEpisodes) : '无'}</span></td>
                           <td className="path-cell">{season.note || '-'}</td>
                         </tr>
-                      )) : <tr><td colSpan={6} className="empty-cell">未发现 Season 1+ 单集。</td></tr>}
+                      )) : <tr><td colSpan={6} className="empty-cell">未发现季度缺漏。</td></tr>}
                     </tbody>
                   </table>
                 </div>
               </Card>
 
-              <Card title="本地产物缺失">
-                <p className="muted">检查剧集级图片、季度图片、单集 NFO、单集图片、`-mediainfo.json` 和 `-*.bif`。这里是本地文件存在性检查，不依赖 Emby。</p>
+              <Card title="异常明细（产物缺失）">
+                <p className="muted">只显示存在产物缺失的视频文件或目录。同一集存在多个视频版本时，每个版本分别核对并显示。</p>
                 <div className="task-table-wrap">
                   <table className="task-table audit-table">
                     <thead>
                       <tr>
-                        <th>级别</th>
                         <th>对象</th>
-                        <th>产物</th>
-                        <th>说明</th>
+                        <th>文件或目录</th>
+                        <th>缺失产物</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {missingAuditReport.artifactIssues?.length ? missingAuditReport.artifactIssues.map((issue, index) => (
-                        <tr key={`${issue.season}-${issue.episode}-${issue.field}-${index}`}>
-                          <td><span className="pill">{issue.severity}</span></td>
-                          <td>{formatAuditIssueTarget(issue)}</td>
-                          <td>{issue.field}</td>
-                          <td className="path-cell">{issue.detail || '-'}</td>
+                      {missingAuditReport.artifactIssues?.length ? groupArtifactIssues(missingAuditReport.artifactIssues).map((group) => (
+                        <tr key={group.path}>
+                          <td>{group.target}</td>
+                          <td className="path-cell">{group.path}</td>
+                          <td>{group.fields.join('、')}</td>
                         </tr>
-                      )) : <tr><td colSpan={4} className="empty-cell">未发现本地产物缺失。</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
-              </Card>
-
-              <Card title="本地单集明细">
-                <div className="task-table-wrap">
-                  <table className="task-table audit-table audit-episodes-table">
-                    <thead>
-                      <tr>
-                        <th>单集</th>
-                        <th>标题</th>
-                        <th>图片</th>
-                        <th>TMDB</th>
-                        <th>视频</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {missingAuditReport.localEpisodes.length ? missingAuditReport.localEpisodes.map((episode) => (
-                        <tr key={episode.path}>
-                          <td>S{String(episode.season).padStart(2, '0')}E{String(episode.episode).padStart(2, '0')}</td>
-                          <td>{episode.title || '-'}</td>
-                          <td><span className={episode.hasImage ? 'pill ok' : 'pill'}>{episode.hasImage ? '有' : '无'}</span></td>
-                          <td>{episode.providerIds?.tmdb || '-'}</td>
-                          <td className="path-cell">{episode.path}</td>
-                        </tr>
-                      )) : <tr><td colSpan={5} className="empty-cell">未识别到本地单集。</td></tr>}
+                      )) : <tr><td colSpan={3} className="empty-cell">未发现产物缺失。</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -3088,6 +3062,35 @@ function formatAuditIssueTarget(issue: AuditComparisonIssue): string {
     return `S${String(issue.season).padStart(2, '0')}`;
   }
   return '剧集';
+}
+
+function groupArtifactIssues(issues: AuditComparisonIssue[] | null | undefined): { path: string; target: string; fields: string[] }[] {
+  const groups = new Map<string, { path: string; target: string; fields: string[] }>();
+  for (const issue of asArray(issues)) {
+    const path = issue.local || formatAuditIssueTarget(issue);
+    const existing = groups.get(path);
+    const field = formatArtifactField(issue.field);
+    if (existing) {
+      if (!existing.fields.includes(field)) existing.fields.push(field);
+      continue;
+    }
+    groups.set(path, { path, target: formatAuditIssueTarget(issue), fields: [field] });
+  }
+  return Array.from(groups.values());
+}
+
+function formatArtifactField(field: string): string {
+  switch (field) {
+    case 'episode.nfo': return 'NFO';
+    case 'episode.thumb': return '单集图片';
+    case 'episode.mediainfo': return 'MediaInfo';
+    case 'episode.bif': return 'BIF';
+    case 'season.nfo': return '季度 NFO';
+    case 'season.image': return '季度图片';
+    case 'series.tvshow.nfo': return 'tvshow.nfo';
+    default:
+      return field.startsWith('series.image.') ? `剧集图片 ${field.slice('series.image.'.length)}` : field;
+  }
 }
 
 function formatFileAuditIssueType(type: string): string {

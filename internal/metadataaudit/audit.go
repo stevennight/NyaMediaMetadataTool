@@ -128,6 +128,22 @@ type nfoUniqueID struct {
 }
 
 func Run(ctx context.Context, opts Options) (Report, error) {
+	includeEmby := strings.TrimSpace(opts.EmbyItemURL) != "" ||
+		strings.TrimSpace(opts.EmbyURL) != "" ||
+		strings.TrimSpace(opts.EmbyAPIKey) != "" ||
+		strings.TrimSpace(opts.EmbySeriesID) != ""
+	return run(ctx, opts, true, includeEmby)
+}
+
+func RunMissing(ctx context.Context, opts Options) (Report, error) {
+	return run(ctx, opts, true, false)
+}
+
+func RunEmby(ctx context.Context, opts Options) (Report, error) {
+	return run(ctx, opts, false, true)
+}
+
+func run(ctx context.Context, opts Options, includeMissing bool, includeEmby bool) (Report, error) {
 	root, err := filepath.Abs(strings.TrimSpace(opts.Root))
 	if err != nil {
 		return Report{}, err
@@ -151,9 +167,14 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	}
 	report.LocalEpisodes = episodes
 	report.Warnings = append(report.Warnings, warnings...)
-	report.SeasonReports = buildSeasonReports(ctx, root, opts.Config, report.TMDBShowID, episodes, &report.Warnings)
-	report.ArtifactIssues = checkLocalArtifacts(root, report.LocalSeasons, episodes)
+	if includeMissing {
+		report.SeasonReports = buildSeasonReports(ctx, root, opts.Config, report.TMDBShowID, episodes, &report.Warnings)
+		report.ArtifactIssues = checkLocalArtifacts(root, report.LocalSeasons, episodes)
+	}
 
+	if !includeEmby {
+		return report, nil
+	}
 	embyURL := strings.TrimSpace(opts.EmbyURL)
 	embySeriesID := strings.TrimSpace(opts.EmbySeriesID)
 	if strings.TrimSpace(opts.EmbyItemURL) != "" {
@@ -164,28 +185,26 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		embyURL = firstNonEmpty(embyURL, parsedURL)
 		embySeriesID = firstNonEmpty(embySeriesID, parsedSeriesID)
 	}
-	if embyURL != "" || strings.TrimSpace(opts.EmbyAPIKey) != "" || embySeriesID != "" {
-		if embyURL == "" || strings.TrimSpace(opts.EmbyAPIKey) == "" || embySeriesID == "" {
-			return Report{}, errors.New("emby item url/api key or emby-url/api-key/series-id must be provided together")
-		}
-		embyClient, err := newEmbyClient(ctx, embyURL, opts.EmbyAPIKey)
-		if err != nil {
-			return Report{}, err
-		}
-		embyShow, err := embyClient.fetchItem(ctx, embySeriesID)
-		if err != nil {
-			return Report{}, err
-		}
-		embySeasons, err := embyClient.fetchSeasons(ctx, embySeriesID)
-		if err != nil {
-			return Report{}, err
-		}
-		embyEpisodes, err := embyClient.fetchEpisodes(ctx, embySeriesID)
-		if err != nil {
-			return Report{}, err
-		}
-		report.EmbyComparisons = compareEmby(localShow, report.LocalSeasons, episodes, embyShow, embySeasons, embyEpisodes)
+	if embyURL == "" || strings.TrimSpace(opts.EmbyAPIKey) == "" || embySeriesID == "" {
+		return Report{}, errors.New("emby item url/api key or emby-url/api-key/series-id must be provided together")
 	}
+	embyClient, err := newEmbyClient(ctx, embyURL, opts.EmbyAPIKey)
+	if err != nil {
+		return Report{}, err
+	}
+	embyShow, err := embyClient.fetchItem(ctx, embySeriesID)
+	if err != nil {
+		return Report{}, err
+	}
+	embySeasons, err := embyClient.fetchSeasons(ctx, embySeriesID)
+	if err != nil {
+		return Report{}, err
+	}
+	embyEpisodes, err := embyClient.fetchEpisodes(ctx, embySeriesID)
+	if err != nil {
+		return Report{}, err
+	}
+	report.EmbyComparisons = compareEmby(localShow, report.LocalSeasons, episodes, embyShow, embySeasons, embyEpisodes)
 
 	return report, nil
 }
@@ -613,17 +632,17 @@ func directoryHasImage(dir string, stems []string) bool {
 
 func checkLocalArtifacts(root string, seasons []LocalSeason, episodes []LocalEpisode) []ComparisonIssue {
 	var issues []ComparisonIssue
-	add := func(season int, episode int, field string, detail string) {
-		issues = append(issues, ComparisonIssue{Severity: "warning", Season: season, Episode: episode, Field: field, Detail: detail})
+	add := func(season int, episode int, path string, field string, detail string) {
+		issues = append(issues, ComparisonIssue{Severity: "warning", Season: season, Episode: episode, Field: field, Local: path, Detail: detail})
 	}
 	for _, name := range []string{"tvshow.nfo"} {
 		if !fileExists(filepath.Join(root, name)) {
-			add(0, 0, "series."+name, "剧集级产物缺失")
+			add(0, 0, root, "series."+name, "剧集级产物缺失")
 		}
 	}
 	for _, image := range []string{"poster", "fanart", "backdrop", "clearlogo", "clearart"} {
 		if !hasAnyExt(root, image, []string{".jpg", ".jpeg", ".png", ".webp"}) {
-			add(0, 0, "series.image."+image, "剧集图片缺失")
+			add(0, 0, root, "series.image."+image, "剧集图片缺失")
 		}
 	}
 	for _, season := range seasons {
@@ -632,28 +651,31 @@ func checkLocalArtifacts(root string, seasons []LocalSeason, episodes []LocalEpi
 			continue
 		}
 		if !fileExists(filepath.Join(seasonDir, "season.nfo")) {
-			add(season.Season, 0, "season.nfo", "季度 NFO 缺失")
+			add(season.Season, 0, seasonDir, "season.nfo", "季度 NFO 缺失")
 		}
 		if !directoryHasImage(seasonDir, []string{"poster", "folder", "season"}) {
-			add(season.Season, 0, "season.image", "季度图片缺失")
+			add(season.Season, 0, seasonDir, "season.image", "季度图片缺失")
 		}
 	}
 	for _, episode := range episodes {
 		base := strings.TrimSuffix(episode.Path, filepath.Ext(episode.Path))
 		if !fileExists(base + ".nfo") {
-			add(episode.Season, episode.Episode, "episode.nfo", "单集 NFO 缺失")
+			add(episode.Season, episode.Episode, episode.Path, "episode.nfo", "单集 NFO 缺失")
 		}
 		if !episodeHasImage(base, filepath.Dir(episode.Path), episode.Thumb) {
-			add(episode.Season, episode.Episode, "episode.thumb", "单集图片缺失")
+			add(episode.Season, episode.Episode, episode.Path, "episode.thumb", "单集图片缺失")
 		}
 		if !fileExists(base + "-mediainfo.json") {
-			add(episode.Season, episode.Episode, "episode.mediainfo", "mediainfo.json 缺失")
+			add(episode.Season, episode.Episode, episode.Path, "episode.mediainfo", "mediainfo.json 缺失")
 		}
 		if !hasBIF(base) {
-			add(episode.Season, episode.Episode, "episode.bif", "BIF 缺失")
+			add(episode.Season, episode.Episode, episode.Path, "episode.bif", "BIF 缺失")
 		}
 	}
 	sort.Slice(issues, func(i, j int) bool {
+		if issues[i].Local != issues[j].Local {
+			return issues[i].Local < issues[j].Local
+		}
 		if issues[i].Season == issues[j].Season {
 			if issues[i].Episode == issues[j].Episode {
 				return issues[i].Field < issues[j].Field

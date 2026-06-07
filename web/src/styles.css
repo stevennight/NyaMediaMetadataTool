@@ -664,10 +664,6 @@ button:disabled {
   min-width: 900px;
 }
 
-.audit-episodes-table {
-  min-width: 1100px;
-}
-
 .audit-warning-list {
   display: grid;
   gap: 8px;

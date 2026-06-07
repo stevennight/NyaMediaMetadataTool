@@ -926,6 +926,12 @@ button:disabled {
   white-space: nowrap;
 }
 
+.rename-readonly-input {
+  cursor: not-allowed;
+  background: rgba(231, 229, 228, 0.72);
+  color: #78716c;
+}
+
 .rename-edit-cell small {
   color: #78716c;
   padding-left: 44px;

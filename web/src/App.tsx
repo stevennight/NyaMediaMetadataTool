@@ -1861,7 +1861,7 @@ export function App() {
                       <td className="rename-edit-cell">
                         <label className="rename-edit-field">
                           <span>剧名</span>
-                          <input value={item.show || ''} onChange={(event) => updateRenameItem(item.path, { show: event.target.value })} placeholder="剧名" />
+                          <input className="rename-readonly-input" value={item.show || ''} readOnly title="请勾选文件后使用“更改匹配剧集”修改剧集" placeholder="剧名" />
                         </label>
                         <div className="rename-episode-edit">
                           <label className="rename-edit-field">
@@ -1875,7 +1875,7 @@ export function App() {
                         </div>
                         <label className="rename-edit-field">
                           <span>标题</span>
-                          <input value={item.title || ''} onChange={(event) => updateRenameItem(item.path, { title: event.target.value })} placeholder="标题" />
+                          <input className="rename-readonly-input" value={item.title || ''} readOnly title="如需自定义标题，请直接编辑“新文件名”" placeholder="标题" />
                         </label>
                         {item.tmdbShowId ? <button className="tmdb-detail-link" type="button" onClick={() => void openTmdbEpisodeDetail(item)} disabled={loadingTmdbEpisodeDetail}>TMDB #{item.tmdbShowId}</button> : null}
                       </td>

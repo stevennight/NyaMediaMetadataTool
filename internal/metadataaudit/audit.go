@@ -169,7 +169,7 @@ func run(ctx context.Context, opts Options, includeMissing bool, includeEmby boo
 	report.LocalEpisodes = episodes
 	report.Warnings = append(report.Warnings, warnings...)
 	if includeMissing {
-		report.SeasonReports = buildSeasonReports(ctx, root, opts.Config, report.TMDBShowID, episodes, opts.IncludeSeasonZero, &report.Warnings)
+		report.SeasonReports = buildSeasonReports(ctx, opts.Config, report.TMDBShowID, episodes, opts.IncludeSeasonZero, &report.Warnings)
 		report.ArtifactIssues = checkLocalArtifacts(root, report.LocalSeasons, episodes)
 	}
 
@@ -412,16 +412,14 @@ func localEpisodeFromVideo(path string, cfg config.Config) (LocalEpisode, string
 	return episode, ""
 }
 
-func buildSeasonReports(ctx context.Context, root string, cfg config.Config, showID int, episodes []LocalEpisode, includeSeasonZero bool, warnings *[]string) []SeasonReport {
+func buildSeasonReports(ctx context.Context, cfg config.Config, showID int, episodes []LocalEpisode, includeSeasonZero bool, warnings *[]string) []SeasonReport {
 	bySeason := make(map[int]map[int]bool)
-	seasonDirs := make(map[int]string)
 	for _, episode := range episodes {
 		if episode.Season == 0 && !includeSeasonZero {
 			continue
 		}
 		if bySeason[episode.Season] == nil {
 			bySeason[episode.Season] = map[int]bool{}
-			seasonDirs[episode.Season] = filepath.Dir(episode.Path)
 		}
 		bySeason[episode.Season][episode.Episode] = true
 	}
@@ -434,8 +432,10 @@ func buildSeasonReports(ctx context.Context, root string, cfg config.Config, sho
 		if err == nil {
 			tmdbClient = client
 		} else if warnings != nil {
-			*warnings = append(*warnings, "已识别 TMDB ID，但 TMDB 不可用，回退到 season.nfo: "+err.Error())
+			*warnings = append(*warnings, "已识别 TMDB ID，但 TMDB 不可用，无法判断剧集缺漏: "+err.Error())
 		}
+	} else if warnings != nil {
+		*warnings = append(*warnings, "未识别 TMDB 剧集，无法判断剧集缺漏")
 	}
 
 	seasons := make([]int, 0, len(bySeason))
@@ -449,7 +449,7 @@ func buildSeasonReports(ctx context.Context, root string, cfg config.Config, sho
 	reports := make([]SeasonReport, 0, len(seasons))
 	for _, season := range seasons {
 		existing := setToSortedInts(bySeason[season])
-		expected, expectedEpisodes, source := expectedEpisodeInfo(ctx, root, seasonDirs[season], season, showID, tmdbClient, warnings)
+		expected, expectedEpisodes, source := expectedEpisodeInfo(ctx, season, showID, tmdbClient, warnings)
 		report := SeasonReport{Season: season, ExpectedCount: expected, ExpectedSource: source, ExpectedEpisodes: expectedEpisodes, ExistingCount: len(existing), ExistingEpisodes: existing}
 		applyMissingEpisodes(&report, bySeason[season])
 		reports = append(reports, report)
@@ -457,7 +457,7 @@ func buildSeasonReports(ctx context.Context, root string, cfg config.Config, sho
 	return reports
 }
 
-func expectedEpisodeInfo(ctx context.Context, root string, seasonDir string, season int, showID int, client *tmdb.Client, warnings *[]string) (int, []int, string) {
+func expectedEpisodeInfo(ctx context.Context, season int, showID int, client *tmdb.Client, warnings *[]string) (int, []int, string) {
 	if client != nil && showID != 0 {
 		_, seasonDetail, err := client.FindShowAndSeasonByShowID(ctx, showID, season)
 		if err == nil && seasonDetail.EpisodeCount > 0 {
@@ -465,11 +465,6 @@ func expectedEpisodeInfo(ctx context.Context, root string, seasonDir string, sea
 		}
 		if err != nil && warnings != nil {
 			*warnings = append(*warnings, fmt.Sprintf("TMDB S%02d 获取失败: %v", season, err))
-		}
-	}
-	for _, dir := range uniqueStrings([]string{seasonDir, filepath.Join(root, fmt.Sprintf("Season %02d", season)), filepath.Join(root, fmt.Sprintf("Season %d", season))}) {
-		if count := readSeasonEpisodeCount(filepath.Join(dir, "season.nfo")); count > 0 {
-			return count, nil, "season.nfo"
 		}
 	}
 	return 0, nil, ""
@@ -570,18 +565,6 @@ func readLocalSeason(path string) (LocalSeason, bool) {
 		HasImage:     directoryHasImage(dir, []string{"poster", "folder", "season", "fanart", "backdrop"}),
 		ProviderIDs:  providerIDs(doc.UniqueID, doc.TMDBID),
 	}, seasonNumber != 0
-}
-
-func readSeasonEpisodeCount(path string) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	var doc seasonNFO
-	if err := xml.Unmarshal(data, &doc); err != nil {
-		return 0
-	}
-	return doc.EpisodeCount
 }
 
 func readEpisodeNFO(path string) (episodeNFO, bool) {

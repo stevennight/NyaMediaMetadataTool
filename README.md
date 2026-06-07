@@ -464,7 +464,7 @@ go run ./cmd/nyammdcheck -config config.yaml -root "D:\\Media\\TV\\Example Show"
 - 扫描指定剧集根目录下的视频文件，Season 0 默认跳过缺漏判断，也可在页面中开启检查
 - 优先读取同名单集 `.nfo` 获取季度、集数、标题、简介、图片和 provider id，缺失时回退到文件名解析
 - 默认读取剧集根目录 `tvshow.nfo` 的 TMDB ID 查询 TMDB，并按 TMDB 该季真实集号判断缺漏；手动 `-tmdb-id` 优先级更高
-- TMDB 不可用时，才回退读取季度目录 `season.nfo` 的 `episodecount` 做总量级判断
+- 无法识别或查询 TMDB 时，不判断剧集缺漏；页面可搜索选择剧集或手动填写 TMDB ID
 - 配置 Emby 参数后，会通过 Emby API 对比剧集、季度、单集的标题、简介、图片存在性、可用的 TMDB ID，以及单集文件名
 
 Emby 对比示例：

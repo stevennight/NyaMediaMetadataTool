@@ -601,6 +601,7 @@ export function App() {
   const [tmdbQuery, setTmdbQuery] = useState('');
   const [tmdbResults, setTmdbResults] = useState<TMDBSearchResult[]>([]);
   const [tmdbMatchOpen, setTmdbMatchOpen] = useState(false);
+  const [auditTmdbMatchOpen, setAuditTmdbMatchOpen] = useState(false);
   const [tmdbEpisodeDetail, setTmdbEpisodeDetail] = useState<TmdbEpisodeDetail | null>(null);
   const [loadingTmdbEpisodeDetail, setLoadingTmdbEpisodeDetail] = useState(false);
   const [searchingTmdb, setSearchingTmdb] = useState(false);
@@ -1087,6 +1088,19 @@ export function App() {
     }
   }
 
+  function openAuditTmdbMatch() {
+    const pathParts = auditRoot.trim().split(/[\\/]/).filter(Boolean);
+    setTmdbQuery(missingAuditReport?.showTitle || pathParts[pathParts.length - 1] || '');
+    setTmdbResults([]);
+    setAuditTmdbMatchOpen(true);
+  }
+
+  function applyTmdbShowToAudit(show: TMDBSearchResult) {
+    setAuditTmdbId(String(show.id));
+    setAuditTmdbMatchOpen(false);
+    setNotice(`已选择 ${show.name || show.originalName}（TMDB #${show.id}），请开始核对。`);
+  }
+
   async function applyTmdbShowToSelected(show: TMDBSearchResult) {
     if (applyingTmdbShowRef.current) return;
     const targets = renamePreview.filter((item) => selectedRenamePaths.includes(item.path));
@@ -1413,6 +1427,12 @@ export function App() {
         const missingCount = report.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0);
         const artifactCount = groupArtifactIssues(report.artifactIssues).length;
         setNotice(`剧集缺漏核对完成：缺失 ${missingCount} 集，发现 ${artifactCount} 个产物异常文件或目录。`);
+        if (!report.tmdbShowId) {
+          const pathParts = auditRoot.trim().split(/[\\/]/).filter(Boolean);
+          setTmdbQuery(report.showTitle || pathParts[pathParts.length - 1] || '');
+          setTmdbResults([]);
+          setAuditTmdbMatchOpen(true);
+        }
       } else {
         setEmbyAuditReport(report);
         setNotice(`Emby 与本地核对完成：发现 ${report.embyComparisons?.length ?? 0} 项差异。`);
@@ -1951,7 +1971,7 @@ export function App() {
           {auditTab === 'missing' && <Card title="剧集缺漏" action={<button onClick={() => runSeriesAudit('missing')} disabled={auditingMissing}>{auditingMissing ? '核对中' : '开始核对'}</button>}>
             <div className="audit-controls">
               <label>剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择剧集根目录', value: auditRoot, onSelect: setAuditRoot })}>选择</button></div></label>
-              <label><FieldLabel label="TMDB 剧集 ID" help="默认使用 tvshow.nfo 里的 TMDB ID。手动填写时优先使用手动值；TMDB 不可用时才回退季度 season.nfo 的总集数。" /><input value={auditTmdbId} onChange={(event) => setAuditTmdbId(event.target.value)} inputMode="numeric" placeholder="可选，优先于 tvshow.nfo" /></label>
+              <label><FieldLabel label="TMDB 剧集 ID" help="留空时读取 tvshow.nfo 中的 TMDB ID；手动填写或选择剧集会覆盖自动读取的 ID。" /><div className="path-input"><input value={auditTmdbId} onChange={(event) => setAuditTmdbId(event.target.value)} inputMode="numeric" placeholder="可选，优先于 tvshow.nfo" /><button type="button" onClick={openAuditTmdbMatch}>选择剧集</button></div></label>
             </div>
             <div className="audit-option-row">
               <Toggle label={<FieldLabel label="检查 Season 0" help="开启后，Season 0 会参与缺漏判断和产物检查。" />} checked={auditIncludeSeasonZero} onChange={setAuditIncludeSeasonZero} />
@@ -2229,6 +2249,7 @@ export function App() {
       {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
+      {auditTmdbMatchOpen && <TmdbMatchModal title="选择核对剧集" description="选择后会将 TMDB ID 用于剧集缺漏判断。" applyLabel="选择剧集" query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={null} applyProgress={0} applyTotal={0} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={applyTmdbShowToAudit} onClose={() => setAuditTmdbMatchOpen(false)} />}
       {tmdbEpisodeDetail && <TmdbEpisodeDetailModal detail={tmdbEpisodeDetail} language={renameLanguage} refreshing={loadingTmdbEpisodeDetail} onRefresh={() => void openTmdbEpisodeDetail({ tmdbShowId: tmdbEpisodeDetail.showId, season: tmdbEpisodeDetail.season, episode: tmdbEpisodeDetail.episode } as RenamePreviewItem, true)} onClose={() => setTmdbEpisodeDetail(null)} />}
       {renameHistoryOpen && <RenameHistoryModal history={renameHistory} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onOpenDetails={setSelectedHistoryBatch} onUndo={(id) => void undoRenameBatch(id)} />}
       {selectedHistoryBatch && <RenameHistoryDetailsModal batch={selectedHistoryBatch} undoCheck={undoCheckResult?.batch?.id === selectedHistoryBatch.id ? undoCheckResult : null} timezone={displayTimezone} onClose={() => setSelectedHistoryBatch(null)} />}
@@ -2561,7 +2582,10 @@ function BatchEpisodeModal(props: {
 }
 
 function TmdbMatchModal(props: {
-  count: number;
+  title?: string;
+  description?: string;
+  applyLabel?: string;
+  count?: number;
   query: string;
   results: TMDBSearchResult[];
   searching: boolean;
@@ -2579,8 +2603,8 @@ function TmdbMatchModal(props: {
       <section className="modal-card tmdb-match-modal" role="dialog" aria-modal="true" aria-labelledby="tmdb-match-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
           <div>
-            <h2 id="tmdb-match-title">更改匹配剧集</h2>
-            <small>将应用到当前选中的 {props.count} 个文件，并重新生成预览。</small>
+            <h2 id="tmdb-match-title">{props.title || '更改匹配剧集'}</h2>
+            <small>{props.description || `将应用到当前选中的 ${props.count ?? 0} 个文件，并重新生成预览。`}</small>
           </div>
           <IconCloseButton onClick={props.onClose} disabled={applying} />
         </div>
@@ -2597,12 +2621,12 @@ function TmdbMatchModal(props: {
               </span>
               <span className="tmdb-match-meta">{show.firstAirDate?.slice(0, 4) || '年份未知'} · TMDB #{show.id}</span>
               {show.overview ? <p>{show.overview}</p> : null}
-              {props.applyingShowId === show.id ? <em>应用中 {props.applyProgress}/{props.applyTotal}</em> : <em>选择并应用</em>}
+              {props.applyingShowId === show.id ? <em>应用中 {props.applyProgress}/{props.applyTotal}</em> : <em>{props.applyLabel || '选择并应用'}</em>}
             </button>
           )) : (
             <div className="tmdb-match-empty">
               <strong>{props.searching ? '正在搜索剧集…' : '搜索并选择正确的剧集'}</strong>
-              <span>选择后会更新当前勾选项，并按照各自季集重新查询标题。</span>
+              <span>{props.description || '选择后会更新当前勾选项，并按照各自季集重新查询标题。'}</span>
             </div>
           )}
         </div>

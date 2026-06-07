@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { MouseEvent as ReactMouseEvent } from 'react';
+import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 
 type Health = {
   status: string;
@@ -436,6 +436,7 @@ type RenamePreferences = {
 type AuditPreferences = {
   root?: string;
   tmdbId?: string;
+  includeSeasonZero?: boolean;
   embyItemUrl?: string;
   embyApiKeyId?: string;
   fileLocalRoot?: string;
@@ -637,6 +638,7 @@ export function App() {
   const [rescanProcessing, setRescanProcessing] = useState<OutputProcessingConfig>(() => defaultOutputProcessing());
   const [auditRoot, setAuditRoot] = useState(() => readAuditPreferences().root ?? '');
   const [auditTmdbId, setAuditTmdbId] = useState(() => readAuditPreferences().tmdbId ?? '');
+  const [auditIncludeSeasonZero, setAuditIncludeSeasonZero] = useState(() => readAuditPreferences().includeSeasonZero ?? false);
   const [auditEmbyItemUrl, setAuditEmbyItemUrl] = useState(() => readAuditPreferences().embyItemUrl ?? '');
   const [auditEmbyApiKey, setAuditEmbyApiKey] = useState('');
   const [auditEmbyAPIKeys, setAuditEmbyAPIKeys] = useState<EmbyAPIKey[]>([]);
@@ -744,6 +746,7 @@ export function App() {
     writeAuditPreferences({
       root: auditRoot,
       tmdbId: auditTmdbId,
+      includeSeasonZero: auditIncludeSeasonZero,
       embyItemUrl: auditEmbyItemUrl,
       embyApiKeyId: auditSelectedEmbyKeyId,
       fileLocalRoot: fileAuditLocalRoot,
@@ -757,7 +760,7 @@ export function App() {
       compareSize: fileAuditCompareSize,
       compareMd5: fileAuditCompareMD5
     });
-  }, [auditRoot, auditTmdbId, auditEmbyItemUrl, auditSelectedEmbyKeyId, fileAuditLocalRoot, fileAuditRemoteRoot, fileAuditSFTPAddr, fileAuditSFTPUser, fileAuditSFTPKeyPath, fileAuditSFTPKnownHostsPath, fileAuditSFTPInsecure, fileAuditAllowSTRM, fileAuditCompareSize, fileAuditCompareMD5]);
+  }, [auditRoot, auditTmdbId, auditIncludeSeasonZero, auditEmbyItemUrl, auditSelectedEmbyKeyId, fileAuditLocalRoot, fileAuditRemoteRoot, fileAuditSFTPAddr, fileAuditSFTPUser, fileAuditSFTPKeyPath, fileAuditSFTPKnownHostsPath, fileAuditSFTPInsecure, fileAuditAllowSTRM, fileAuditCompareSize, fileAuditCompareMD5]);
 
   useEffect(() => {
     function handlePopState() {
@@ -1392,6 +1395,7 @@ export function App() {
           root: auditRoot.trim(),
           ...(mode === 'missing' ? {
             tmdbShowId: Number(auditTmdbId) || 0,
+            includeSeasonZero: auditIncludeSeasonZero,
           } : {
             embyItemUrl: auditEmbyItemUrl.trim(),
             embyApiKey: auditEmbyApiKey.trim(),
@@ -1947,9 +1951,11 @@ export function App() {
           {auditTab === 'missing' && <Card title="剧集缺漏" action={<button onClick={() => runSeriesAudit('missing')} disabled={auditingMissing}>{auditingMissing ? '核对中' : '开始核对'}</button>}>
             <div className="audit-controls">
               <label>剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择剧集根目录', value: auditRoot, onSelect: setAuditRoot })}>选择</button></div></label>
-              <label>TMDB 剧集 ID<input value={auditTmdbId} onChange={(event) => setAuditTmdbId(event.target.value)} inputMode="numeric" placeholder="可选，优先于 tvshow.nfo" /></label>
+              <label><FieldLabel label="TMDB 剧集 ID" help="默认使用 tvshow.nfo 里的 TMDB ID。手动填写时优先使用手动值；TMDB 不可用时才回退季度 season.nfo 的总集数。" /><input value={auditTmdbId} onChange={(event) => setAuditTmdbId(event.target.value)} inputMode="numeric" placeholder="可选，优先于 tvshow.nfo" /></label>
             </div>
-            <p className="muted">Season 0 不参与缺漏判断。默认使用剧集 `tvshow.nfo` 里的 TMDB ID 精确核对，手动填写 TMDB ID 时优先使用手动值；TMDB 不可用时才回退季度 `season.nfo` 的总集数。</p>
+            <div className="audit-option-row">
+              <Toggle label={<FieldLabel label="检查 Season 0" help="开启后，Season 0 会参与缺漏判断和产物检查。" />} checked={auditIncludeSeasonZero} onChange={setAuditIncludeSeasonZero} />
+            </div>
           </Card>}
 
           {auditTab === 'emby' && <Card title="Emby 与本地核对" action={<button onClick={() => runSeriesAudit('emby')} disabled={auditingEmby}>{auditingEmby ? '核对中' : '开始核对'}</button>}>
@@ -2906,7 +2912,19 @@ function Flag(props: { label: string; enabled?: boolean }) {
   return <Row label={props.label} value={props.enabled ? '开启' : '关闭'} />;
 }
 
-function Toggle(props: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+function FieldLabel(props: { label: string; help: string }) {
+  return (
+    <span className="field-label">
+      <span>{props.label}</span>
+      <span className="help-tip" tabIndex={0} role="img" aria-label={`${props.label}说明`} onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}>
+        ?
+        <span className="help-tip-content" role="tooltip">{props.help}</span>
+      </span>
+    </span>
+  );
+}
+
+function Toggle(props: { label: ReactNode; checked: boolean; onChange: (value: boolean) => void }) {
   return (
     <label className="toggle-row">
       <span>{props.label}</span>
@@ -3055,7 +3073,7 @@ function formatEpisodeList(values: number[] | null | undefined): string {
 }
 
 function formatAuditIssueTarget(issue: AuditComparisonIssue): string {
-  if (issue.season && issue.episode) {
+  if (issue.episode) {
     return `S${String(issue.season).padStart(2, '0')}E${String(issue.episode).padStart(2, '0')}`;
   }
   if (issue.season) {

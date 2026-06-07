@@ -395,8 +395,9 @@ func (s *Server) handleRenameApply(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMissingAudit(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		Root       string `json:"root"`
-		TMDBShowID int    `json:"tmdbShowId"`
+		Root              string `json:"root"`
+		TMDBShowID        int    `json:"tmdbShowId"`
+		IncludeSeasonZero bool   `json:"includeSeasonZero"`
 	}
 	var input request
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -409,9 +410,10 @@ func (s *Server) handleMissingAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	report, err := metadataaudit.RunMissing(r.Context(), metadataaudit.Options{
-		Root:       input.Root,
-		Config:     s.snapshotConfig(),
-		TMDBShowID: input.TMDBShowID,
+		Root:              input.Root,
+		Config:            s.snapshotConfig(),
+		TMDBShowID:        input.TMDBShowID,
+		IncludeSeasonZero: input.IncludeSeasonZero,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)

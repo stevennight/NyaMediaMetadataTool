@@ -42,6 +42,38 @@ func TestRunUsesSeasonNFOAndSkipsSeasonZero(t *testing.T) {
 	}
 }
 
+func TestRunMissingIncludesSeasonZeroWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	seasonDir := filepath.Join(root, "Season 00")
+	if err := os.Mkdir(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(seasonDir, "season.nfo"), `<season><seasonnumber>0</seasonnumber><episodeguide><episodecount>2</episodecount></episodeguide></season>`)
+	video := filepath.Join(seasonDir, "Test Show S00E01.mkv")
+	writeFile(t, video, "")
+
+	report, err := RunMissing(context.Background(), Options{Root: root, Config: config.Default(), IncludeSeasonZero: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.LocalEpisodes) != 1 || report.LocalEpisodes[0].Path != video {
+		t.Fatalf("expected Season 0 video in local episodes, got %#v", report.LocalEpisodes)
+	}
+	if len(report.SeasonReports) != 1 || report.SeasonReports[0].Season != 0 {
+		t.Fatalf("expected Season 0 report, got %#v", report.SeasonReports)
+	}
+	if missing := report.SeasonReports[0].MissingEpisodes; len(missing) != 1 || missing[0] != 2 {
+		t.Fatalf("expected missing S00E02, got %#v", missing)
+	}
+	for _, warning := range report.Warnings {
+		if warning == "无法识别季度/集数: "+video {
+			t.Fatalf("recognized Season 0 video should not produce warning")
+		}
+	}
+}
+
 func TestRunSkipsIgnoredDirectories(t *testing.T) {
 	t.Parallel()
 

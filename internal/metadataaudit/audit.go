@@ -22,13 +22,14 @@ import (
 )
 
 type Options struct {
-	Root         string
-	Config       config.Config
-	TMDBShowID   int
-	EmbyItemURL  string
-	EmbyURL      string
-	EmbyAPIKey   string
-	EmbySeriesID string
+	Root              string
+	Config            config.Config
+	TMDBShowID        int
+	IncludeSeasonZero bool
+	EmbyItemURL       string
+	EmbyURL           string
+	EmbyAPIKey        string
+	EmbySeriesID      string
 }
 
 type Report struct {
@@ -161,14 +162,14 @@ func run(ctx context.Context, opts Options, includeMissing bool, includeEmby boo
 	report.Warnings = append(report.Warnings, warnings...)
 	report.LocalSeasons = scanLocalSeasons(root)
 
-	episodes, warnings, err := scanLocalEpisodes(root, opts.Config)
+	episodes, warnings, err := scanLocalEpisodes(root, opts.Config, opts.IncludeSeasonZero)
 	if err != nil {
 		return Report{}, err
 	}
 	report.LocalEpisodes = episodes
 	report.Warnings = append(report.Warnings, warnings...)
 	if includeMissing {
-		report.SeasonReports = buildSeasonReports(ctx, root, opts.Config, report.TMDBShowID, episodes, &report.Warnings)
+		report.SeasonReports = buildSeasonReports(ctx, root, opts.Config, report.TMDBShowID, episodes, opts.IncludeSeasonZero, &report.Warnings)
 		report.ArtifactIssues = checkLocalArtifacts(root, report.LocalSeasons, episodes)
 	}
 
@@ -345,7 +346,7 @@ func WriteJSON(w io.Writer, report Report) error {
 	return encoder.Encode(report)
 }
 
-func scanLocalEpisodes(root string, cfg config.Config) ([]LocalEpisode, []string, error) {
+func scanLocalEpisodes(root string, cfg config.Config, includeSeasonZero bool) ([]LocalEpisode, []string, error) {
 	exts := extensionSet(cfg.Processing.Extensions)
 	var episodes []LocalEpisode
 	var warnings []string
@@ -366,7 +367,7 @@ func scanLocalEpisodes(root string, cfg config.Config) ([]LocalEpisode, []string
 		if warning != "" {
 			warnings = append(warnings, warning)
 		}
-		if episode.Season == 0 {
+		if episode.Season == 0 && !includeSeasonZero {
 			return nil
 		}
 		episodes = append(episodes, episode)
@@ -387,6 +388,7 @@ func scanLocalEpisodes(root string, cfg config.Config) ([]LocalEpisode, []string
 func localEpisodeFromVideo(path string, cfg config.Config) (LocalEpisode, string) {
 	base := strings.TrimSuffix(path, filepath.Ext(path))
 	episode := LocalEpisode{Path: path, NFOPath: base + ".nfo"}
+	recognized := false
 	if doc, ok := readEpisodeNFO(episode.NFOPath); ok {
 		episode.Season = doc.Season
 		episode.Episode = doc.Episode
@@ -394,25 +396,27 @@ func localEpisodeFromVideo(path string, cfg config.Config) (LocalEpisode, string
 		episode.Plot = firstNonEmpty(doc.Plot, doc.Outline)
 		episode.Thumb = strings.TrimSpace(doc.Thumb)
 		episode.ProviderIDs = providerIDs(doc.UniqueID, doc.TMDBID)
+		recognized = doc.Episode > 0
 	}
-	if episode.Season == 0 || episode.Episode == 0 {
+	if !recognized {
 		if parsed, ok := episodeparse.Parse(filepath.Base(base)); ok {
 			episode.Season = parsed.Season
 			episode.Episode = parsed.Episode
+			recognized = true
 		}
 	}
 	episode.HasImage = episodeHasImage(base, filepath.Dir(path), episode.Thumb)
-	if episode.Season == 0 || episode.Episode == 0 {
+	if !recognized || episode.Episode == 0 {
 		return episode, "无法识别季度/集数: " + path
 	}
 	return episode, ""
 }
 
-func buildSeasonReports(ctx context.Context, root string, cfg config.Config, showID int, episodes []LocalEpisode, warnings *[]string) []SeasonReport {
+func buildSeasonReports(ctx context.Context, root string, cfg config.Config, showID int, episodes []LocalEpisode, includeSeasonZero bool, warnings *[]string) []SeasonReport {
 	bySeason := make(map[int]map[int]bool)
 	seasonDirs := make(map[int]string)
 	for _, episode := range episodes {
-		if episode.Season == 0 {
+		if episode.Season == 0 && !includeSeasonZero {
 			continue
 		}
 		if bySeason[episode.Season] == nil {
@@ -436,7 +440,7 @@ func buildSeasonReports(ctx context.Context, root string, cfg config.Config, sho
 
 	seasons := make([]int, 0, len(bySeason))
 	for season := range bySeason {
-		if season == 0 {
+		if season == 0 && !includeSeasonZero {
 			continue
 		}
 		seasons = append(seasons, season)

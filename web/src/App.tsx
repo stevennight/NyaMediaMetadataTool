@@ -647,6 +647,7 @@ export function App() {
   const [auditSelectedEmbyKeyId, setAuditSelectedEmbyKeyId] = useState(() => readAuditPreferences().embyApiKeyId ?? '');
   const [newEmbyKeyTitle, setNewEmbyKeyTitle] = useState('');
   const [newEmbyKeyValue, setNewEmbyKeyValue] = useState('');
+  const [addEmbyKeyOpen, setAddEmbyKeyOpen] = useState(false);
   const [savingEmbyKey, setSavingEmbyKey] = useState(false);
   const [missingAuditReport, setMissingAuditReport] = useState<AuditReport | null>(null);
   const [embyAuditReport, setEmbyAuditReport] = useState<AuditReport | null>(null);
@@ -1511,6 +1512,7 @@ export function App() {
       await loadEmbyAPIKeys();
       setAuditSelectedEmbyKeyId(String(saved.id));
       setAuditEmbyApiKey('');
+      setAddEmbyKeyOpen(false);
       setNotice('Emby API Key 已保存。');
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存 Emby API Key 失败');
@@ -1995,46 +1997,74 @@ export function App() {
                   <strong>访问凭证</strong>
                   <span>选择已保存的 Key，或输入仅用于本次核对的临时 Key。</span>
                 </div>
+                <div className="emby-key-list-block">
+                  <span>已保存的 API Key</span>
+                  <div className="emby-key-list">
+                    {auditEmbyAPIKeys.map((key) => (
+                      <div className={auditSelectedEmbyKeyId === String(key.id) ? 'emby-key-item selected' : 'emby-key-item'} key={key.id}>
+                        <button className="emby-key-use" type="button" onClick={() => { setAuditSelectedEmbyKeyId(String(key.id)); setAuditEmbyApiKey(''); }}>
+                          {auditSelectedEmbyKeyId === String(key.id) ? <span className="emby-key-check" aria-hidden="true">✓</span> : null}
+                          <span>{key.title}</span>
+                        </button>
+                        <button className="template-history-delete" type="button" title="删除 API Key" aria-label={`删除 API Key ${key.title}`} onClick={() => void deleteEmbyAPIKey(key.id)}><span aria-hidden="true">&times;</span></button>
+                      </div>
+                    ))}
+                    <button className="emby-key-add" type="button" onClick={() => { setNewEmbyKeyTitle(''); setNewEmbyKeyValue(''); setAddEmbyKeyOpen(true); }}>+ 添加 API Key</button>
+                  </div>
+                </div>
                 <div className="emby-audit-credentials">
-                  <label>已保存的 API Key<select value={auditSelectedEmbyKeyId} onChange={(event) => { setAuditSelectedEmbyKeyId(event.target.value); if (event.target.value) setAuditEmbyApiKey(''); }}><option value="">使用临时 Key</option>{auditEmbyAPIKeys.map((key) => <option key={key.id} value={key.id}>{key.title}</option>)}</select></label>
                   <label>临时 API Key<input type="password" value={auditEmbyApiKey} onChange={(event) => { setAuditEmbyApiKey(event.target.value); if (event.target.value) setAuditSelectedEmbyKeyId(''); }} placeholder="不保存，仅用于本次核对" /></label>
                 </div>
               </section>
-              <details className="audit-key-panel">
-                <summary>管理已保存的 API Key</summary>
-                <div className="audit-key-manager">
-                  <label>Key 标题<input value={newEmbyKeyTitle} onChange={(event) => setNewEmbyKeyTitle(event.target.value)} placeholder="例如：主 Emby" /></label>
-                  <label>API Key<input type="password" value={newEmbyKeyValue} onChange={(event) => setNewEmbyKeyValue(event.target.value)} placeholder="粘贴后点保存" /></label>
-                  <button type="button" onClick={saveEmbyAPIKey} disabled={savingEmbyKey}>{savingEmbyKey ? '保存中' : '保存 Key'}</button>
-                  {auditSelectedEmbyKeyId ? <button className="secondary" type="button" onClick={() => deleteEmbyAPIKey(Number(auditSelectedEmbyKeyId))}>删除选中 Key</button> : null}
-                </div>
-              </details>
             </div>
           </Card>}
 
           {auditTab === 'files' && <Card title="文件对齐检查" action={<button onClick={runFileAudit} disabled={auditingFiles}>{auditingFiles ? '检查中' : '开始检查'}</button>}>
-            <div className="audit-controls file-audit-controls">
-              <label>本地目录<div className="path-input"><input value={fileAuditLocalRoot} onChange={(event) => setFileAuditLocalRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择本地目录', value: fileAuditLocalRoot, onSelect: setFileAuditLocalRoot })}>选择</button></div></label>
-              <label>远端目录<input value={fileAuditRemoteRoot} onChange={(event) => setFileAuditRemoteRoot(event.target.value)} placeholder="/media/TV/Example Show" /></label>
-              <label>SFTP 地址<input value={fileAuditSFTPAddr} onChange={(event) => setFileAuditSFTPAddr(event.target.value)} placeholder="nas.example.com:22" /></label>
-              <label>SFTP 用户<input value={fileAuditSFTPUser} onChange={(event) => setFileAuditSFTPUser(event.target.value)} placeholder="user" /></label>
-              <label>SFTP 密码<input type="password" value={fileAuditSFTPPassword} onChange={(event) => setFileAuditSFTPPassword(event.target.value)} placeholder="可选，不保存" /></label>
-              <label>私钥路径<input value={fileAuditSFTPKeyPath} onChange={(event) => setFileAuditSFTPKeyPath(event.target.value)} placeholder="C:\Users\me\.ssh\id_ed25519" /></label>
-              <label>known_hosts<input value={fileAuditSFTPKnownHostsPath} onChange={(event) => setFileAuditSFTPKnownHostsPath(event.target.value)} placeholder="C:\Users\me\.ssh\known_hosts" /></label>
+            <div className="file-audit-form">
+              <section className="audit-form-section">
+                <div className="audit-form-section-heading">
+                  <strong>核对目录</strong>
+                  <span>比较本地目录与远端 SFTP 目录中的文件树。</span>
+                </div>
+                <div className="file-audit-targets">
+                  <label>本地目录<div className="path-input"><input value={fileAuditLocalRoot} onChange={(event) => setFileAuditLocalRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择本地目录', value: fileAuditLocalRoot, onSelect: setFileAuditLocalRoot })}>选择</button></div></label>
+                  <label>远端目录<input value={fileAuditRemoteRoot} onChange={(event) => setFileAuditRemoteRoot(event.target.value)} placeholder="/media/TV/Example Show" /></label>
+                </div>
+              </section>
+              <section className="audit-form-section">
+                <div className="audit-form-section-heading">
+                  <strong>SFTP 连接</strong>
+                  <span>密码仅用于本次检查，不会保存。密码与私钥可任选其一。</span>
+                </div>
+                <div className="file-audit-connection">
+                  <label>SFTP 地址<input value={fileAuditSFTPAddr} onChange={(event) => setFileAuditSFTPAddr(event.target.value)} placeholder="nas.example.com:22" /></label>
+                  <label>SFTP 用户<input value={fileAuditSFTPUser} onChange={(event) => setFileAuditSFTPUser(event.target.value)} placeholder="user" /></label>
+                  <label>SFTP 密码<input type="password" value={fileAuditSFTPPassword} onChange={(event) => setFileAuditSFTPPassword(event.target.value)} placeholder="可选，不保存" /></label>
+                  <label>私钥路径<input value={fileAuditSFTPKeyPath} onChange={(event) => setFileAuditSFTPKeyPath(event.target.value)} placeholder="C:\Users\me\.ssh\id_ed25519" /></label>
+                  <label>known_hosts<input value={fileAuditSFTPKnownHostsPath} onChange={(event) => setFileAuditSFTPKnownHostsPath(event.target.value)} placeholder="C:\Users\me\.ssh\known_hosts" /></label>
+                </div>
+                <div className="file-audit-security-option">
+                  <Toggle label={<FieldLabel label="跳过 SFTP 主机指纹校验" help="仅在无法提供 known_hosts 时使用。开启后无法验证连接的远端主机身份。" />} checked={fileAuditSFTPInsecure} onChange={setFileAuditSFTPInsecure} />
+                </div>
+              </section>
+              <section className="audit-form-section">
+                <div className="audit-form-section-heading">
+                  <strong>比较规则</strong>
+                  <span>选择文件匹配方式以及需要核对的内容。</span>
+                </div>
+                <div className="audit-option-row file-audit-options">
+                  <Toggle label={<FieldLabel label="允许视频匹配同名 .strm" help="匹配为 .strm 时不会比较文件大小或 MD5。" />} checked={fileAuditAllowSTRM} onChange={setFileAuditAllowSTRM} />
+                  <Toggle label="比较文件大小" checked={fileAuditCompareSize} onChange={setFileAuditCompareSize} />
+                  <Toggle label="比较 MD5" checked={fileAuditCompareMD5} onChange={setFileAuditCompareMD5} />
+                </div>
+              </section>
             </div>
-            <div className="audit-option-row">
-              <Toggle label="允许视频匹配同名 .strm" checked={fileAuditAllowSTRM} onChange={setFileAuditAllowSTRM} />
-              <Toggle label="比较文件大小" checked={fileAuditCompareSize} onChange={setFileAuditCompareSize} />
-              <Toggle label="比较 MD5" checked={fileAuditCompareMD5} onChange={setFileAuditCompareMD5} />
-              <Toggle label="跳过 SFTP 主机指纹校验" checked={fileAuditSFTPInsecure} onChange={setFileAuditSFTPInsecure} />
-            </div>
-            <p className="muted">这是本地文件树与远端文件树的独立核对，不依赖 Emby。默认允许本地视频文件对齐远端同名 `.strm`，这种匹配不会比较大小或 MD5。</p>
           </Card>}
 
           {auditTab === 'files' && fileAuditReport && (
             <>
               <Card title="文件对齐摘要">
-                <div className="audit-summary-grid">
+                <div className="audit-summary-grid file-audit-summary-grid">
                   <div className="audit-stat"><span>本地文件</span><strong>{fileAuditReport.localCount}</strong><small>{fileAuditReport.localRoot}</small></div>
                   <div className="audit-stat"><span>远端文件</span><strong>{fileAuditReport.remoteCount}</strong><small>{fileAuditReport.remoteRoot}</small></div>
                   <div className="audit-stat"><span>差异</span><strong>{fileAuditReport.issues?.length ?? 0}</strong><small>{fileAuditReport.issues?.length ? '需要检查' : '未发现'}</small></div>
@@ -2268,6 +2298,7 @@ export function App() {
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
       {auditTmdbMatchOpen && <TmdbMatchModal title="选择核对剧集" description="选择后会将 TMDB ID 用于剧集缺漏判断。" applyLabel="选择剧集" query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={null} applyProgress={0} applyTotal={0} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={applyTmdbShowToAudit} onClose={() => setAuditTmdbMatchOpen(false)} />}
+      {addEmbyKeyOpen && <AddEmbyKeyModal title={newEmbyKeyTitle} apiKey={newEmbyKeyValue} saving={savingEmbyKey} onTitleChange={setNewEmbyKeyTitle} onAPIKeyChange={setNewEmbyKeyValue} onClose={() => setAddEmbyKeyOpen(false)} onSubmit={() => void saveEmbyAPIKey()} />}
       {tmdbEpisodeDetail && <TmdbEpisodeDetailModal detail={tmdbEpisodeDetail} language={renameLanguage} refreshing={loadingTmdbEpisodeDetail} onRefresh={() => void openTmdbEpisodeDetail({ tmdbShowId: tmdbEpisodeDetail.showId, season: tmdbEpisodeDetail.season, episode: tmdbEpisodeDetail.episode } as RenamePreviewItem, true)} onClose={() => setTmdbEpisodeDetail(null)} />}
       {renameHistoryOpen && <RenameHistoryModal history={renameHistory} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onOpenDetails={setSelectedHistoryBatch} onUndo={(id) => void undoRenameBatch(id)} />}
       {selectedHistoryBatch && <RenameHistoryDetailsModal batch={selectedHistoryBatch} undoCheck={undoCheckResult?.batch?.id === selectedHistoryBatch.id ? undoCheckResult : null} timezone={displayTimezone} onClose={() => setSelectedHistoryBatch(null)} />}
@@ -2295,6 +2326,30 @@ function AlertDialog(props: { title: string; message: string; onClose: () => voi
         <div className="inline-actions modal-actions">
           <button onClick={props.onClose} autoFocus>知道了</button>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function AddEmbyKeyModal(props: { title: string; apiKey: string; saving: boolean; onTitleChange: (value: string) => void; onAPIKeyChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={props.saving ? undefined : props.onClose}>
+      <section className="modal-card add-emby-key-modal" role="dialog" aria-modal="true" aria-labelledby="add-emby-key-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <div>
+            <h2 id="add-emby-key-title">添加 API Key</h2>
+            <small>保存后可以在 Emby 核对中直接选择使用。</small>
+          </div>
+          <IconCloseButton onClick={props.onClose} disabled={props.saving} />
+        </div>
+        <form className="config-form" onSubmit={(event) => { event.preventDefault(); props.onSubmit(); }}>
+          <label>Key 标题<input autoFocus value={props.title} onChange={(event) => props.onTitleChange(event.target.value)} placeholder="例如：主 Emby" /></label>
+          <label>API Key<input type="password" value={props.apiKey} onChange={(event) => props.onAPIKeyChange(event.target.value)} placeholder="粘贴 Emby API Key" /></label>
+          <div className="inline-actions modal-actions">
+            <button className="secondary" type="button" onClick={props.onClose} disabled={props.saving}>取消</button>
+            <button type="submit" disabled={props.saving || !props.title.trim() || !props.apiKey.trim()}>{props.saving ? '保存中' : '保存 API Key'}</button>
+          </div>
+        </form>
       </section>
     </div>
   );

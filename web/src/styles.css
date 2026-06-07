@@ -406,6 +406,7 @@ button {
   cursor: pointer;
   font: inherit;
   padding: 8px 14px;
+  user-select: none;
 }
 
 button.danger {
@@ -900,8 +901,7 @@ button:disabled {
 
 .rename-row input,
 .rename-row textarea,
-.rename-row select,
-.rename-row button {
+.rename-row select {
   user-select: text;
 }
 

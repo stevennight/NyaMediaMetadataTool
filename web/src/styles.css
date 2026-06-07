@@ -769,6 +769,7 @@ button:disabled {
 .rename-preview-action {
   display: flex;
   grid-column: -2 / -1;
+  gap: 8px;
   justify-content: flex-end;
 }
 
@@ -2199,6 +2200,10 @@ h3 {
   .rename-preview-action button {
     grid-column: auto;
     width: 100%;
+  }
+
+  .rename-preview-action {
+    flex-direction: column;
   }
 
   .rename-action-row {

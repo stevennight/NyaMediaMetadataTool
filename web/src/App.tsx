@@ -872,7 +872,7 @@ export function App() {
     }
   }
 
-  async function previewRename() {
+  async function previewRename(bypassTmdbCache = false) {
     if (!renamePath.trim()) {
       setError('请输入目录或文件路径');
       return;
@@ -889,7 +889,7 @@ export function App() {
       const response = await fetch('/api/rename/preview/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, matchPattern: renameMatchPattern, language: renameLanguage, releaseGroup: renameReleaseGroup.trim() })
+        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, matchPattern: renameMatchPattern, bypassTmdbCache, language: renameLanguage, releaseGroup: renameReleaseGroup.trim() })
       });
       if (!response.ok) {
         setError(await response.text());
@@ -955,11 +955,11 @@ export function App() {
     }
   }
 
-  async function openTmdbEpisodeDetail(item: RenamePreviewItem) {
+  async function openTmdbEpisodeDetail(item: RenamePreviewItem, refresh = false) {
     setLoadingTmdbEpisodeDetail(true);
     setError('');
     try {
-      const params = new URLSearchParams({ showId: String(item.tmdbShowId), season: String(item.season), episode: String(item.episode), language: renameLanguage });
+      const params = new URLSearchParams({ showId: String(item.tmdbShowId), season: String(item.season), episode: String(item.episode), language: renameLanguage, refresh: String(refresh) });
       const response = await fetch(`/api/tmdb/episode?${params.toString()}`);
       if (!response.ok) {
         setError(await response.text());
@@ -1020,6 +1020,7 @@ export function App() {
         path: item.path,
         template: renameTemplate,
         matchPattern: renameMatchPattern,
+        bypassTmdbCache: options.forceTmdb ?? false,
         language: renameLanguage,
         show: options.show ?? item.show,
         title: item.title,
@@ -1814,7 +1815,8 @@ export function App() {
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <label>字幕组<input value={renameReleaseGroup} onChange={(event) => setRenameReleaseGroup(event.target.value)} placeholder="留空则从原文件名识别" /></label>
               <div className="rename-preview-action">
-                <button type="button" onClick={previewRename} disabled={previewingRename}>{previewingRename ? renamePreviewTotal ? `生成预览 ${renamePreviewCount} / ${renamePreviewTotal}` : '正在扫描文件…' : '生成预览'}</button>
+                <button className="secondary" type="button" onClick={() => void previewRename(true)} disabled={previewingRename}>忽略缓存重新生成</button>
+                <button type="button" onClick={() => void previewRename()} disabled={previewingRename}>{previewingRename ? renamePreviewTotal ? `生成预览 ${renamePreviewCount} / ${renamePreviewTotal}` : '正在扫描文件…' : '生成预览'}</button>
               </div>
             </div>
           </Card>
@@ -2191,7 +2193,7 @@ export function App() {
       {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
-      {tmdbEpisodeDetail && <TmdbEpisodeDetailModal detail={tmdbEpisodeDetail} language={renameLanguage} onClose={() => setTmdbEpisodeDetail(null)} />}
+      {tmdbEpisodeDetail && <TmdbEpisodeDetailModal detail={tmdbEpisodeDetail} language={renameLanguage} refreshing={loadingTmdbEpisodeDetail} onRefresh={() => void openTmdbEpisodeDetail({ tmdbShowId: tmdbEpisodeDetail.showId, season: tmdbEpisodeDetail.season, episode: tmdbEpisodeDetail.episode } as RenamePreviewItem, true)} onClose={() => setTmdbEpisodeDetail(null)} />}
       {renameHistoryOpen && <RenameHistoryModal history={renameHistory} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onOpenDetails={setSelectedHistoryBatch} onUndo={(id) => void undoRenameBatch(id)} />}
       {selectedHistoryBatch && <RenameHistoryDetailsModal batch={selectedHistoryBatch} undoCheck={undoCheckResult?.batch?.id === selectedHistoryBatch.id ? undoCheckResult : null} timezone={displayTimezone} onClose={() => setSelectedHistoryBatch(null)} />}
       {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} matchPattern={renameMatchPattern} sample={renamePreview[0]?.currentName || renamePath} placeholders={renamePlaceholders} onChange={setRenameTemplate} onMatchPatternChange={setRenameMatchPattern} onClose={() => setRenameTemplateEditorOpen(false)} />}
@@ -2573,7 +2575,7 @@ function TmdbMatchModal(props: {
   );
 }
 
-function TmdbEpisodeDetailModal(props: { detail: TmdbEpisodeDetail; language: string; onClose: () => void }) {
+function TmdbEpisodeDetailModal(props: { detail: TmdbEpisodeDetail; language: string; refreshing: boolean; onRefresh: () => void; onClose: () => void }) {
   const detail = props.detail;
   return (
     <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
@@ -2583,7 +2585,10 @@ function TmdbEpisodeDetailModal(props: { detail: TmdbEpisodeDetail; language: st
             <h2 id="tmdb-episode-detail-title">{detail.showName || detail.showOriginalName}</h2>
             <small>TMDB #{detail.showId} · 查询语言 {props.language}</small>
           </div>
-          <IconCloseButton onClick={props.onClose} />
+          <div className="inline-actions">
+            <button className="secondary" type="button" onClick={props.onRefresh} disabled={props.refreshing}>{props.refreshing ? '刷新中' : '刷新'}</button>
+            <IconCloseButton onClick={props.onClose} />
+          </div>
         </div>
         <div className="tmdb-show-summary">
           {detail.showPosterUrl ? <img src={detail.showPosterUrl} alt={detail.showName || 'TMDB 剧集海报'} /> : null}

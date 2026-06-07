@@ -579,6 +579,9 @@ func (s *Server) handleTMDBEpisode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if strings.EqualFold(r.URL.Query().Get("refresh"), "true") {
+		client = client.WithBypassCache()
+	}
 	detail, err := client.FindEpisodeByShowID(r.Context(), showID, season, episode)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)

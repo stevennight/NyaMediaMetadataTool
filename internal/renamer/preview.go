@@ -50,11 +50,12 @@ var sidecarExtensions = map[string]struct{}{
 }
 
 type PreviewRequest struct {
-	Path         string `json:"path"`
-	Template     string `json:"template"`
-	MatchPattern string `json:"matchPattern"`
-	Language     string `json:"language"`
-	ReleaseGroup string `json:"releaseGroup"`
+	Path            string `json:"path"`
+	Template        string `json:"template"`
+	MatchPattern    string `json:"matchPattern"`
+	BypassTMDBCache bool   `json:"bypassTmdbCache"`
+	Language        string `json:"language"`
+	ReleaseGroup    string `json:"releaseGroup"`
 }
 
 type PreviewResult struct {
@@ -90,18 +91,19 @@ type PreviewItem struct {
 }
 
 type PreviewItemRequest struct {
-	Path         string            `json:"path"`
-	Template     string            `json:"template"`
-	MatchPattern string            `json:"matchPattern"`
-	Language     string            `json:"language"`
-	Show         string            `json:"show"`
-	Title        string            `json:"title"`
-	ReleaseGroup string            `json:"releaseGroup"`
-	Season       *inputInt         `json:"season"`
-	Episode      *inputInt         `json:"episode"`
-	TMDBShowID   int               `json:"tmdbShowId"`
-	NewName      string            `json:"newName"`
-	Variables    map[string]string `json:"variables"`
+	Path            string            `json:"path"`
+	Template        string            `json:"template"`
+	MatchPattern    string            `json:"matchPattern"`
+	BypassTMDBCache bool              `json:"bypassTmdbCache"`
+	Language        string            `json:"language"`
+	Show            string            `json:"show"`
+	Title           string            `json:"title"`
+	ReleaseGroup    string            `json:"releaseGroup"`
+	Season          *inputInt         `json:"season"`
+	Episode         *inputInt         `json:"episode"`
+	TMDBShowID      int               `json:"tmdbShowId"`
+	NewName         string            `json:"newName"`
+	Variables       map[string]string `json:"variables"`
 }
 
 type previewOverrides struct {
@@ -223,6 +225,9 @@ func PreviewEachProgress(ctx context.Context, cfg config.Config, input PreviewRe
 		return err
 	}
 	client, _ := tmdb.NewClient(cfg.Scraping)
+	if client != nil && input.BypassTMDBCache {
+		client = client.WithBypassCache()
+	}
 
 	files := make([]string, 0)
 	addFile := func(path string) {
@@ -377,6 +382,9 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 	}
 
 	client, _ := tmdb.NewClient(cfg.Scraping)
+	if client != nil && input.BypassTMDBCache {
+		client = client.WithBypassCache()
+	}
 
 	item := buildPreviewItem(ctx, cfg, client, path, template, matchPattern, previewOverrides{Show: input.Show, Title: input.Title, ReleaseGroup: input.ReleaseGroup, Season: input.Season, Episode: input.Episode, TMDBShowID: input.TMDBShowID, Variables: input.Variables})
 	if strings.TrimSpace(input.NewName) != "" {

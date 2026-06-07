@@ -43,7 +43,14 @@ type Client struct {
 	languages        []string
 	region           string
 	people           bool
+	bypassCache      bool
 	httpClient       *http.Client
+}
+
+func (c *Client) WithBypassCache() *Client {
+	next := *c
+	next.bypassCache = true
+	return &next
 }
 
 type Episode struct {
@@ -838,8 +845,10 @@ func (c *Client) get(ctx context.Context, language string, path string, query ur
 		query.Set("region", c.region)
 	}
 	cacheKey := c.baseURL + path + "?" + query.Encode()
-	if data, ok := cachedTMDBResponse(cacheKey); ok {
-		return json.Unmarshal(data, target)
+	if !c.bypassCache {
+		if data, ok := cachedTMDBResponse(cacheKey); ok {
+			return json.Unmarshal(data, target)
+		}
 	}
 	if c.token == "" && c.apiKey != "" {
 		query.Set("api_key", c.apiKey)

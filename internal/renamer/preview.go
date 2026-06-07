@@ -991,6 +991,7 @@ func applyTemplate(template string, item PreviewItem) string {
 			values[key] = value
 		}
 	}
+	template = renderConditionalSegments(template, values)
 	return placeholderPattern.ReplaceAllStringFunc(template, func(match string) string {
 		parts := placeholderPattern.FindStringSubmatch(match)
 		if len(parts) < 2 {
@@ -1009,6 +1010,72 @@ func applyTemplate(template string, item PreviewItem) string {
 		}
 		return value
 	})
+}
+
+func renderConditionalSegments(template string, values map[string]string) string {
+	var result strings.Builder
+	for cursor := 0; cursor < len(template); {
+		start := strings.Index(template[cursor:], "{if:")
+		if start < 0 {
+			result.WriteString(template[cursor:])
+			break
+		}
+		start += cursor
+		result.WriteString(template[cursor:start])
+		end := conditionalSegmentEnd(template, start)
+		if end < 0 {
+			result.WriteString(template[start:])
+			break
+		}
+		parts := splitConditionalParts(template[start+4 : end])
+		if len(parts) < 2 || len(parts) > 3 {
+			result.WriteString(template[start : end+1])
+		} else if strings.TrimSpace(values[strings.TrimSpace(parts[0])]) != "" {
+			result.WriteString(parts[1])
+		} else if len(parts) == 3 {
+			result.WriteString(parts[2])
+		}
+		cursor = end + 1
+	}
+	return result.String()
+}
+
+func conditionalSegmentEnd(template string, start int) int {
+	depth := 0
+	for index := start; index < len(template); index++ {
+		switch template[index] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return index
+			}
+		}
+	}
+	return -1
+}
+
+func splitConditionalParts(value string) []string {
+	parts := []string{}
+	start := 0
+	depth := 0
+	for index := 0; index < len(value); index++ {
+		switch value[index] {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		case '|':
+			if depth == 0 {
+				parts = append(parts, value[start:index])
+				start = index + 1
+			}
+		}
+	}
+	return append(parts, value[start:])
 }
 
 func localizedPlaceholderValue(key string, format string, item PreviewItem, values map[string]string) string {

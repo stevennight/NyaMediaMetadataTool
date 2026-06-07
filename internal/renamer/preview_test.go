@@ -256,6 +256,34 @@ func TestApplyTemplateSupportsCustomVariables(t *testing.T) {
 	}
 }
 
+func TestApplyTemplateSupportsConditionalSegments(t *testing.T) {
+	t.Parallel()
+
+	template := "{show}{if:releaseGroup| - {releaseGroup}| - 未知字幕组}"
+	withGroup := applyTemplate(template, PreviewItem{Show: "Show", ReleaseGroup: "Group"})
+	if withGroup != "Show - Group" {
+		t.Fatalf("conditional with value = %q", withGroup)
+	}
+	withoutGroup := applyTemplate(template, PreviewItem{Show: "Show"})
+	if withoutGroup != "Show - 未知字幕组" {
+		t.Fatalf("conditional else = %q", withoutGroup)
+	}
+}
+
+func TestApplyTemplateConditionalSegmentSupportsEmptyElseAndCustomVariable(t *testing.T) {
+	t.Parallel()
+
+	template := "{show}{if:edition| [{edition}]|}"
+	withEdition := applyTemplate(template, PreviewItem{Show: "Show", Variables: map[string]string{"edition": "Director"}})
+	if withEdition != "Show [Director]" {
+		t.Fatalf("custom conditional with value = %q", withEdition)
+	}
+	withoutEdition := applyTemplate(template, PreviewItem{Show: "Show"})
+	if withoutEdition != "Show" {
+		t.Fatalf("custom conditional empty else = %q", withoutEdition)
+	}
+}
+
 func TestCompileMatchPatternRejectsInvalidRE2(t *testing.T) {
 	t.Parallel()
 

@@ -2747,11 +2747,14 @@ function RenameTemplateEditorModal(props: { value: string; matchPattern: string;
         <div className="placeholder-bar modal-placeholder-bar">
           <span>插入占位符：</span>
           {props.placeholders.map((placeholder) => <button className="secondary" type="button" key={placeholder} onClick={() => insertPlaceholder(placeholder)}>{placeholder}</button>)}
+          <button className="secondary" type="button" onClick={() => insertPlaceholder('{if:releaseGroup| - {releaseGroup}|}')}>可选字幕组</button>
+          <button className="secondary" type="button" onClick={() => insertPlaceholder('{if:变量|有值时输出|无值时输出}')}>自定义条件</button>
         </div>
         <div className="muted template-help">
           <p>可填写文件名、相对路径或完整路径。</p>
           <p>{'{show:zh-CN}'} / {'{title:ja-JP}'} 这类语言标识可按语言取剧名/集标题。</p>
           <p>{'{season:00}'} / {'{episode:000}'} 这类全 0 格式可控制补零位数。</p>
+          <p>{'{if:releaseGroup| - {releaseGroup}|未知字幕组}'} 可根据变量是否有值选择输出内容；暂不支持嵌套和 `|` 转义。</p>
         </div>
         <details className="rename-match-rule">
           <summary>自定义匹配规则</summary>

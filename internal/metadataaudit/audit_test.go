@@ -9,7 +9,7 @@ import (
 	"NyaMediaMetadataTool/internal/config"
 )
 
-func TestRunUsesSeasonNFOAndSkipsSeasonZero(t *testing.T) {
+func TestRunUsesTVShowTMDBIDAndSkipsSeasonZero(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -37,8 +37,40 @@ func TestRunUsesSeasonNFOAndSkipsSeasonZero(t *testing.T) {
 		t.Fatalf("expected 1 season report, got %d", len(report.SeasonReports))
 	}
 	season := report.SeasonReports[0]
-	if season.ExpectedCount != 3 || len(season.MissingEpisodes) != 1 || season.MissingEpisodes[0] != 2 {
+	if season.ExpectedCount != 0 || season.ExpectedSource != "" || len(season.MissingEpisodes) != 0 {
 		t.Fatalf("unexpected season report: %#v", season)
+	}
+}
+
+func TestRunMissingIncludesSeasonZeroWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	seasonDir := filepath.Join(root, "Season 00")
+	if err := os.Mkdir(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(seasonDir, "season.nfo"), `<season><seasonnumber>0</seasonnumber><episodeguide><episodecount>2</episodecount></episodeguide></season>`)
+	video := filepath.Join(seasonDir, "Test Show S00E01.mkv")
+	writeFile(t, video, "")
+
+	report, err := RunMissing(context.Background(), Options{Root: root, Config: config.Default(), IncludeSeasonZero: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.LocalEpisodes) != 1 || report.LocalEpisodes[0].Path != video {
+		t.Fatalf("expected Season 0 video in local episodes, got %#v", report.LocalEpisodes)
+	}
+	if len(report.SeasonReports) != 1 || report.SeasonReports[0].Season != 0 {
+		t.Fatalf("expected Season 0 report, got %#v", report.SeasonReports)
+	}
+	if missing := report.SeasonReports[0].MissingEpisodes; len(missing) != 0 {
+		t.Fatalf("Season 0 should require TMDB data for missing detection, got %#v", missing)
+	}
+	for _, warning := range report.Warnings {
+		if warning == "无法识别季度/集数: "+video {
+			t.Fatalf("recognized Season 0 video should not produce warning")
+		}
 	}
 }
 
@@ -72,6 +104,40 @@ func TestRunSkipsIgnoredDirectories(t *testing.T) {
 	}
 	if len(report.SeasonReports) != 1 || report.SeasonReports[0].Season != 1 {
 		t.Fatalf("unexpected season reports: %#v", report.SeasonReports)
+	}
+}
+
+func TestRunMissingReportsArtifactIssuesPerVideoVersion(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	seasonDir := filepath.Join(root, "Season 01")
+	if err := os.Mkdir(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "tvshow.nfo"), `<tvshow><title>Test Show</title></tvshow>`)
+	writeFile(t, filepath.Join(seasonDir, "season.nfo"), `<season><episodeguide><episodecount>1</episodecount></episodeguide></season>`)
+	first := filepath.Join(seasonDir, "Test Show S01E01 - Version A.mkv")
+	second := filepath.Join(seasonDir, "Test Show S01E01 - Version B.mkv")
+	writeFile(t, first, "")
+	writeFile(t, second, "")
+
+	report, err := RunMissing(context.Background(), Options{Root: root, Config: config.Default()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paths := map[string]bool{}
+	for _, issue := range report.ArtifactIssues {
+		if issue.Season == 1 && issue.Episode == 1 {
+			paths[issue.Local] = true
+		}
+	}
+	if !paths[first] || !paths[second] {
+		t.Fatalf("expected artifact issues for both video versions, got %#v", paths)
+	}
+	if len(report.EmbyComparisons) != 0 {
+		t.Fatalf("missing audit should not contain Emby comparisons: %#v", report.EmbyComparisons)
 	}
 }
 

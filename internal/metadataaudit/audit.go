@@ -22,13 +22,14 @@ import (
 )
 
 type Options struct {
-	Root         string
-	Config       config.Config
-	TMDBShowID   int
-	EmbyItemURL  string
-	EmbyURL      string
-	EmbyAPIKey   string
-	EmbySeriesID string
+	Root              string
+	Config            config.Config
+	TMDBShowID        int
+	IncludeSeasonZero bool
+	EmbyItemURL       string
+	EmbyURL           string
+	EmbyAPIKey        string
+	EmbySeriesID      string
 }
 
 type Report struct {
@@ -128,6 +129,22 @@ type nfoUniqueID struct {
 }
 
 func Run(ctx context.Context, opts Options) (Report, error) {
+	includeEmby := strings.TrimSpace(opts.EmbyItemURL) != "" ||
+		strings.TrimSpace(opts.EmbyURL) != "" ||
+		strings.TrimSpace(opts.EmbyAPIKey) != "" ||
+		strings.TrimSpace(opts.EmbySeriesID) != ""
+	return run(ctx, opts, true, includeEmby)
+}
+
+func RunMissing(ctx context.Context, opts Options) (Report, error) {
+	return run(ctx, opts, true, false)
+}
+
+func RunEmby(ctx context.Context, opts Options) (Report, error) {
+	return run(ctx, opts, false, true)
+}
+
+func run(ctx context.Context, opts Options, includeMissing bool, includeEmby bool) (Report, error) {
 	root, err := filepath.Abs(strings.TrimSpace(opts.Root))
 	if err != nil {
 		return Report{}, err
@@ -145,15 +162,20 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	report.Warnings = append(report.Warnings, warnings...)
 	report.LocalSeasons = scanLocalSeasons(root)
 
-	episodes, warnings, err := scanLocalEpisodes(root, opts.Config)
+	episodes, warnings, err := scanLocalEpisodes(root, opts.Config, opts.IncludeSeasonZero)
 	if err != nil {
 		return Report{}, err
 	}
 	report.LocalEpisodes = episodes
 	report.Warnings = append(report.Warnings, warnings...)
-	report.SeasonReports = buildSeasonReports(ctx, root, opts.Config, report.TMDBShowID, episodes, &report.Warnings)
-	report.ArtifactIssues = checkLocalArtifacts(root, report.LocalSeasons, episodes)
+	if includeMissing {
+		report.SeasonReports = buildSeasonReports(ctx, opts.Config, report.TMDBShowID, episodes, opts.IncludeSeasonZero, &report.Warnings)
+		report.ArtifactIssues = checkLocalArtifacts(root, report.LocalSeasons, episodes)
+	}
 
+	if !includeEmby {
+		return report, nil
+	}
 	embyURL := strings.TrimSpace(opts.EmbyURL)
 	embySeriesID := strings.TrimSpace(opts.EmbySeriesID)
 	if strings.TrimSpace(opts.EmbyItemURL) != "" {
@@ -164,28 +186,26 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		embyURL = firstNonEmpty(embyURL, parsedURL)
 		embySeriesID = firstNonEmpty(embySeriesID, parsedSeriesID)
 	}
-	if embyURL != "" || strings.TrimSpace(opts.EmbyAPIKey) != "" || embySeriesID != "" {
-		if embyURL == "" || strings.TrimSpace(opts.EmbyAPIKey) == "" || embySeriesID == "" {
-			return Report{}, errors.New("emby item url/api key or emby-url/api-key/series-id must be provided together")
-		}
-		embyClient, err := newEmbyClient(ctx, embyURL, opts.EmbyAPIKey)
-		if err != nil {
-			return Report{}, err
-		}
-		embyShow, err := embyClient.fetchItem(ctx, embySeriesID)
-		if err != nil {
-			return Report{}, err
-		}
-		embySeasons, err := embyClient.fetchSeasons(ctx, embySeriesID)
-		if err != nil {
-			return Report{}, err
-		}
-		embyEpisodes, err := embyClient.fetchEpisodes(ctx, embySeriesID)
-		if err != nil {
-			return Report{}, err
-		}
-		report.EmbyComparisons = compareEmby(localShow, report.LocalSeasons, episodes, embyShow, embySeasons, embyEpisodes)
+	if embyURL == "" || strings.TrimSpace(opts.EmbyAPIKey) == "" || embySeriesID == "" {
+		return Report{}, errors.New("emby item url/api key or emby-url/api-key/series-id must be provided together")
 	}
+	embyClient, err := newEmbyClient(ctx, embyURL, opts.EmbyAPIKey)
+	if err != nil {
+		return Report{}, err
+	}
+	embyShow, err := embyClient.fetchItem(ctx, embySeriesID)
+	if err != nil {
+		return Report{}, err
+	}
+	embySeasons, err := embyClient.fetchSeasons(ctx, embySeriesID)
+	if err != nil {
+		return Report{}, err
+	}
+	embyEpisodes, err := embyClient.fetchEpisodes(ctx, embySeriesID)
+	if err != nil {
+		return Report{}, err
+	}
+	report.EmbyComparisons = compareEmby(localShow, report.LocalSeasons, episodes, embyShow, embySeasons, embyEpisodes)
 
 	return report, nil
 }
@@ -326,7 +346,7 @@ func WriteJSON(w io.Writer, report Report) error {
 	return encoder.Encode(report)
 }
 
-func scanLocalEpisodes(root string, cfg config.Config) ([]LocalEpisode, []string, error) {
+func scanLocalEpisodes(root string, cfg config.Config, includeSeasonZero bool) ([]LocalEpisode, []string, error) {
 	exts := extensionSet(cfg.Processing.Extensions)
 	var episodes []LocalEpisode
 	var warnings []string
@@ -347,7 +367,7 @@ func scanLocalEpisodes(root string, cfg config.Config) ([]LocalEpisode, []string
 		if warning != "" {
 			warnings = append(warnings, warning)
 		}
-		if episode.Season == 0 {
+		if episode.Season == 0 && !includeSeasonZero {
 			return nil
 		}
 		episodes = append(episodes, episode)
@@ -368,6 +388,7 @@ func scanLocalEpisodes(root string, cfg config.Config) ([]LocalEpisode, []string
 func localEpisodeFromVideo(path string, cfg config.Config) (LocalEpisode, string) {
 	base := strings.TrimSuffix(path, filepath.Ext(path))
 	episode := LocalEpisode{Path: path, NFOPath: base + ".nfo"}
+	recognized := false
 	if doc, ok := readEpisodeNFO(episode.NFOPath); ok {
 		episode.Season = doc.Season
 		episode.Episode = doc.Episode
@@ -375,30 +396,30 @@ func localEpisodeFromVideo(path string, cfg config.Config) (LocalEpisode, string
 		episode.Plot = firstNonEmpty(doc.Plot, doc.Outline)
 		episode.Thumb = strings.TrimSpace(doc.Thumb)
 		episode.ProviderIDs = providerIDs(doc.UniqueID, doc.TMDBID)
+		recognized = doc.Episode > 0
 	}
-	if episode.Season == 0 || episode.Episode == 0 {
+	if !recognized {
 		if parsed, ok := episodeparse.Parse(filepath.Base(base)); ok {
 			episode.Season = parsed.Season
 			episode.Episode = parsed.Episode
+			recognized = true
 		}
 	}
 	episode.HasImage = episodeHasImage(base, filepath.Dir(path), episode.Thumb)
-	if episode.Season == 0 || episode.Episode == 0 {
+	if !recognized || episode.Episode == 0 {
 		return episode, "无法识别季度/集数: " + path
 	}
 	return episode, ""
 }
 
-func buildSeasonReports(ctx context.Context, root string, cfg config.Config, showID int, episodes []LocalEpisode, warnings *[]string) []SeasonReport {
+func buildSeasonReports(ctx context.Context, cfg config.Config, showID int, episodes []LocalEpisode, includeSeasonZero bool, warnings *[]string) []SeasonReport {
 	bySeason := make(map[int]map[int]bool)
-	seasonDirs := make(map[int]string)
 	for _, episode := range episodes {
-		if episode.Season == 0 {
+		if episode.Season == 0 && !includeSeasonZero {
 			continue
 		}
 		if bySeason[episode.Season] == nil {
 			bySeason[episode.Season] = map[int]bool{}
-			seasonDirs[episode.Season] = filepath.Dir(episode.Path)
 		}
 		bySeason[episode.Season][episode.Episode] = true
 	}
@@ -411,13 +432,15 @@ func buildSeasonReports(ctx context.Context, root string, cfg config.Config, sho
 		if err == nil {
 			tmdbClient = client
 		} else if warnings != nil {
-			*warnings = append(*warnings, "已识别 TMDB ID，但 TMDB 不可用，回退到 season.nfo: "+err.Error())
+			*warnings = append(*warnings, "已识别 TMDB ID，但 TMDB 不可用，无法判断剧集缺漏: "+err.Error())
 		}
+	} else if warnings != nil {
+		*warnings = append(*warnings, "未识别 TMDB 剧集，无法判断剧集缺漏")
 	}
 
 	seasons := make([]int, 0, len(bySeason))
 	for season := range bySeason {
-		if season == 0 {
+		if season == 0 && !includeSeasonZero {
 			continue
 		}
 		seasons = append(seasons, season)
@@ -426,7 +449,7 @@ func buildSeasonReports(ctx context.Context, root string, cfg config.Config, sho
 	reports := make([]SeasonReport, 0, len(seasons))
 	for _, season := range seasons {
 		existing := setToSortedInts(bySeason[season])
-		expected, expectedEpisodes, source := expectedEpisodeInfo(ctx, root, seasonDirs[season], season, showID, tmdbClient, warnings)
+		expected, expectedEpisodes, source := expectedEpisodeInfo(ctx, season, showID, tmdbClient, warnings)
 		report := SeasonReport{Season: season, ExpectedCount: expected, ExpectedSource: source, ExpectedEpisodes: expectedEpisodes, ExistingCount: len(existing), ExistingEpisodes: existing}
 		applyMissingEpisodes(&report, bySeason[season])
 		reports = append(reports, report)
@@ -434,7 +457,7 @@ func buildSeasonReports(ctx context.Context, root string, cfg config.Config, sho
 	return reports
 }
 
-func expectedEpisodeInfo(ctx context.Context, root string, seasonDir string, season int, showID int, client *tmdb.Client, warnings *[]string) (int, []int, string) {
+func expectedEpisodeInfo(ctx context.Context, season int, showID int, client *tmdb.Client, warnings *[]string) (int, []int, string) {
 	if client != nil && showID != 0 {
 		_, seasonDetail, err := client.FindShowAndSeasonByShowID(ctx, showID, season)
 		if err == nil && seasonDetail.EpisodeCount > 0 {
@@ -442,11 +465,6 @@ func expectedEpisodeInfo(ctx context.Context, root string, seasonDir string, sea
 		}
 		if err != nil && warnings != nil {
 			*warnings = append(*warnings, fmt.Sprintf("TMDB S%02d 获取失败: %v", season, err))
-		}
-	}
-	for _, dir := range uniqueStrings([]string{seasonDir, filepath.Join(root, fmt.Sprintf("Season %02d", season)), filepath.Join(root, fmt.Sprintf("Season %d", season))}) {
-		if count := readSeasonEpisodeCount(filepath.Join(dir, "season.nfo")); count > 0 {
-			return count, nil, "season.nfo"
 		}
 	}
 	return 0, nil, ""
@@ -549,18 +567,6 @@ func readLocalSeason(path string) (LocalSeason, bool) {
 	}, seasonNumber != 0
 }
 
-func readSeasonEpisodeCount(path string) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	var doc seasonNFO
-	if err := xml.Unmarshal(data, &doc); err != nil {
-		return 0
-	}
-	return doc.EpisodeCount
-}
-
 func readEpisodeNFO(path string) (episodeNFO, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -613,17 +619,17 @@ func directoryHasImage(dir string, stems []string) bool {
 
 func checkLocalArtifacts(root string, seasons []LocalSeason, episodes []LocalEpisode) []ComparisonIssue {
 	var issues []ComparisonIssue
-	add := func(season int, episode int, field string, detail string) {
-		issues = append(issues, ComparisonIssue{Severity: "warning", Season: season, Episode: episode, Field: field, Detail: detail})
+	add := func(season int, episode int, path string, field string, detail string) {
+		issues = append(issues, ComparisonIssue{Severity: "warning", Season: season, Episode: episode, Field: field, Local: path, Detail: detail})
 	}
 	for _, name := range []string{"tvshow.nfo"} {
 		if !fileExists(filepath.Join(root, name)) {
-			add(0, 0, "series."+name, "剧集级产物缺失")
+			add(0, 0, root, "series."+name, "剧集级产物缺失")
 		}
 	}
 	for _, image := range []string{"poster", "fanart", "backdrop", "clearlogo", "clearart"} {
 		if !hasAnyExt(root, image, []string{".jpg", ".jpeg", ".png", ".webp"}) {
-			add(0, 0, "series.image."+image, "剧集图片缺失")
+			add(0, 0, root, "series.image."+image, "剧集图片缺失")
 		}
 	}
 	for _, season := range seasons {
@@ -632,28 +638,31 @@ func checkLocalArtifacts(root string, seasons []LocalSeason, episodes []LocalEpi
 			continue
 		}
 		if !fileExists(filepath.Join(seasonDir, "season.nfo")) {
-			add(season.Season, 0, "season.nfo", "季度 NFO 缺失")
+			add(season.Season, 0, seasonDir, "season.nfo", "季度 NFO 缺失")
 		}
 		if !directoryHasImage(seasonDir, []string{"poster", "folder", "season"}) {
-			add(season.Season, 0, "season.image", "季度图片缺失")
+			add(season.Season, 0, seasonDir, "season.image", "季度图片缺失")
 		}
 	}
 	for _, episode := range episodes {
 		base := strings.TrimSuffix(episode.Path, filepath.Ext(episode.Path))
 		if !fileExists(base + ".nfo") {
-			add(episode.Season, episode.Episode, "episode.nfo", "单集 NFO 缺失")
+			add(episode.Season, episode.Episode, episode.Path, "episode.nfo", "单集 NFO 缺失")
 		}
 		if !episodeHasImage(base, filepath.Dir(episode.Path), episode.Thumb) {
-			add(episode.Season, episode.Episode, "episode.thumb", "单集图片缺失")
+			add(episode.Season, episode.Episode, episode.Path, "episode.thumb", "单集图片缺失")
 		}
 		if !fileExists(base + "-mediainfo.json") {
-			add(episode.Season, episode.Episode, "episode.mediainfo", "mediainfo.json 缺失")
+			add(episode.Season, episode.Episode, episode.Path, "episode.mediainfo", "mediainfo.json 缺失")
 		}
 		if !hasBIF(base) {
-			add(episode.Season, episode.Episode, "episode.bif", "BIF 缺失")
+			add(episode.Season, episode.Episode, episode.Path, "episode.bif", "BIF 缺失")
 		}
 	}
 	sort.Slice(issues, func(i, j int) bool {
+		if issues[i].Local != issues[j].Local {
+			return issues[i].Local < issues[j].Local
+		}
 		if issues[i].Season == issues[j].Season {
 			if issues[i].Episode == issues[j].Episode {
 				return issues[i].Field < issues[j].Field

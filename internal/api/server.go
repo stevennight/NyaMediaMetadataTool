@@ -81,7 +81,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/rename/preview/stream", s.handleRenamePreviewStream)
 	s.mux.HandleFunc("POST /api/rename/preview/item", s.handleRenamePreviewItem)
 	s.mux.HandleFunc("POST /api/rename/apply", s.handleRenameApply)
-	s.mux.HandleFunc("POST /api/audit/series", s.handleSeriesAudit)
+	s.mux.HandleFunc("POST /api/audit/missing", s.handleMissingAudit)
+	s.mux.HandleFunc("POST /api/audit/emby", s.handleEmbyAudit)
 	s.mux.HandleFunc("POST /api/audit/files", s.handleFileAudit)
 	s.mux.HandleFunc("GET /api/rename/history", s.handleRenameHistory)
 	s.mux.HandleFunc("GET /api/rename/history/{id}/undo-check", s.handleRenameHistoryUndoCheck)
@@ -392,10 +393,38 @@ func (s *Server) handleRenameApply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) handleSeriesAudit(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleMissingAudit(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Root              string `json:"root"`
+		TMDBShowID        int    `json:"tmdbShowId"`
+		IncludeSeasonZero bool   `json:"includeSeasonZero"`
+	}
+	var input request
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	input.Root = strings.TrimSpace(input.Root)
+	if input.Root == "" {
+		writeError(w, http.StatusBadRequest, errors.New("root is required"))
+		return
+	}
+	report, err := metadataaudit.RunMissing(r.Context(), metadataaudit.Options{
+		Root:              input.Root,
+		Config:            s.snapshotConfig(),
+		TMDBShowID:        input.TMDBShowID,
+		IncludeSeasonZero: input.IncludeSeasonZero,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleEmbyAudit(w http.ResponseWriter, r *http.Request) {
 	type request struct {
 		Root         string `json:"root"`
-		TMDBShowID   int    `json:"tmdbShowId"`
 		EmbyItemURL  string `json:"embyItemUrl"`
 		EmbyURL      string `json:"embyUrl"`
 		EmbyAPIKey   string `json:"embyApiKey"`
@@ -425,10 +454,9 @@ func (s *Server) handleSeriesAudit(w http.ResponseWriter, r *http.Request) {
 		}
 		embyAPIKey = storedKey.APIKey
 	}
-	report, err := metadataaudit.Run(r.Context(), metadataaudit.Options{
+	report, err := metadataaudit.RunEmby(r.Context(), metadataaudit.Options{
 		Root:         input.Root,
 		Config:       s.snapshotConfig(),
-		TMDBShowID:   input.TMDBShowID,
 		EmbyItemURL:  input.EmbyItemURL,
 		EmbyURL:      input.EmbyURL,
 		EmbyAPIKey:   embyAPIKey,

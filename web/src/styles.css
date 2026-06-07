@@ -596,8 +596,60 @@ button:disabled {
   width: 100%;
 }
 
-.file-audit-controls {
-  grid-template-columns: minmax(280px, 1fr) minmax(240px, 0.8fr) repeat(2, minmax(180px, 0.55fr));
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+}
+
+.help-tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border: 1px solid rgba(120, 113, 108, 0.32);
+  border-radius: 50%;
+  color: #78716c;
+  background: rgba(255, 255, 255, 0.72);
+  cursor: help;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.help-tip-content {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  display: none;
+  width: max-content;
+  max-width: min(340px, 75vw);
+  padding: 9px 11px;
+  border: 1px solid rgba(120, 113, 108, 0.18);
+  border-radius: 10px;
+  color: #44403c;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(68, 64, 60, 0.16);
+  transform: translateX(-50%);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.55;
+  text-align: left;
+}
+
+.help-tip:hover .help-tip-content,
+.help-tip:focus .help-tip-content,
+.help-tip:focus-visible .help-tip-content {
+  display: block;
+}
+
+.help-tip:focus-visible {
+  outline: 3px solid rgba(180, 83, 9, 0.22);
+  outline-offset: 2px;
 }
 
 .audit-option-row {
@@ -614,29 +666,178 @@ button:disabled {
   padding: 10px 12px;
 }
 
-.audit-key-manager {
+.emby-audit-form {
   display: grid;
-  grid-template-columns: minmax(180px, 0.4fr) minmax(260px, 0.8fr) auto auto;
-  gap: 12px;
-  align-items: end;
-  margin: 0 0 14px;
+  gap: 16px;
 }
 
-.audit-key-manager label {
+.file-audit-form {
+  display: grid;
+  gap: 16px;
+}
+
+.audit-form-section {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.audit-form-section-heading {
+  display: grid;
+  gap: 3px;
+}
+
+.audit-form-section-heading strong {
+  color: #44403c;
+  font-size: 15px;
+}
+
+.audit-form-section-heading span {
+  color: #78716c;
+  font-size: 12px;
+}
+
+.emby-audit-targets,
+.emby-audit-credentials,
+.file-audit-targets,
+.file-audit-connection {
+  display: grid;
+  gap: 12px;
+}
+
+.emby-audit-targets,
+.file-audit-targets {
+  grid-template-columns: minmax(300px, 1fr) minmax(340px, 1.25fr);
+}
+
+.emby-audit-credentials {
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+}
+
+.file-audit-connection {
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+}
+
+.emby-audit-targets label,
+.emby-audit-credentials label,
+.file-audit-targets label,
+.file-audit-connection label {
   display: grid;
   gap: 6px;
   color: #78716c;
   font-size: 13px;
 }
 
-.audit-key-manager input {
+.emby-audit-targets input,
+.emby-audit-credentials input,
+.emby-audit-credentials select,
+.file-audit-targets input,
+.file-audit-connection input {
   width: 100%;
+}
+
+.file-audit-security-option {
+  max-width: 360px;
+}
+
+.file-audit-security-option .toggle-row {
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.52);
+  padding: 10px 12px;
+}
+
+.file-audit-options {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 0;
+}
+
+.emby-key-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.emby-key-list-block {
+  display: grid;
+  gap: 7px;
+}
+
+.emby-key-list-block > span {
+  color: #78716c;
+  font-size: 13px;
+}
+
+.emby-key-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  overflow: hidden;
+  border: 1px solid rgba(120, 113, 108, 0.2);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.emby-key-item.selected {
+  border-color: rgba(217, 119, 6, 0.48);
+  background: rgba(251, 191, 36, 0.13);
+}
+
+.emby-key-use {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 0;
+  color: #44403c;
+  background: transparent;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.emby-key-check {
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.emby-key-add {
+  border: 1px dashed rgba(120, 113, 108, 0.34);
+  color: #57534e;
+  background: rgba(255, 255, 255, 0.5);
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.emby-key-item .template-history-delete {
+  width: 28px;
+  min-height: 30px;
+}
+
+.add-emby-key-modal {
+  width: min(520px, 100%);
+}
+
+.add-emby-key-modal .card-header small {
+  display: block;
+  margin-top: 4px;
+  color: #78716c;
 }
 
 .audit-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
+}
+
+.emby-audit-summary-grid {
+  grid-template-columns: minmax(280px, 1.5fr) repeat(2, minmax(180px, 0.75fr));
+}
+
+.file-audit-summary-grid {
+  grid-template-columns: repeat(2, minmax(260px, 1.2fr)) minmax(180px, 0.7fr);
 }
 
 .audit-stat {
@@ -662,10 +863,6 @@ button:disabled {
 
 .audit-table {
   min-width: 900px;
-}
-
-.audit-episodes-table {
-  min-width: 1100px;
 }
 
 .audit-warning-list {
@@ -2246,9 +2443,15 @@ h3 {
   .settings-form,
   .task-filters,
   .audit-controls,
-  .audit-key-manager,
   .audit-option-row,
   .audit-summary-grid,
+  .emby-audit-targets,
+  .emby-audit-credentials,
+  .emby-audit-summary-grid,
+  .file-audit-targets,
+  .file-audit-connection,
+  .file-audit-options,
+  .file-audit-summary-grid,
   .rename-controls,
   .rescan-modal-grid {
     grid-template-columns: 1fr;

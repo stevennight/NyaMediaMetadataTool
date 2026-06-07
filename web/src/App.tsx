@@ -291,7 +291,7 @@ function outputProcessingFromConfig(config: AppConfig | null): OutputProcessingC
   };
 }
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
-type AuditTab = 'series' | 'files';
+type AuditTab = 'missing' | 'emby' | 'files';
 
 const pagePaths: Record<PageKey, string> = {
   dashboard: '/',
@@ -640,13 +640,15 @@ export function App() {
   const [auditEmbyItemUrl, setAuditEmbyItemUrl] = useState(() => readAuditPreferences().embyItemUrl ?? '');
   const [auditEmbyApiKey, setAuditEmbyApiKey] = useState('');
   const [auditEmbyAPIKeys, setAuditEmbyAPIKeys] = useState<EmbyAPIKey[]>([]);
-  const [auditTab, setAuditTab] = useState<AuditTab>('series');
+  const [auditTab, setAuditTab] = useState<AuditTab>('missing');
   const [auditSelectedEmbyKeyId, setAuditSelectedEmbyKeyId] = useState(() => readAuditPreferences().embyApiKeyId ?? '');
   const [newEmbyKeyTitle, setNewEmbyKeyTitle] = useState('');
   const [newEmbyKeyValue, setNewEmbyKeyValue] = useState('');
   const [savingEmbyKey, setSavingEmbyKey] = useState(false);
-  const [auditReport, setAuditReport] = useState<AuditReport | null>(null);
-  const [auditingSeries, setAuditingSeries] = useState(false);
+  const [missingAuditReport, setMissingAuditReport] = useState<AuditReport | null>(null);
+  const [embyAuditReport, setEmbyAuditReport] = useState<AuditReport | null>(null);
+  const [auditingMissing, setAuditingMissing] = useState(false);
+  const [auditingEmby, setAuditingEmby] = useState(false);
   const [fileAuditLocalRoot, setFileAuditLocalRoot] = useState(() => readAuditPreferences().fileLocalRoot ?? '');
   const [fileAuditRemoteRoot, setFileAuditRemoteRoot] = useState(() => readAuditPreferences().fileRemoteRoot ?? '');
   const [fileAuditSFTPAddr, setFileAuditSFTPAddr] = useState(() => readAuditPreferences().sftpAddr ?? '');
@@ -1365,12 +1367,21 @@ export function App() {
     setRescanOpen(true);
   }
 
-  async function runSeriesAudit() {
+  async function runSeriesAudit(mode: 'missing' | 'emby') {
     if (!auditRoot.trim()) {
       setError('请输入要核对的剧集根目录');
       return;
     }
-    setAuditingSeries(true);
+    if (mode === 'emby' && !auditEmbyItemUrl.trim()) {
+      setError('请输入 Emby 剧集页面 URL');
+      return;
+    }
+    if (mode === 'emby' && !auditEmbyApiKey.trim() && !auditSelectedEmbyKeyId) {
+      setError('请选择或输入 Emby API Key');
+      return;
+    }
+    const setAuditing = mode === 'missing' ? setAuditingMissing : setAuditingEmby;
+    setAuditing(true);
     setError('');
     setNotice('');
     try {
@@ -1379,10 +1390,10 @@ export function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           root: auditRoot.trim(),
-          tmdbShowId: Number(auditTmdbId) || 0,
-          embyItemUrl: auditEmbyItemUrl.trim(),
-          embyApiKey: auditEmbyApiKey.trim(),
-          embyApiKeyId: Number(auditSelectedEmbyKeyId) || 0,
+          tmdbShowId: mode === 'missing' ? Number(auditTmdbId) || 0 : 0,
+          embyItemUrl: mode === 'emby' ? auditEmbyItemUrl.trim() : '',
+          embyApiKey: mode === 'emby' ? auditEmbyApiKey.trim() : '',
+          embyApiKeyId: mode === 'emby' ? Number(auditSelectedEmbyKeyId) || 0 : 0,
         })
       });
       if (!response.ok) {
@@ -1390,15 +1401,19 @@ export function App() {
         return;
       }
       const report = await response.json() as AuditReport;
-      setAuditReport(report);
-      const missingCount = report.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0);
-      const diffCount = report.embyComparisons?.length ?? 0;
-      const artifactCount = report.artifactIssues?.length ?? 0;
-      setNotice(`核对完成：缺失 ${missingCount} 集，本地产物缺失 ${artifactCount} 项，Emby 差异 ${diffCount} 项。`);
+      if (mode === 'missing') {
+        setMissingAuditReport(report);
+        const missingCount = report.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0);
+        const artifactCount = report.artifactIssues?.length ?? 0;
+        setNotice(`剧集缺漏核对完成：缺失 ${missingCount} 集，本地产物缺失 ${artifactCount} 项。`);
+      } else {
+        setEmbyAuditReport(report);
+        setNotice(`Emby 与本地核对完成：发现 ${report.embyComparisons?.length ?? 0} 项差异。`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '剧集核对失败');
     } finally {
-      setAuditingSeries(false);
+      setAuditing(false);
     }
   }
 
@@ -1921,16 +1936,24 @@ export function App() {
         {activePage === 'audit' && (
         <section className="page-grid audit-page-grid">
           <div className="audit-tabs" role="tablist" aria-label="核对类型">
-            <button className={auditTab === 'series' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'series'} onClick={() => setAuditTab('series')}>剧集缺漏与 Emby</button>
+            <button className={auditTab === 'missing' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'missing'} onClick={() => setAuditTab('missing')}>剧集缺漏</button>
+            <button className={auditTab === 'emby' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'emby'} onClick={() => setAuditTab('emby')}>Emby 与本地核对</button>
             <button className={auditTab === 'files' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'files'} onClick={() => setAuditTab('files')}>文件对齐检查</button>
           </div>
 
-          {auditTab === 'series' && <Card title="剧集缺漏与 Emby 核对" action={<button onClick={runSeriesAudit} disabled={auditingSeries}>{auditingSeries ? '核对中' : '开始核对'}</button>}>
+          {auditTab === 'missing' && <Card title="剧集缺漏" action={<button onClick={() => runSeriesAudit('missing')} disabled={auditingMissing}>{auditingMissing ? '核对中' : '开始核对'}</button>}>
             <div className="audit-controls">
               <label>剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择剧集根目录', value: auditRoot, onSelect: setAuditRoot })}>选择</button></div></label>
               <label>TMDB 剧集 ID<input value={auditTmdbId} onChange={(event) => setAuditTmdbId(event.target.value)} inputMode="numeric" placeholder="可选，优先于 tvshow.nfo" /></label>
+            </div>
+            <p className="muted">Season 0 不参与缺漏判断。默认使用剧集 `tvshow.nfo` 里的 TMDB ID 精确核对，手动填写 TMDB ID 时优先使用手动值；TMDB 不可用时才回退季度 `season.nfo` 的总集数。</p>
+          </Card>}
+
+          {auditTab === 'emby' && <Card title="Emby 与本地核对" action={<button onClick={() => runSeriesAudit('emby')} disabled={auditingEmby}>{auditingEmby ? '核对中' : '开始核对'}</button>}>
+            <div className="audit-controls">
+              <label>本地剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择本地剧集根目录', value: auditRoot, onSelect: setAuditRoot })}>选择</button></div></label>
               <label>Emby 剧集页面 URL<input value={auditEmbyItemUrl} onChange={(event) => setAuditEmbyItemUrl(event.target.value)} placeholder="https://emby.example.com/web/index.html#!/item?id=662" /></label>
-              <label>Emby API Key<select value={auditSelectedEmbyKeyId} onChange={(event) => { setAuditSelectedEmbyKeyId(event.target.value); if (event.target.value) setAuditEmbyApiKey(''); }}><option value="">手动输入或不使用</option>{auditEmbyAPIKeys.map((key) => <option key={key.id} value={key.id}>{key.title}</option>)}</select></label>
+              <label>Emby API Key<select value={auditSelectedEmbyKeyId} onChange={(event) => { setAuditSelectedEmbyKeyId(event.target.value); if (event.target.value) setAuditEmbyApiKey(''); }}><option value="">手动输入</option>{auditEmbyAPIKeys.map((key) => <option key={key.id} value={key.id}>{key.title}</option>)}</select></label>
               <label>临时 API Key<input type="password" value={auditEmbyApiKey} onChange={(event) => { setAuditEmbyApiKey(event.target.value); if (event.target.value) setAuditSelectedEmbyKeyId(''); }} placeholder="可选，不保存" /></label>
             </div>
             <div className="audit-key-manager">
@@ -1939,7 +1962,7 @@ export function App() {
               <button type="button" onClick={saveEmbyAPIKey} disabled={savingEmbyKey}>{savingEmbyKey ? '保存中' : '保存 Key'}</button>
               {auditSelectedEmbyKeyId ? <button className="secondary" type="button" onClick={() => deleteEmbyAPIKey(Number(auditSelectedEmbyKeyId))}>删除选中 Key</button> : null}
             </div>
-            <p className="muted">Season 0 不参与缺漏判断。默认使用剧集 `tvshow.nfo` 里的 TMDB ID 精确核对，手动填写 TMDB ID 时优先使用手动值；TMDB 不可用时才回退季度 `season.nfo` 的总集数。Emby 直接粘贴剧集详情页地址即可。</p>
+            <p className="muted">对比本地与 Emby 中剧集、季度和单集的元数据及视频源。直接粘贴 Emby 剧集详情页地址即可。</p>
           </Card>}
 
           {auditTab === 'files' && <Card title="文件对齐检查" action={<button onClick={runFileAudit} disabled={auditingFiles}>{auditingFiles ? '检查中' : '开始检查'}</button>}>
@@ -2002,15 +2025,64 @@ export function App() {
             </>
           )}
 
-          {auditTab === 'series' && auditReport && (
+          {auditTab === 'emby' && embyAuditReport && (
             <>
-              <Card title="核对摘要">
+              <Card title="Emby 与本地核对摘要">
                 <div className="audit-summary-grid">
-                  <div className="audit-stat"><span>剧集</span><strong>{auditReport.showTitle || '-'}</strong><small>{auditReport.tmdbShowId ? `TMDB #${auditReport.tmdbShowId}` : '未识别 TMDB ID'}</small></div>
-                  <div className="audit-stat"><span>本地单集</span><strong>{auditReport.localEpisodes.length}</strong><small>{auditReport.root}</small></div>
-                  <div className="audit-stat"><span>缺失集数</span><strong>{auditReport.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0)}</strong><small>{auditReport.seasonReports.length} 个季度</small></div>
-                  <div className="audit-stat"><span>产物缺失</span><strong>{auditReport.artifactIssues?.length ?? 0}</strong><small>{auditReport.artifactIssues?.length ? '需要补齐' : '未发现'}</small></div>
-                  <div className="audit-stat"><span>Emby 差异</span><strong>{auditReport.embyComparisons?.length ?? 0}</strong><small>{auditReport.embyComparisons?.length ? '需要检查' : '未发现或未启用'}</small></div>
+                  <div className="audit-stat"><span>剧集</span><strong>{embyAuditReport.showTitle || '-'}</strong><small>{embyAuditReport.root}</small></div>
+                  <div className="audit-stat"><span>本地单集</span><strong>{embyAuditReport.localEpisodes.length}</strong><small>参与核对</small></div>
+                  <div className="audit-stat"><span>Emby 差异</span><strong>{embyAuditReport.embyComparisons?.length ?? 0}</strong><small>{embyAuditReport.embyComparisons?.length ? '需要检查' : '未发现'}</small></div>
+                </div>
+              </Card>
+
+              <Card title="Emby 差异">
+                <p className="muted">这里只列出本地与 Emby 不一致的问题；没有行表示当前对比项未发现差异。对比范围包括剧集、季度和单集的标题、简介、图片存在性、可用的 TMDB ID 和视频源。</p>
+                <div className="task-table-wrap">
+                  <table className="task-table audit-table">
+                    <thead>
+                      <tr>
+                        <th>级别</th>
+                        <th>对象</th>
+                        <th>字段</th>
+                        <th>本地</th>
+                        <th>Emby</th>
+                        <th>说明</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {embyAuditReport.embyComparisons?.length ? embyAuditReport.embyComparisons.map((issue, index) => (
+                        <tr key={`${issue.season}-${issue.episode}-${issue.field}-${index}`}>
+                          <td><span className={issue.severity === 'error' ? 'pill bad' : 'pill'}>{issue.severity}</span></td>
+                          <td>{formatAuditIssueTarget(issue)}</td>
+                          <td>{issue.field}</td>
+                          <td className="path-cell">{issue.local || '-'}</td>
+                          <td className="path-cell">{issue.emby || '-'}</td>
+                          <td className="path-cell">{issue.detail || '-'}</td>
+                        </tr>
+                      )) : <tr><td colSpan={6} className="empty-cell">未发现 Emby 与本地差异。</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+
+              {embyAuditReport.warnings?.length ? (
+                <Card title="警告">
+                  <div className="audit-warning-list">
+                    {embyAuditReport.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+                  </div>
+                </Card>
+              ) : null}
+            </>
+          )}
+
+          {auditTab === 'missing' && missingAuditReport && (
+            <>
+              <Card title="剧集缺漏摘要">
+                <div className="audit-summary-grid">
+                  <div className="audit-stat"><span>剧集</span><strong>{missingAuditReport.showTitle || '-'}</strong><small>{missingAuditReport.tmdbShowId ? `TMDB #${missingAuditReport.tmdbShowId}` : '未识别 TMDB ID'}</small></div>
+                  <div className="audit-stat"><span>本地单集</span><strong>{missingAuditReport.localEpisodes.length}</strong><small>{missingAuditReport.root}</small></div>
+                  <div className="audit-stat"><span>缺失集数</span><strong>{missingAuditReport.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0)}</strong><small>{missingAuditReport.seasonReports.length} 个季度</small></div>
+                  <div className="audit-stat"><span>产物缺失</span><strong>{missingAuditReport.artifactIssues?.length ?? 0}</strong><small>{missingAuditReport.artifactIssues?.length ? '需要补齐' : '未发现'}</small></div>
                 </div>
               </Card>
 
@@ -2028,7 +2100,7 @@ export function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {auditReport.seasonReports.length ? auditReport.seasonReports.map((season) => (
+                      {missingAuditReport.seasonReports.length ? missingAuditReport.seasonReports.map((season) => (
                         <tr key={season.season}>
                           <td>S{String(season.season).padStart(2, '0')}</td>
                           <td>{formatEpisodeList(season.existingEpisodes)}</td>
@@ -2038,36 +2110,6 @@ export function App() {
                           <td className="path-cell">{season.note || '-'}</td>
                         </tr>
                       )) : <tr><td colSpan={6} className="empty-cell">未发现 Season 1+ 单集。</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
-              </Card>
-
-              <Card title="Emby 差异">
-                <p className="muted">这里只列出本地与 Emby 不一致的问题；没有行表示当前对比项未发现差异。对比范围包括剧集、季度和单集的标题、简介、图片存在性，以及可用的 TMDB ID。</p>
-                <div className="task-table-wrap">
-                  <table className="task-table audit-table">
-                    <thead>
-                      <tr>
-                        <th>级别</th>
-                        <th>单集</th>
-                        <th>字段</th>
-                        <th>本地</th>
-                        <th>Emby</th>
-                        <th>说明</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {auditReport.embyComparisons?.length ? auditReport.embyComparisons.map((issue, index) => (
-                        <tr key={`${issue.season}-${issue.episode}-${issue.field}-${index}`}>
-                          <td><span className={issue.severity === 'error' ? 'pill bad' : 'pill'}>{issue.severity}</span></td>
-                          <td>{formatAuditIssueTarget(issue)}</td>
-                          <td>{issue.field}</td>
-                          <td className="path-cell">{issue.local || '-'}</td>
-                          <td className="path-cell">{issue.emby || '-'}</td>
-                          <td className="path-cell">{issue.detail || '-'}</td>
-                        </tr>
-                      )) : <tr><td colSpan={6} className="empty-cell">未配置 Emby 或未发现差异。</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -2086,7 +2128,7 @@ export function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {auditReport.artifactIssues?.length ? auditReport.artifactIssues.map((issue, index) => (
+                      {missingAuditReport.artifactIssues?.length ? missingAuditReport.artifactIssues.map((issue, index) => (
                         <tr key={`${issue.season}-${issue.episode}-${issue.field}-${index}`}>
                           <td><span className="pill">{issue.severity}</span></td>
                           <td>{formatAuditIssueTarget(issue)}</td>
@@ -2112,7 +2154,7 @@ export function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {auditReport.localEpisodes.length ? auditReport.localEpisodes.map((episode) => (
+                      {missingAuditReport.localEpisodes.length ? missingAuditReport.localEpisodes.map((episode) => (
                         <tr key={episode.path}>
                           <td>S{String(episode.season).padStart(2, '0')}E{String(episode.episode).padStart(2, '0')}</td>
                           <td>{episode.title || '-'}</td>
@@ -2126,10 +2168,10 @@ export function App() {
                 </div>
               </Card>
 
-              {auditReport.warnings?.length ? (
+              {missingAuditReport.warnings?.length ? (
                 <Card title="警告">
                   <div className="audit-warning-list">
-                    {auditReport.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+                    {missingAuditReport.warnings.map((warning) => <p key={warning}>{warning}</p>)}
                   </div>
                 </Card>
               ) : null}

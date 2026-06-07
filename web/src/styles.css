@@ -783,6 +783,76 @@ button:disabled {
   gap: 8px;
 }
 
+.template-history-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.template-history-trigger {
+  width: 100%;
+}
+
+.template-history-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 12;
+  display: grid;
+  width: min(560px, 70vw);
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid rgba(120, 113, 108, 0.2);
+  border-radius: 16px;
+  background: #fffaf1;
+  box-shadow: 0 18px 48px rgba(17, 24, 39, 0.18);
+  padding: 6px;
+}
+
+.template-history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  border-radius: 12px;
+}
+
+.template-history-item:hover {
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.template-history-use {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  background: transparent;
+  color: #1f2937;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-history-delete {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 999px;
+  background: transparent;
+  color: #b91c1c;
+  padding: 0;
+}
+
+.template-history-delete:hover {
+  background: rgba(254, 226, 226, 0.9);
+}
+
+.template-history-delete span {
+  font-size: 20px;
+  line-height: 1;
+}
+
 .placeholder-bar {
   display: flex;
   flex-wrap: wrap;

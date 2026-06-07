@@ -586,6 +586,7 @@ export function App() {
   const [renameLanguage, setRenameLanguage] = useState(() => readRenamePreferences().language ?? 'zh-CN');
   const [renameLanguageInitialized, setRenameLanguageInitialized] = useState(() => Boolean(readRenamePreferences().language));
   const [renameTemplateHistory, setRenameTemplateHistory] = useState(() => asArray<string>(readRenamePreferences().templateHistory).filter(Boolean));
+  const [renameTemplateHistoryOpen, setRenameTemplateHistoryOpen] = useState(false);
   const [renamePreview, setRenamePreview] = useState<RenamePreviewItem[]>([]);
   const [renamePreviewCount, setRenamePreviewCount] = useState(0);
   const [renamePreviewTotal, setRenamePreviewTotal] = useState(0);
@@ -935,6 +936,13 @@ export function App() {
       releaseGroup: renameReleaseGroup.trim(),
       templateHistory: nextHistory
     });
+  }
+
+  function deleteRenameTemplateHistory(template: string) {
+    const nextHistory = renameTemplateHistory.filter((item) => item !== template);
+    setRenameTemplateHistory(nextHistory);
+    writeRenamePreferences({ ...readRenamePreferences(), templateHistory: nextHistory });
+    if (!nextHistory.length) setRenameTemplateHistoryOpen(false);
   }
 
   function handleRenamePreviewMessage(line: string) {
@@ -1806,10 +1814,15 @@ export function App() {
               <label className="rename-control-primary">命名模板
                 <div className="template-input-row">
                   <button className="target-path-preview rename-template-preview" type="button" onClick={() => setRenameTemplateEditorOpen(true)}>{renameTemplate || defaultRenameTemplate}</button>
-                  <select value="" onChange={(event) => { if (event.target.value) setRenameTemplate(event.target.value); }} disabled={!renameTemplateHistory.length} title="最近模板">
-                    <option value="">最近模板</option>
-                    {renameTemplateHistory.map((template) => <option key={template} value={template}>{template}</option>)}
-                  </select>
+                  <div className="template-history-picker">
+                    <button className="secondary template-history-trigger" type="button" onClick={() => setRenameTemplateHistoryOpen((value) => !value)} disabled={!renameTemplateHistory.length}>最近模板</button>
+                    {renameTemplateHistoryOpen ? <div className="template-history-menu">
+                      {renameTemplateHistory.map((template) => <div className="template-history-item" key={template}>
+                        <button className="template-history-use" type="button" title={template} onClick={() => { setRenameTemplate(template); setRenameTemplateHistoryOpen(false); }}>{template}</button>
+                        <button className="template-history-delete" type="button" title="删除最近模板" aria-label={`删除模板 ${template}`} onClick={() => deleteRenameTemplateHistory(template)}><span aria-hidden="true">&times;</span></button>
+                      </div>)}
+                    </div> : null}
+                  </div>
                 </div>
               </label>
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />

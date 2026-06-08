@@ -82,6 +82,11 @@ type ImageArtifact struct {
 	Detail string
 }
 
+type imageCandidate struct {
+	Source string
+	URL    string
+}
+
 func (r *NFOResult) addLog(level string, message string, detail string) {
 	r.TMDBLogs = append(r.TMDBLogs, ProcessLog{Level: level, Message: message, Detail: detail})
 }
@@ -684,12 +689,12 @@ func applyTMDBShowAndSeasonImagesScoped(ctx context.Context, cfg config.Config, 
 	} else if imageSourceEnabled(cfg, "fanart") && show.TVDBID <= 0 {
 		fanartDetail = "fanart requires tvdb id"
 	}
-	urls := []string{
-		chooseImageSource(cfg, map[string]string{"tmdb": client.DownloadImageURL(show.PosterPath), "fanart": fanartImages.Poster}),
-		chooseImageSource(cfg, map[string]string{"tmdb": client.DownloadImageURL(show.BackdropPath), "fanart": fanartImages.Fanart}),
-		chooseImageSource(cfg, map[string]string{"tmdb": client.DownloadImageURL(show.LogoPath), "fanart": fanartImages.ClearLogo}),
-		chooseImageSource(cfg, map[string]string{"fanart": fanartImages.ClearArt}),
-		chooseImageSource(cfg, map[string]string{"tmdb": client.DownloadImageURL(season.PosterPath), "fanart": fanartImages.SeasonPoster}),
+	candidateURLs := [][]imageCandidate{
+		imageSourceCandidates(cfg, map[string]string{"tmdb": client.DownloadImageURL(show.PosterPath), "fanart": fanartImages.Poster}),
+		imageSourceCandidates(cfg, map[string]string{"tmdb": client.DownloadImageURL(show.BackdropPath), "fanart": fanartImages.Fanart}),
+		imageSourceCandidates(cfg, map[string]string{"tmdb": client.DownloadImageURL(show.LogoPath), "fanart": fanartImages.ClearLogo}),
+		imageSourceCandidates(cfg, map[string]string{"fanart": fanartImages.ClearArt}),
+		imageSourceCandidates(cfg, map[string]string{"tmdb": client.DownloadImageURL(season.PosterPath), "fanart": fanartImages.SeasonPoster}),
 	}
 
 	for index, item := range downloads {
@@ -698,11 +703,11 @@ func applyTMDBShowAndSeasonImagesScoped(ctx context.Context, cfg config.Config, 
 			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: item.Path, Status: "skipped"})
 			continue
 		}
-		if strings.TrimSpace(urls[index]) == "" {
+		if len(candidateURLs[index]) == 0 {
 			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: item.Path, Status: "unavailable", Detail: imageUnavailableDetail(item.Type, fanartDetail)})
 			continue
 		}
-		path, status, err := ensureImageFile(ctx, cfg, item.Path, urls[index])
+		path, status, source, err := ensureImageFileFromCandidates(ctx, cfg, item.Path, candidateURLs[index])
 		if err != nil {
 			detail := item.Type + " image failed: " + err.Error()
 			if result.TMDBDetail == "" {
@@ -713,7 +718,7 @@ func applyTMDBShowAndSeasonImagesScoped(ctx context.Context, cfg config.Config, 
 			continue
 		}
 		if path != "" {
-			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: path, Status: status})
+			result.Images = append(result.Images, ImageArtifact{Type: item.Type, Path: path, Status: status, Detail: imageSourceDetail(source)})
 		}
 	}
 }
@@ -744,13 +749,26 @@ func imageUnavailableDetail(imageType string, fanartDetail string) string {
 	return "no image candidate from configured sources"
 }
 
-func chooseImageSource(cfg config.Config, candidates map[string]string) string {
+func imageSourceCandidates(cfg config.Config, candidates map[string]string) []imageCandidate {
+	result := []imageCandidate{}
 	for _, source := range imageSourceOrder(cfg) {
-		if value := strings.TrimSpace(candidates[strings.ToLower(source)]); value != "" {
-			return value
+		source = strings.ToLower(strings.TrimSpace(source))
+		if source == "" {
+			continue
+		}
+		if value := strings.TrimSpace(candidates[source]); value != "" {
+			result = append(result, imageCandidate{Source: source, URL: value})
 		}
 	}
-	return ""
+	return result
+}
+
+func imageSourceDetail(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return ""
+	}
+	return "source: " + source
 }
 
 func imageSourceOrder(cfg config.Config) []string {
@@ -1131,6 +1149,26 @@ func ensureImageFile(ctx context.Context, cfg config.Config, outputPath string, 
 		return "", "", err
 	}
 	return outputPath, "generated", nil
+}
+
+func ensureImageFileFromCandidates(ctx context.Context, cfg config.Config, outputPath string, candidates []imageCandidate) (string, string, string, error) {
+	failures := []string{}
+	for _, candidate := range candidates {
+		path, status, err := ensureImageFile(ctx, cfg, outputPath, candidate.URL)
+		if err == nil && path != "" {
+			return path, status, candidate.Source, nil
+		}
+		if err != nil {
+			failures = append(failures, candidate.Source+": "+err.Error())
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if len(failures) > 0 {
+		return "", "", "", errors.New(strings.Join(failures, "; "))
+	}
+	return "", "", "", nil
 }
 
 func httpClientForScraping(cfg config.Config) (*http.Client, error) {

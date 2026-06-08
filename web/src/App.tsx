@@ -366,6 +366,11 @@ const bifHwAccelOptions: SelectOption[] = [
   { code: 'vaapi', name: 'Linux VAAPI' },
   { code: 'videotoolbox', name: 'macOS VideoToolbox' }
 ];
+const imageSourceOptions: SelectOption[] = [
+  { code: 'tmdb', name: 'TMDB' },
+  { code: 'fanart', name: 'Fanart' },
+  { code: 'tvdb', name: 'TVDB' }
+];
 const commonVideoExtensions = ['.mkv', '.mp4', '.ts', '.m2ts', '.mts', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.webm', '.rmvb', '.rm', '.mpg', '.mpeg', '.vob', '.asf'];
 const taskStatusFilters: { value: TaskStatusFilter; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -1812,6 +1817,7 @@ export function App() {
                   <Toggle label="TMDB 刮削" checked={config.scraping.enableTmdb} onChange={(value) => updateConfig((draft) => { draft.scraping.enableTmdb = value; })} />
                   <Toggle label="刮削演员/职员" checked={config.scraping.enablePeople} onChange={(value) => updateConfig((draft) => { draft.scraping.enablePeople = value; })} />
                   <Toggle label="优先原语言海报" checked={config.scraping.preferOriginalLanguagePoster} onChange={(value) => updateConfig((draft) => { draft.scraping.preferOriginalLanguagePoster = value; })} />
+                  <ImageSourcePriorityPicker label="图片源顺序" values={config.scraping.imageSources ?? []} onChange={(values) => updateConfig((draft) => { draft.scraping.imageSources = values; })} />
                   <label>Fanart API Key<input type="password" value={config.scraping.fanartApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartApiKey = event.target.value; })} placeholder="用于 clearart/clearlogo" /></label>
                   <label>Fanart 地址<input value={config.scraping.fanartBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartBaseUrl = event.target.value; })} placeholder="https://webservice.fanart.tv" /><small>程序会自动追加 `/v3`，这里只填前缀，支持子目录。</small></label>
                   <label>TMDB Token<input type="password" value={config.scraping.tmdbToken} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbToken = event.target.value; })} placeholder="Bearer token" /></label>
@@ -3074,6 +3080,52 @@ function LanguagePicker(props: { label: string; value: string; onChange: (value:
   );
 }
 
+function ImageSourcePriorityPicker(props: { label: string; values: string[]; onChange: (values: string[]) => void }) {
+  const selected = normalizeImageSources(props.values);
+  const selectedSet = new Set(selected);
+  const available = imageSourceOptions.filter((option) => !selectedSet.has(option.code));
+
+  function move(code: string, offset: number) {
+    const index = selected.indexOf(code);
+    const nextIndex = index + offset;
+    if (index < 0 || nextIndex < 0 || nextIndex >= selected.length) return;
+    const next = [...selected];
+    [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+    props.onChange(next);
+  }
+
+  function remove(code: string) {
+    props.onChange(selected.filter((value) => value !== code));
+  }
+
+  return (
+    <div className="image-source-picker">
+      <span>{props.label}</span>
+      <div className="image-source-list">
+        {selected.length ? selected.map((code, index) => (
+          <div className="image-source-row" key={code}>
+            <span>{index + 1}. {imageSourceLabel(code)}</span>
+            <div className="image-source-actions">
+              <button type="button" aria-label={`${imageSourceLabel(code)} 上移`} title="上移" onClick={() => move(code, -1)} disabled={index === 0}>↑</button>
+              <button type="button" aria-label={`${imageSourceLabel(code)} 下移`} title="下移" onClick={() => move(code, 1)} disabled={index === selected.length - 1}>↓</button>
+              <button type="button" aria-label={`停用 ${imageSourceLabel(code)}`} title="停用" onClick={() => remove(code)} disabled={selected.length === 1}>×</button>
+            </div>
+          </div>
+        )) : <small className="muted">未启用图片源。</small>}
+      </div>
+      {available.length > 0 && (
+        <div className="image-source-add">
+          {available.map((option) => (
+            <button className="language-option" key={option.code} type="button" onClick={() => props.onChange([...selected, option.code])}>
+              + {option.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LanguageMultiPicker(props: { label: string; values: string[]; onChange: (values: string[]) => void }) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
@@ -3146,6 +3198,23 @@ function LanguageMultiPicker(props: { label: string; values: string[]; onChange:
       )}
     </div>
   );
+}
+
+function normalizeImageSources(values: string[]): string[] {
+  const allowed = new Set(imageSourceOptions.map((option) => option.code));
+  const result: string[] = [];
+  for (const value of values) {
+    const code = value.trim().toLowerCase();
+    if (!allowed.has(code) || result.includes(code)) continue;
+    result.push(code);
+  }
+  if (result.length === 0) return ['tmdb', 'fanart'];
+  return result;
+}
+
+function imageSourceLabel(code: string): string {
+  const option = imageSourceOptions.find((item) => item.code === code);
+  return option ? option.name : code;
 }
 
 function asArray<T>(value: T[] | null | undefined): T[] {

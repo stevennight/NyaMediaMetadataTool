@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,6 +234,57 @@ func TestApplyTMDBShowAndSeasonImagesSkipsNetworkWhenTargetsExist(t *testing.T) 
 		if image.Status != "skipped" {
 			t.Fatalf("expected skipped image, got %+v", image)
 		}
+	}
+}
+
+func TestImageSourceCandidatesUsesConfiguredPriority(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Scraping.ImageSources = []string{"fanart", "tmdb"}
+
+	got := imageSourceCandidates(cfg, map[string]string{
+		"tmdb":   "https://image.tmdb.example/poster.jpg",
+		"fanart": "https://fanart.example/poster.jpg",
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 image candidates, got %d", len(got))
+	}
+	if got[0].Source != "fanart" || got[1].Source != "tmdb" {
+		t.Fatalf("unexpected candidate order: %+v", got)
+	}
+}
+
+func TestEnsureImageFileFromCandidatesFallsBackAfterDownloadFailure(t *testing.T) {
+	t.Parallel()
+
+	failingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	t.Cleanup(failingServer.Close)
+	workingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("image-data"))
+	}))
+	t.Cleanup(workingServer.Close)
+
+	outputPath := filepath.Join(t.TempDir(), "poster.jpg")
+	path, status, source, err := ensureImageFileFromCandidates(t.Context(), config.Default(), outputPath, []imageCandidate{
+		{Source: "fanart", URL: failingServer.URL + "/poster.jpg"},
+		{Source: "tmdb", URL: workingServer.URL + "/poster.jpg"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != outputPath || status != "generated" || source != "tmdb" {
+		t.Fatalf("unexpected fallback result: path=%q status=%q source=%q", path, status, source)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "image-data" {
+		t.Fatalf("unexpected image content: %q", string(data))
 	}
 }
 

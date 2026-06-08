@@ -45,3 +45,18 @@ func TestLoadMigratesLegacyOverwriteExisting(t *testing.T) {
 		t.Fatalf("saved config does not contain force strategy:\n%s", data)
 	}
 }
+
+func TestLoadFiltersUnsupportedImageSources(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("scraping:\n  imageSources:\n    - tmdb\n    - tvdb\n    - fanart\n    - tmdb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(cfg.Scraping.ImageSources, ",") != "tmdb,fanart" {
+		t.Fatalf("unexpected image sources: %#v", cfg.Scraping.ImageSources)
+	}
+}

@@ -2266,13 +2266,22 @@ h3 {
 
 .settings-group-fields .toggle-row,
 .settings-group-fields .language-picker,
-.settings-group-fields .image-source-picker {
+.settings-group-fields .image-source-picker,
+.settings-group-fields .settings-note {
   grid-column: 1 / -1;
 }
 
 .settings-group-fields .toggle-row:first-of-type {
   padding-top: 0;
   border-top: 0;
+}
+
+.settings-note {
+  margin: 0;
+  color: #78716c;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
 }
 
 .config-form label {

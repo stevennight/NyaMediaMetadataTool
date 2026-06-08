@@ -232,10 +232,32 @@ func (c *Config) applyDefaults() {
 	if c.Scraping.TMDBRequestTimeoutSeconds <= 0 {
 		c.Scraping.TMDBRequestTimeoutSeconds = 15
 	}
-	if c.Scraping.ImageSources == nil {
-		c.Scraping.ImageSources = []string{"tmdb", "tvdb", "fanart"}
-	}
+	c.Scraping.ImageSources = normalizeImageSources(c.Scraping.ImageSources)
 	if c.Scraping.FanartBaseURL == "" {
 		c.Scraping.FanartBaseURL = "https://webservice.fanart.tv"
 	}
+}
+
+func normalizeImageSources(values []string) []string {
+	if values == nil {
+		return []string{"tmdb", "fanart"}
+	}
+	allowed := map[string]struct{}{"tmdb": {}, "fanart": {}}
+	seen := map[string]struct{}{}
+	result := []string{}
+	for _, value := range values {
+		source := strings.ToLower(strings.TrimSpace(value))
+		if _, ok := allowed[source]; !ok {
+			continue
+		}
+		if _, ok := seen[source]; ok {
+			continue
+		}
+		seen[source] = struct{}{}
+		result = append(result, source)
+	}
+	if len(result) == 0 {
+		return []string{"tmdb", "fanart"}
+	}
+	return result
 }

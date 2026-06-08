@@ -773,7 +773,7 @@ func imageSourceDetail(source string) string {
 
 func imageSourceOrder(cfg config.Config) []string {
 	if len(cfg.Scraping.ImageSources) == 0 {
-		return []string{"tmdb", "tvdb", "fanart"}
+		return []string{"tmdb", "fanart"}
 	}
 	return cfg.Scraping.ImageSources
 }

@@ -368,8 +368,7 @@ const bifHwAccelOptions: SelectOption[] = [
 ];
 const imageSourceOptions: SelectOption[] = [
   { code: 'tmdb', name: 'TMDB' },
-  { code: 'fanart', name: 'Fanart' },
-  { code: 'tvdb', name: 'TVDB' }
+  { code: 'fanart', name: 'Fanart' }
 ];
 const commonVideoExtensions = ['.mkv', '.mp4', '.ts', '.m2ts', '.mts', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.webm', '.rmvb', '.rm', '.mpg', '.mpeg', '.vob', '.asf'];
 const taskStatusFilters: { value: TaskStatusFilter; label: string }[] = [
@@ -1838,6 +1837,7 @@ export function App() {
                   <SettingsGroup title="Fanart">
                     <label>API Key<input type="password" value={config.scraping.fanartApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartApiKey = event.target.value; })} placeholder="用于 clearart/clearlogo" /></label>
                     <label>接口地址<input value={config.scraping.fanartBaseUrl} onChange={(event) => updateConfig((draft) => { draft.scraping.fanartBaseUrl = event.target.value; })} placeholder="https://webservice.fanart.tv" /><small>程序会自动追加 `/v3`，这里只填前缀，支持子目录。</small></label>
+                    <p className="settings-note">剧集图片需要 TVDB ID；当前会从 TMDB external IDs 自动映射，映射不到时跳过 Fanart。</p>
                   </SettingsGroup>
                   <SettingsGroup title="网络">
                     <label>代理<input value={config.scraping.proxy} onChange={(event) => updateConfig((draft) => { draft.scraping.proxy = event.target.value; })} placeholder="http://127.0.0.1:7890" /></label>

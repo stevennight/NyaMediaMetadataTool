@@ -52,7 +52,6 @@ scraping:
   preferOriginalLanguagePoster: false
   imageSources:
     - tmdb
-    - tvdb
     - fanart
   fanartApiKey: ""
   fanartBaseUrl: https://webservice.fanart.tv

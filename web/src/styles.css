@@ -2203,7 +2203,7 @@ h3 {
 .settings-section {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 14px 16px;
+  gap: 24px;
   align-content: start;
   min-width: 0;
   padding: 20px 0 22px;
@@ -2220,6 +2220,58 @@ h3 {
 
 .settings-form .settings-section.active {
   padding-top: 4px;
+  border-top: 0;
+}
+
+.settings-group {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding-top: 26px;
+  border-top: 1px solid rgba(120, 113, 108, 0.16);
+}
+
+.settings-group:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.settings-group h3 {
+  position: relative;
+  margin: 0;
+  padding-left: 12px;
+  color: #111827;
+  font-size: 18px;
+  font-weight: 850;
+  line-height: 1.25;
+}
+
+.settings-group h3::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 4px;
+  border-radius: 999px;
+  background: #2563eb;
+}
+
+.settings-group-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+  min-width: 0;
+}
+
+.settings-group-fields .toggle-row,
+.settings-group-fields .language-picker,
+.settings-group-fields .image-source-picker {
+  grid-column: 1 / -1;
+}
+
+.settings-group-fields .toggle-row:first-of-type {
+  padding-top: 0;
   border-top: 0;
 }
 
@@ -2502,6 +2554,7 @@ h3 {
   .dashboard-content-grid,
   .task-page-grid,
   .settings-form,
+  .settings-group-fields,
   .task-filters,
   .audit-controls,
   .audit-option-row,

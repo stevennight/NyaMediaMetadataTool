@@ -20,6 +20,7 @@ type Config struct {
 	Database   DatabaseConfig   `json:"database" yaml:"database"`
 	Tools      ToolsConfig      `json:"tools" yaml:"tools"`
 	Processing ProcessingConfig `json:"processing" yaml:"processing"`
+	Upload     UploadConfig     `json:"upload" yaml:"upload"`
 	Renaming   RenamingConfig   `json:"renaming" yaml:"renaming"`
 	Scraping   ScrapingConfig   `json:"scraping" yaml:"scraping"`
 	WatchDirs  []WatchDir       `json:"-" yaml:"-"`
@@ -68,6 +69,16 @@ type OutputProcessingConfig struct {
 	EnableNFO           bool   `json:"enableNfo"`
 	EnableBIF           bool   `json:"enableBif"`
 	EnableImageTakeover bool   `json:"enableImageTakeover"`
+}
+
+// UploadConfig controls the local publication queue. Provider accounts and
+// credentials are intentionally stored separately in SQLite.
+type UploadConfig struct {
+	Enabled      bool          `json:"enabled" yaml:"enabled"`
+	Concurrency  int           `json:"concurrency" yaml:"concurrency"`
+	QuietPeriod  time.Duration `json:"quietPeriod" yaml:"quietPeriod"`
+	MaxAttempts  int           `json:"maxAttempts" yaml:"maxAttempts"`
+	IncludeTypes []string      `json:"includeTypes" yaml:"includeTypes"`
 }
 
 func (c ProcessingConfig) OutputConfig() OutputProcessingConfig {
@@ -180,6 +191,16 @@ func (c *Config) applyDefaults() {
 	if c.Processing.Concurrency <= 0 {
 		c.Processing.Concurrency = 2
 	}
+	if c.Upload.Concurrency <= 0 {
+		c.Upload.Concurrency = 1
+	}
+	if c.Upload.QuietPeriod <= 0 {
+		c.Upload.QuietPeriod = 2 * time.Minute
+	}
+	if c.Upload.MaxAttempts <= 0 {
+		c.Upload.MaxAttempts = 3
+	}
+	c.Upload.IncludeTypes = normalizeUploadIncludeTypes(c.Upload.IncludeTypes)
 	if c.Renaming.Concurrency <= 0 {
 		c.Renaming.Concurrency = 3
 	}
@@ -236,6 +257,51 @@ func (c *Config) applyDefaults() {
 	if c.Scraping.FanartBaseURL == "" {
 		c.Scraping.FanartBaseURL = "https://webservice.fanart.tv"
 	}
+}
+
+func normalizeUploadIncludeTypes(values []string) []string {
+	if len(values) == 0 {
+		return []string{
+			"video",
+			"mediainfo",
+			"subtitle",
+			"nfo",
+			"thumb",
+			"tvshow-nfo",
+			"season-nfo",
+			"bif",
+			"poster",
+			"fanart",
+			"clearlogo",
+			"clearart",
+			"season-poster",
+		}
+	}
+	allowed := map[string]struct{}{
+		"video": {}, "mediainfo": {}, "subtitle": {}, "nfo": {}, "thumb": {},
+		"tvshow-nfo": {}, "season-nfo": {}, "bif": {}, "poster": {}, "fanart": {},
+		"clearlogo": {}, "clearart": {}, "season-poster": {},
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "all" {
+			return normalizeUploadIncludeTypes(nil)
+		}
+		if _, ok := allowed[value]; !ok {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return normalizeUploadIncludeTypes(nil)
+	}
+	return result
 }
 
 func normalizeImageSources(values []string) []string {

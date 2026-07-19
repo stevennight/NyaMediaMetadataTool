@@ -39,6 +39,13 @@ func TestParseEpisodeInfoSupportsFourDigitEpisodes(t *testing.T) {
 	}
 }
 
+func TestSeriesDirectoryUsesShowRootForSeasonDirectory(t *testing.T) {
+	path := `D:\Media\Anime\Show\Season 01\Show - S01E01.mkv`
+	if got, want := SeriesDirectory(path), `D:\Media\Anime\Show`; got != want {
+		t.Fatalf("SeriesDirectory(%q) = %q, want %q", path, got, want)
+	}
+}
+
 func TestParseEpisodeInfoReadsTMDBIDFromParentDirectory(t *testing.T) {
 	t.Parallel()
 

@@ -374,6 +374,199 @@ h1 {
   overflow: auto;
 }
 
+.uploads-page-grid {
+  gap: 18px;
+}
+
+.upload-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.upload-provider-table td small {
+  display: block;
+  margin-top: 4px;
+  color: #78716c;
+}
+
+.upload-filters {
+  grid-template-columns: minmax(260px, 1fr) auto;
+}
+
+.modal-card.upload-provider-modal {
+  width: min(680px, 100%);
+}
+
+.upload-route-fieldset,
+.upload-type-fieldset {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgba(120, 113, 108, 0.22);
+}
+
+.upload-route-fieldset legend,
+.upload-type-fieldset legend {
+  padding: 0 4px;
+  color: #44403c;
+  font-size: 13px;
+}
+
+.upload-watch-dir-list,
+.upload-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+
+.upload-watch-dir-list {
+  grid-template-columns: 1fr;
+}
+
+.upload-watch-dir-item {
+  display: grid;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(120, 113, 108, 0.14);
+}
+
+.upload-watch-dir-item:first-child {
+  border-top: 0;
+}
+
+.upload-route-details {
+  border: 1px solid rgba(120, 113, 108, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.52);
+  padding: 9px 10px;
+}
+
+.upload-route-details summary {
+  cursor: pointer;
+  color: #44403c;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.upload-route-profile {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  margin-top: 10px;
+}
+
+.upload-route-type-fieldset {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid rgba(120, 113, 108, 0.18);
+}
+
+.upload-route-type-fieldset legend {
+  padding: 0 4px;
+  color: #57534e;
+  font-size: 12px;
+}
+
+.upload-route-type-fieldset small {
+  color: #78716c;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.upload-selection-warning {
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #44403c;
+  font-size: 13px;
+}
+
+.checkbox-label input {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 0;
+}
+
+.upload-watch-dir-list .checkbox-label {
+  overflow-wrap: anywhere;
+}
+
+.modal-card.upload-cookie-modal {
+  width: min(780px, 100%);
+}
+
+.upload-auth-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.7fr);
+  gap: 18px;
+}
+
+.upload-auth-panel {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.upload-auth-panel h3,
+.upload-detail-section h3 {
+  margin: 0;
+  color: #1f2937;
+  font-size: 16px;
+}
+
+.upload-auth-panel textarea {
+  min-height: 150px;
+  resize: vertical;
+}
+
+.upload-auth-qr {
+  width: min(256px, 100%);
+  aspect-ratio: 1;
+  border: 1px solid rgba(120, 113, 108, 0.22);
+  background: #fff;
+  image-rendering: pixelated;
+}
+
+.modal-card.upload-batch-detail-modal {
+  width: min(1120px, 100%);
+}
+
+.upload-detail-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.upload-detail-summary .row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+}
+
+.upload-detail-section {
+  display: grid;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.upload-detail-section .pill {
+  margin-right: 6px;
+}
+
 .card {
   padding: 24px;
 }
@@ -2261,6 +2454,7 @@ h3 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px 16px;
+  align-items: start;
   min-width: 0;
 }
 
@@ -2295,6 +2489,7 @@ h3 {
 
 .config-form .toggle-row,
 .toggle-row {
+  position: relative;
   display: grid;
   gap: 6px;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2318,6 +2513,10 @@ h3 {
 .config-form label select {
   width: 100%;
   color: #1f2937;
+}
+
+.config-form .checkbox-label input {
+  width: auto;
 }
 
 .config-form label textarea {
@@ -2473,6 +2672,11 @@ h3 {
 
 .toggle-row > input {
   position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
   opacity: 0;
   pointer-events: none;
 }
@@ -2576,17 +2780,24 @@ h3 {
   .file-audit-options,
   .file-audit-summary-grid,
   .rename-controls,
-  .rescan-modal-grid {
+  .rescan-modal-grid,
+  .upload-auth-grid,
+  .upload-detail-summary,
+  .upload-filters {
     grid-template-columns: 1fr;
   }
 
   .rescan-toggle-grid,
-  .rescan-bif-grid {
+  .rescan-bif-grid,
+  .upload-watch-dir-list,
+  .upload-type-grid,
+  .upload-route-profile {
     grid-template-columns: 1fr;
   }
 
   .dashboard-metrics,
-  .feature-grid {
+  .feature-grid,
+  .upload-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

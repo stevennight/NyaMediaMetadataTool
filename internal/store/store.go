@@ -78,7 +78,13 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureWatchDirSplitColumns(ctx); err != nil {
 		return err
 	}
-	return s.ensureWatchDirProcessingColumns(ctx)
+	if err := s.ensureWatchDirProcessingColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureUploadColumns(ctx); err != nil {
+		return err
+	}
+	return s.ensureUploadScopedRouteFallbacks(ctx)
 }
 
 func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
@@ -132,6 +138,69 @@ func (s *Store) ensureWatchDirProcessingColumns(ctx context.Context) error {
 		return err
 	}
 	return s.ensureColumn(ctx, "watch_dirs", "processing_config", `ALTER TABLE watch_dirs ADD COLUMN processing_config TEXT NOT NULL DEFAULT ''`)
+}
+
+func (s *Store) ensureUploadColumns(ctx context.Context) error {
+	columns := []struct {
+		table  string
+		name   string
+		alter  string
+		update string
+	}{
+		{"upload_batch_targets", "include_types", `ALTER TABLE upload_batch_targets ADD COLUMN include_types TEXT NOT NULL DEFAULT ''`, ""},
+		{"upload_events", "attempts", `ALTER TABLE upload_events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`, ""},
+		{"upload_events", "available_at", `ALTER TABLE upload_events ADD COLUMN available_at TEXT NOT NULL DEFAULT ''`, `UPDATE upload_events SET available_at = created_at WHERE available_at = ''`},
+		{"upload_events", "lease_id", `ALTER TABLE upload_events ADD COLUMN lease_id TEXT NOT NULL DEFAULT ''`, ""},
+		{"upload_events", "lease_until", `ALTER TABLE upload_events ADD COLUMN lease_until TEXT NOT NULL DEFAULT ''`, ""},
+		{"upload_events", "error_summary", `ALTER TABLE upload_events ADD COLUMN error_summary TEXT NOT NULL DEFAULT ''`, ""},
+		{"upload_events", "updated_at", `ALTER TABLE upload_events ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`, `UPDATE upload_events SET updated_at = created_at WHERE updated_at = ''`},
+	}
+	for _, column := range columns {
+		exists, err := s.hasColumn(ctx, column.table, column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if column.update != "" {
+				if _, err := s.db.ExecContext(ctx, column.update); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, column.alter); err != nil {
+			return err
+		}
+		if column.update != "" {
+			if _, err := s.db.ExecContext(ctx, column.update); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Scoped-only upload targets created before the global fallback sentinel was
+// introduced need one disabled global route. Without it, deleting their last
+// watch directory would leave no routes and accidentally reactivate legacy
+// all-directory behavior.
+func (s *Store) ensureUploadScopedRouteFallbacks(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO upload_provider_routes (provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types, updated_at)
+SELECT p.id, NULL, 0, p.remote_root, p.collision_policy, '', CURRENT_TIMESTAMP
+FROM upload_providers p
+WHERE EXISTS (
+  SELECT 1
+  FROM upload_provider_routes scoped
+  WHERE scoped.provider_id = p.id AND scoped.watch_dir_id IS NOT NULL
+)
+AND NOT EXISTS (
+  SELECT 1
+  FROM upload_provider_routes global
+  WHERE global.provider_id = p.id AND global.watch_dir_id IS NULL
+)
+`)
+	return err
 }
 
 func (s *Store) ensureTaskColumn(ctx context.Context, column string, statement string) error {
@@ -267,6 +336,149 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_media_file_id ON artifacts(media_file_id);
+
+CREATE TABLE IF NOT EXISTS upload_providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  remote_root TEXT NOT NULL DEFAULT '/',
+  user_agent TEXT NOT NULL DEFAULT '',
+  collision_policy TEXT NOT NULL DEFAULT 'replace',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_providers_name ON upload_providers(name);
+
+CREATE TABLE IF NOT EXISTS upload_provider_secrets (
+  provider_id INTEGER NOT NULL,
+  secret_key TEXT NOT NULL,
+  secret_value TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(provider_id, secret_key),
+  FOREIGN KEY(provider_id) REFERENCES upload_providers(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS upload_provider_routes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_id INTEGER NOT NULL,
+  watch_dir_id INTEGER,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  remote_root TEXT NOT NULL DEFAULT '/',
+  collision_policy TEXT NOT NULL DEFAULT 'fail',
+  include_types TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(provider_id) REFERENCES upload_providers(id) ON DELETE CASCADE,
+  FOREIGN KEY(watch_dir_id) REFERENCES watch_dirs(id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_provider_routes_watch
+  ON upload_provider_routes(provider_id, watch_dir_id)
+  WHERE watch_dir_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_provider_routes_global
+  ON upload_provider_routes(provider_id)
+  WHERE watch_dir_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_upload_provider_routes_watch_enabled
+  ON upload_provider_routes(watch_dir_id, enabled);
+
+CREATE TABLE IF NOT EXISTS upload_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  watch_dir_id INTEGER,
+  series_key TEXT NOT NULL,
+  series_path TEXT NOT NULL,
+  status TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  ready_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(watch_dir_id) REFERENCES watch_dirs(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_batches_status_ready ON upload_batches(status, ready_at);
+CREATE INDEX IF NOT EXISTS idx_upload_batches_series_key ON upload_batches(series_key, id DESC);
+
+CREATE TABLE IF NOT EXISTS upload_batch_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL,
+  local_path TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  file_type TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  modified_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(batch_id, local_path),
+  FOREIGN KEY(batch_id) REFERENCES upload_batches(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS upload_batch_targets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL,
+  provider_id INTEGER NOT NULL,
+  provider_name TEXT NOT NULL,
+  provider_type TEXT NOT NULL,
+  remote_root TEXT NOT NULL,
+  user_agent TEXT NOT NULL DEFAULT '',
+  collision_policy TEXT NOT NULL DEFAULT 'fail',
+  include_types TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error_summary TEXT NOT NULL DEFAULT '',
+  available_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(batch_id, provider_id),
+  FOREIGN KEY(batch_id) REFERENCES upload_batches(id) ON DELETE CASCADE,
+  FOREIGN KEY(provider_id) REFERENCES upload_providers(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_batch_targets_status_available ON upload_batch_targets(status, available_at);
+
+CREATE TABLE IF NOT EXISTS upload_transfers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_target_id INTEGER NOT NULL,
+  batch_file_id INTEGER NOT NULL,
+  remote_path TEXT NOT NULL,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  bytes_total INTEGER NOT NULL DEFAULT 0,
+  bytes_transferred INTEGER NOT NULL DEFAULT 0,
+  remote_id TEXT NOT NULL DEFAULT '',
+  error_summary TEXT NOT NULL DEFAULT '',
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(batch_target_id, batch_file_id),
+  FOREIGN KEY(batch_target_id) REFERENCES upload_batch_targets(id) ON DELETE CASCADE,
+  FOREIGN KEY(batch_file_id) REFERENCES upload_batch_files(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_transfers_target_status ON upload_transfers(batch_target_id, status);
+
+CREATE TABLE IF NOT EXISTS upload_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_target_id INTEGER NOT NULL,
+  type TEXT NOT NULL,
+  payload TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  lease_id TEXT NOT NULL DEFAULT '',
+  lease_until TEXT NOT NULL DEFAULT '',
+  error_summary TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  delivered_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(batch_target_id, type),
+  FOREIGN KEY(batch_target_id) REFERENCES upload_batch_targets(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_events_status ON upload_events(status, id);
 
 CREATE TABLE IF NOT EXISTS tool_status (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

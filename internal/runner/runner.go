@@ -19,15 +19,27 @@ import (
 const maxTaskAttempts = 3
 
 type Runner struct {
-	cfg    config.Config
-	store  *store.Store
-	logger *slog.Logger
-	mu     sync.Mutex
-	active map[int64]context.CancelFunc
+	cfg       config.Config
+	store     *store.Store
+	logger    *slog.Logger
+	publisher PublicationRecorder
+	mu        sync.Mutex
+	active    map[int64]context.CancelFunc
 }
 
-func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Runner {
-	return &Runner{cfg: cfg, store: st, logger: logger, active: make(map[int64]context.CancelFunc)}
+// PublicationRecorder receives a completed local media package. Keeping this
+// interface separate prevents network uploads from becoming part of the media
+// processing worker's retry semantics.
+type PublicationRecorder interface {
+	RecordMediaProcessed(ctx context.Context, task store.Task, media store.MediaFile) error
+}
+
+func New(cfg config.Config, st *store.Store, logger *slog.Logger, publishers ...PublicationRecorder) *Runner {
+	var publisher PublicationRecorder
+	if len(publishers) > 0 {
+		publisher = publishers[0]
+	}
+	return &Runner{cfg: cfg, store: st, logger: logger, publisher: publisher, active: make(map[int64]context.CancelFunc)}
 }
 
 func (r *Runner) CancelRunningTasks() int {
@@ -289,7 +301,18 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 	if len(failures) > 0 {
 		return errors.New("artifact generation failed: " + strings.Join(failures, "; "))
 	}
-	return r.store.TouchMediaProcessed(ctx, media.ID)
+	if r.publisher != nil {
+		if err := r.publisher.RecordMediaProcessed(ctx, task, media); err != nil {
+			return fmt.Errorf("queue upload publication: %w", err)
+		}
+	}
+	// Record publication before marking the source processed. If the process
+	// crashes between these operations, retrying the media task is idempotent;
+	// the reverse order could permanently lose the upload handoff.
+	if err := r.store.TouchMediaProcessed(ctx, media.ID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *Runner) generateMediaInfo(ctx context.Context, task store.Task, cfg config.Config, media store.MediaFile) (string, error) {

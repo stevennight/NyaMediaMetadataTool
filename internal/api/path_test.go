@@ -1,6 +1,8 @@
 package api
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,6 +26,9 @@ func TestPathWithinRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	outside := t.TempDir()
+	if _, err := filepath.EvalSymlinks(root); errors.Is(err, fs.ErrPermission) {
+		t.Skip("sandbox does not permit resolving temporary directory symlinks")
+	}
 
 	if !pathWithinRoot(child, root) {
 		t.Fatal("expected child path inside root")

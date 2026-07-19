@@ -9,9 +9,10 @@
 - 媒体目录管理：支持多个目录、递归扫描、实时监控、手动重扫、目录级处理策略覆盖。
 - 任务队列：SQLite 记录任务、日志、产物和工具状态；支持并发处理、失败重试、取消运行中任务、重新排队和忽略失败任务。
 - 伴生文件生成：支持字幕抽取、`mediainfo.json`、BIF 预览索引、单集 NFO、剧集/季度 NFO、单集缩略图。
+- 网盘发布：元数据完成后按番剧变更窗口合并上传批次；一个目标可设置默认路由并为指定媒体目录覆盖远端目录、碰撞策略和文件类型，批次按目标独立重试、校验、记录文件清单，并在目标完成后写入可租约消费的 outbox 事件。首个 Provider 为 `115cookie`，`115open`、123 云盘和百度网盘已保留运行时注册与凭据契约。
 - 元数据增强：支持 TMDB 查询、缓存、语言/地区配置、备用语言、代理，以及可选 fanart.tv 图片来源。
 - 图片接管：默认关闭；开启后可生成 `poster.jpg`、`fanart.jpg`、`clearlogo.png`、`clearart.png` 和季度海报。
-- Web 管理端：提供仪表盘、设置、媒体目录、任务、重命名、剧集核对等页面。
+- Web 管理端：提供仪表盘、设置、媒体目录、任务、上传、重命名、剧集核对等页面。
 - 批量重命名：支持预览、手动修正、模板占位符、TMDB 匹配、附属文件随动重命名、历史回滚。
 - 剧集核对：Web 端支持本地缺集/伴生文件检查、Emby API 对比、本地与远端 SFTP 文件对齐检查。
 - 辅助工具：保留 `bifunpack` BIF 解包命令，用于调试 BIF 生成结果。
@@ -34,6 +35,7 @@ internal/
   runner/        任务执行器
   store/         SQLite 存储
   tmdb/          TMDB 客户端与缓存
+  upload/        多 Provider 上传批次、115 Cookie 授权与上传 Worker
   watcher/       fsnotify 目录监控
 web/
   src/           React + TypeScript 前端
@@ -43,7 +45,7 @@ docs/
 
 ## 运行要求
 
-- Go 1.22+
+- Go 1.23+
 - Node.js 与 npm，仅在修改或重新构建前端时需要
 - 外部媒体工具：
   - `ffmpeg`
@@ -99,6 +101,7 @@ npm run build
 - `database`：SQLite 数据库路径，默认 `data/nyamedia.db`。
 - `tools`：`ffmpeg`、`ffprobe`、`mkvextract`、`mediainfo` 路径。
 - `processing`：视频扩展名、并发数、文件稳定检测、BIF 参数、处理策略和产物开关。
+- `upload`：是否自动发布、上传目标并发、番剧变更合并窗口、自动重试次数和默认发布文件类型。至少选择一种默认文件类型；网盘目标、目录路由与凭据保存在 SQLite，由 Web 端的“上传”页面管理；Cookie 不会写入 `config.yaml` 或 `GET /api/config` 响应。
 - `renaming`：重命名预览并发数。
 - `scraping`：TMDB、fanart.tv、语言、地区、备用语言、代理等刮削配置。
 
@@ -108,6 +111,22 @@ npm run build
 - `force`：强制重建产物。
 
 监控目录保存在 SQLite 中，启动后以数据库里的媒体目录为准，而不是直接读取 YAML 中的 `watchDirs`。
+
+### 网盘发布流程
+
+上传批次不是按一次整库扫描划分，而是按“监控目录 + 番剧根目录”聚合。每个媒体任务在元数据成功后把视频和已生成的伴生文件加入该番剧的 collecting 批次；新的文件会延长安静窗口。安静窗口结束且该番剧没有待处理任务时，批次才会封存并发往目标。
+
+- 一个完整扫描可产生多个番剧批次；同一番剧连续下载的多集会合并成一个批次。
+- 每个目标都有一个默认路由，可应用于所有监控目录；也可关闭默认路由，仅选择目录。选中的目录可以分别覆盖远端根目录、冲突策略和文件类型。关闭默认路由时至少要选择一个目录，删除最后一个已选目录也不会意外回退为全目录上传。
+- 新批次会快照最终生效的远端根目录、冲突策略和文件类型，之后修改目标不会改变历史批次。
+- 每个目标完成后产生一个 `upload_target_verified` outbox 事件。事件包含 Provider、远端根目录、番剧 key、revision 和文件清单，供 NyaMedia 或其他通知消费者按目标独立消费。
+- 第一版不会自动删除本地或远端文件。默认碰撞策略为 `fail`，避免同名不同大小文件被静默覆盖；只有明确选择 `replace` 才会替换远端同名文件。
+
+### Provider 扩展
+
+`upload.Manager.RegisterProviderDescriptor` 是新增网盘实现的注册入口：它同时注册上传 Builder、显示名称和所需凭据键。`GET /api/upload/provider-types` 始终反映运行时已安装的 Provider，因此前端会自动启用新类型，而不是维护一份独立的硬编码列表。
+
+未安装的预留 Provider（当前为 `115open`、`123pan`、`baidupan`）可以被识别但不能启用，不会进入上传重试队列。通用凭据接口为 `PUT/DELETE /api/upload/providers/{id}/secrets/{key}`；只允许 Provider descriptor 声明的键，且不提供读取接口。`115cookie` 仍保留专用 Cookie 与二维码授权流程。
 
 ## 生成产物
 
@@ -200,6 +219,15 @@ go run ./cmd/bifunpack -o "D:\Temp\bif-frames" -- "D:\Media\TV\Example\Example-3
 - `POST /api/tasks/retry`
 - `POST /api/tasks/ignore`
 - `GET /api/artifacts`
+- `GET /api/uploads/summary`、`GET /api/uploads`、`GET /api/uploads/{id}`
+- `POST /api/uploads/targets/{id}/retry`、`POST /api/uploads/targets/{id}/cancel`
+- `GET/POST /api/upload/providers`、`GET/PUT/DELETE /api/upload/providers/{id}`
+- `PUT/DELETE /api/upload/providers/{id}/cookie`、`POST /api/upload/providers/{id}/check`
+- `PUT/DELETE /api/upload/providers/{id}/secrets/{key}`
+- `POST/GET /api/upload/providers/{id}/auth/115cookie`
+- `GET /api/upload/provider-types`
+- `GET /api/upload/events`、`POST /api/upload/events/claim`
+- `POST /api/upload/events/{id}/ack`、`POST /api/upload/events/{id}/fail`
 - `POST /api/rename/preview`
 - `POST /api/rename/preview/stream`
 - `POST /api/rename/preview/item`
@@ -221,6 +249,7 @@ go run ./cmd/bifunpack -o "D:\Temp\bif-frames" -- "D:\Media\TV\Example\Example-3
 ## 注意事项
 
 - `PUT /api/config` 会写入配置文件，但返回 `restartRequired: true`；服务级配置建议重启后生效。
+- 115 Cookie 和未来 Provider 的通用凭据当前保存在本地 SQLite 数据库中，不会经 API 回显。请把数据库目录视作凭据存储，限制本机账户和备份文件的访问权限。
 - TMDB 或 fanart.tv 相关能力依赖网络和 API 配置，未配置时会降级或跳过。
 - BIF 硬件加速支持 `cpu`、`auto`、`nvidia`、`intel`、`amd`、`d3d11va`、`dxva2`、`vaapi`、`videotoolbox`，失败会按策略回退。
 - 本地与远端文件对齐检查当前远端实现为 SFTP，默认建议配置 `known_hosts`，临时调试时才跳过主机指纹校验。

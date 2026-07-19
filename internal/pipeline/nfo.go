@@ -439,6 +439,14 @@ func showDirectory(path string) string {
 	return dir
 }
 
+// SeriesDirectory returns the canonical local directory used by the metadata
+// pipeline for a show. Keeping this rule shared with publication batching
+// prevents a show with multiple seasons from being split into separate upload
+// batches or merged with an unrelated sibling directory.
+func SeriesDirectory(path string) string {
+	return filepath.Clean(showDirectory(path))
+}
+
 func findTMDBEpisode(ctx context.Context, client *tmdb.Client, episode episodeInfo) (tmdb.Episode, error) {
 	if episode.TMDBShowID > 0 {
 		return client.FindEpisodeByShowID(ctx, episode.TMDBShowID, episode.Season, episode.Episode)

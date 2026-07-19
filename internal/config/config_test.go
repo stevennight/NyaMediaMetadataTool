@@ -60,3 +60,50 @@ func TestLoadFiltersUnsupportedImageSources(t *testing.T) {
 		t.Fatalf("unexpected image sources: %#v", cfg.Scraping.ImageSources)
 	}
 }
+
+func TestUploadDefaultsAndYAMLRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("upload:\n  enabled: true\n  quietPeriod: 45s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Upload.Enabled {
+		t.Fatal("upload should stay enabled")
+	}
+	if cfg.Upload.QuietPeriod.String() != "45s" {
+		t.Fatalf("unexpected quiet period: %s", cfg.Upload.QuietPeriod)
+	}
+	if cfg.Upload.Concurrency != 1 || cfg.Upload.MaxAttempts != 3 {
+		t.Fatalf("unexpected upload defaults: %#v", cfg.Upload)
+	}
+	if !containsString(cfg.Upload.IncludeTypes, "video") || !containsString(cfg.Upload.IncludeTypes, "nfo") {
+		t.Fatalf("upload defaults should include media and metadata: %#v", cfg.Upload.IncludeTypes)
+	}
+
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "quietPeriod: 45s") {
+		t.Fatalf("saved upload configuration is missing: %s", data)
+	}
+	if !strings.Contains(string(data), "includeTypes:") {
+		t.Fatalf("saved upload types are missing: %s", data)
+	}
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}

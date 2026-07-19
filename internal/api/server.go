@@ -21,6 +21,7 @@ import (
 	"NyaMediaMetadataTool/internal/store"
 	"NyaMediaMetadataTool/internal/tmdb"
 	"NyaMediaMetadataTool/internal/tools"
+	"NyaMediaMetadataTool/internal/upload"
 	"NyaMediaMetadataTool/web"
 )
 
@@ -31,6 +32,7 @@ type Server struct {
 	store      *store.Store
 	tasks      TaskCanceller
 	watcher    WatchDirReloader
+	uploads    *upload.Manager
 	logger     *slog.Logger
 	mux        *http.ServeMux
 }
@@ -43,13 +45,18 @@ type WatchDirReloader interface {
 	ReloadWatchDirs(ctx context.Context) error
 }
 
-func NewServer(cfg config.Config, configPath string, store *store.Store, tasks TaskCanceller, watcher WatchDirReloader, logger *slog.Logger) http.Handler {
+func NewServer(cfg config.Config, configPath string, store *store.Store, tasks TaskCanceller, watcher WatchDirReloader, logger *slog.Logger, uploadManagers ...*upload.Manager) http.Handler {
+	var uploads *upload.Manager
+	if len(uploadManagers) > 0 {
+		uploads = uploadManagers[0]
+	}
 	server := &Server{
 		cfg:        cfg,
 		configPath: configPath,
 		store:      store,
 		tasks:      tasks,
 		watcher:    watcher,
+		uploads:    uploads,
 		logger:     logger,
 		mux:        http.NewServeMux(),
 	}
@@ -73,6 +80,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/ignore", s.handleIgnoreTasks)
 	s.mux.HandleFunc("GET /api/tasks/", s.handleTaskDetail)
 	s.mux.HandleFunc("GET /api/artifacts", s.handleArtifacts)
+	s.mux.HandleFunc("GET /api/uploads/summary", s.handleUploadSummary)
+	s.mux.HandleFunc("GET /api/uploads", s.handleUploadBatches)
+	s.mux.HandleFunc("GET /api/uploads/", s.handleUploadBatchDetail)
+	s.mux.HandleFunc("POST /api/uploads/targets/", s.handleUploadTargetAction)
+	s.mux.HandleFunc("GET /api/upload/events", s.handleUploadEvents)
+	s.mux.HandleFunc("POST /api/upload/events/claim", s.handleClaimUploadEvents)
+	s.mux.HandleFunc("POST /api/upload/events/", s.handleUploadEventAction)
+	s.mux.HandleFunc("GET /api/upload/provider-types", s.handleUploadProviderTypes)
+	s.mux.HandleFunc("GET /api/upload/providers", s.handleListUploadProviders)
+	s.mux.HandleFunc("POST /api/upload/providers", s.handleCreateUploadProvider)
+	s.mux.HandleFunc("/api/upload/providers/", s.handleUploadProviderRoute)
 	s.mux.HandleFunc("GET /api/emby-api-keys", s.handleListEmbyAPIKeys)
 	s.mux.HandleFunc("POST /api/emby-api-keys", s.handleSaveEmbyAPIKey)
 	s.mux.HandleFunc("DELETE /api/emby-api-keys/", s.handleDeleteEmbyAPIKey)

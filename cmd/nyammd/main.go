@@ -15,6 +15,7 @@ import (
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/runner"
 	"NyaMediaMetadataTool/internal/store"
+	"NyaMediaMetadataTool/internal/upload"
 	"NyaMediaMetadataTool/internal/watcher"
 )
 
@@ -45,6 +46,10 @@ func main() {
 		logger.Error("reset running tasks", "error", err)
 		os.Exit(1)
 	}
+	if err := db.ResetRunningUploadWork(context.Background()); err != nil {
+		logger.Error("reset running upload work", "error", err)
+		os.Exit(1)
+	}
 	if err := db.DisableWatchDirScanOnStart(context.Background()); err != nil {
 		logger.Error("disable watch dir scan on start", "error", err)
 		os.Exit(1)
@@ -66,16 +71,22 @@ func main() {
 		}
 	}()
 
-	taskRunner := runner.New(cfg, db, logger)
+	uploadManager := upload.New(cfg.Upload, db, logger)
+	taskRunner := runner.New(cfg, db, logger, uploadManager)
 	go func() {
 		if err := taskRunner.Run(serviceCtx); err != nil {
 			logger.Error("runner stopped", "error", err)
 		}
 	}()
+	go func() {
+		if err := uploadManager.Run(serviceCtx); err != nil {
+			logger.Error("upload manager stopped", "error", err)
+		}
+	}()
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
-		Handler:           api.NewServer(cfg, *configPath, db, taskRunner, watcherService, logger),
+		Handler:           api.NewServer(cfg, *configPath, db, taskRunner, watcherService, logger, uploadManager),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

@@ -627,10 +627,13 @@ func checkLocalArtifacts(root string, seasons []LocalSeason, episodes []LocalEpi
 			add(0, 0, root, "series."+name, "剧集级产物缺失")
 		}
 	}
-	for _, image := range []string{"poster", "fanart", "backdrop", "clearlogo", "clearart"} {
+	for _, image := range []string{"poster", "clearlogo", "clearart"} {
 		if !hasAnyExt(root, image, []string{".jpg", ".jpeg", ".png", ".webp"}) {
 			add(0, 0, root, "series.image."+image, "剧集图片缺失")
 		}
+	}
+	if !hasAnyStemExt(root, []string{"fanart", "backdrop", "background", "art"}, []string{".jpg", ".jpeg", ".png", ".webp"}) {
+		add(0, 0, root, "series.image.fanart", "剧集背景图缺失")
 	}
 	for _, season := range seasons {
 		seasonDir := seasonDirectory(root, season.Season, episodes)
@@ -689,9 +692,15 @@ func seasonDirectory(root string, season int, episodes []LocalEpisode) string {
 }
 
 func hasAnyExt(dir string, stem string, exts []string) bool {
-	for _, ext := range exts {
-		if fileExists(filepath.Join(dir, stem+ext)) {
-			return true
+	return hasAnyStemExt(dir, []string{stem}, exts)
+}
+
+func hasAnyStemExt(dir string, stems []string, exts []string) bool {
+	for _, stem := range stems {
+		for _, ext := range exts {
+			if fileExists(filepath.Join(dir, stem+ext)) {
+				return true
+			}
 		}
 	}
 	return false

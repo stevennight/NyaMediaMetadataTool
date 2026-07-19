@@ -141,6 +141,31 @@ func TestRunMissingReportsArtifactIssuesPerVideoVersion(t *testing.T) {
 	}
 }
 
+func TestCheckLocalArtifactsAcceptsBackdropAliases(t *testing.T) {
+	t.Parallel()
+
+	for _, backgroundName := range []string{"fanart.jpg", "backdrop.jpg"} {
+		backgroundName := backgroundName
+		t.Run(backgroundName, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, "tvshow.nfo"), `<tvshow><title>Test Show</title></tvshow>`)
+			writeFile(t, filepath.Join(root, "poster.jpg"), "")
+			writeFile(t, filepath.Join(root, backgroundName), "")
+			writeFile(t, filepath.Join(root, "clearlogo.png"), "")
+			writeFile(t, filepath.Join(root, "clearart.png"), "")
+
+			issues := checkLocalArtifacts(root, nil, nil)
+			for _, issue := range issues {
+				if issue.Field == "series.image.fanart" || issue.Field == "series.image.backdrop" {
+					t.Fatalf("did not expect background image issue with %s: %#v", backgroundName, issues)
+				}
+			}
+		})
+	}
+}
+
 func TestCompareEmbyDetectsMetadataDifferences(t *testing.T) {
 	t.Parallel()
 

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -11,6 +12,23 @@ func TestDefaultProcessingStrategyIsMissing(t *testing.T) {
 	cfg := Default()
 	if cfg.Processing.Strategy != ProcessingStrategyMissing {
 		t.Fatalf("expected missing strategy, got %q", cfg.Processing.Strategy)
+	}
+}
+
+func TestSaveRestrictsConfigPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX permission bits")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := Save(path, Default()); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config permissions = %o, want 600", got)
 	}
 }
 

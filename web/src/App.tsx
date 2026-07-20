@@ -1,5 +1,33 @@
 import { useEffect, useRef, useState } from 'react';
-import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from 'react';
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  CircleGauge,
+  CloudUpload,
+  Database,
+  FileCheck2,
+  Film,
+  FolderCog,
+  FolderOpen,
+  History,
+  LayoutDashboard,
+  ListTodo,
+  Monitor,
+  RefreshCw,
+  Save,
+  SearchCheck,
+  Settings,
+  SlidersHorizontal,
+  Tags,
+  UploadCloud,
+  WandSparkles,
+  X
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import { getRuntimeInfo, notifyDesktop, pickDesktopDirectory, pickDesktopFile, previewDesktopRename, revealDesktopPath } from './desktop';
+import type { DesktopRuntimeInfo } from './desktop';
 
 type Health = {
   status: string;
@@ -420,6 +448,13 @@ function outputProcessingFromConfig(config: AppConfig | null): OutputProcessingC
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
 type UploadStatusFilter = 'all' | 'collecting' | 'pending' | 'running' | 'completed' | 'partial' | 'failed' | 'canceled';
 type AuditTab = 'missing' | 'emby' | 'files';
+type ConfirmationRequest = {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  tone?: 'default' | 'danger';
+  onConfirm: () => void | Promise<void>;
+};
 
 const pagePaths: Record<PageKey, string> = {
   dashboard: '/',
@@ -430,6 +465,27 @@ const pagePaths: Record<PageKey, string> = {
   rename: '/rename',
   audit: '/audit'
 };
+
+const pageMeta: Record<PageKey, { title: string; description: string; icon: LucideIcon }> = {
+  dashboard: { title: '运行概览', description: '查看处理队列、媒体目录和本地工具的实时状态。', icon: LayoutDashboard },
+  rename: { title: '整理命名', description: '预览、核对并安全应用剧集文件命名。', icon: Tags },
+  audit: { title: '剧集核对', description: '检查缺集、伴生文件以及 Emby 和远端文件差异。', icon: SearchCheck },
+  watchDirs: { title: '媒体目录', description: '管理自动监听、扫描范围和目录级处理策略。', icon: FolderCog },
+  tasks: { title: '任务队列', description: '跟踪处理进度、诊断失败并管理重试。', icon: ListTodo },
+  uploads: { title: '上传管理', description: '管理发布目标、批次进度和远端传输。', icon: CloudUpload },
+  settings: { title: '应用设置', description: '配置工具、处理策略、刮削来源和上传行为。', icon: Settings }
+};
+
+const workspacePages: PageKey[] = ['dashboard', 'rename', 'audit'];
+const automationPages: PageKey[] = ['watchDirs', 'tasks', 'uploads'];
+
+const settingsTabOptions: Array<{ value: SettingsTab; label: string }> = [
+  { value: 'basic', label: '基础' },
+  { value: 'processing', label: '处理' },
+  { value: 'uploads', label: '上传' },
+  { value: 'scraping', label: '刮削' },
+  { value: 'sources', label: '数据源' }
+];
 
 function pageFromPath(pathname: string): PageKey {
   switch (pathname) {
@@ -539,6 +595,7 @@ const uploadStatusFilters: { value: UploadStatusFilter; label: string }[] = [
 const taskListRefreshIntervalMs = 5000;
 const taskDetailRefreshIntervalMs = 5000;
 const uploadListRefreshIntervalMs = 5000;
+const desktopNotificationPollIntervalMs = 10000;
 const defaultRenameTemplate = '{show} - S{season:00}E{episode:00} - {title}';
 const auditPreferencesKey = 'nya.audit.preferences';
 const renamePlaceholders = [
@@ -750,6 +807,12 @@ function normalizeTaskDetail(detail: TaskDetail) {
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [savedConfig, setSavedConfig] = useState<AppConfig | null>(null);
+  const [runtimeInfo, setRuntimeInfo] = useState<DesktopRuntimeInfo | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [connectionOnline, setConnectionOnline] = useState(false);
+  const [healthCheckedAt, setHealthCheckedAt] = useState<Date | null>(null);
+  const [restartRequired, setRestartRequired] = useState(false);
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [uploadSummary, setUploadSummary] = useState<UploadSummary>({ collecting: 0, pending: 0, running: 0, completed: 0, failed: 0 });
@@ -876,19 +939,36 @@ export function App() {
   const [notice, setNotice] = useState('');
   const [rescanning, setRescanning] = useState(false);
   const [error, setError] = useState<string>('');
+  const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
   const applyingTmdbShowRef = useRef(false);
   const recalculatingRenamePathsRef = useRef(new Set<string>());
+  const renamePreviewAbortRef = useRef<AbortController | null>(null);
+  const observedTaskStatusesRef = useRef(new Map<number, string>());
+  const observedUploadStatusesRef = useRef(new Map<number, string>());
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const lastTaskSelectionIndexRef = useRef<number | null>(null);
+  const modalBusyRef = useRef({ applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey });
+  modalBusyRef.current = { applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey };
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
   const renameBatchConcurrency = previewWorkerCount(config?.renaming?.concurrency ?? 3);
   const renameErrorCount = renamePreview.filter((item) => item.status === 'error' || item.conflict).length;
   const renameWarningCount = renamePreview.filter((item) => item.status === 'warning').length;
   const availableToolCount = tools.filter((tool) => tool.available).length;
+  const coreToolsReady = ['ffmpeg', 'ffprobe'].every((name) => tools.some((tool) => tool.name === name && tool.available));
   const enabledWatchDirCount = watchDirs.filter((dir) => dir.enabled).length;
   const activeTaskCount = tasks.filter((task) => task.status === 'pending' || task.status === 'running').length;
   const failedTaskCount = tasks.filter((task) => task.status === 'failed').length;
+  const configDirty = Boolean(config && savedConfig && JSON.stringify(config) !== JSON.stringify(savedConfig));
+  const currentPageMeta = pageMeta[activePage];
+  const modalStackKey = [
+    directoryPicker && 'directory', targetPathEditor && 'target-path', selectedHistoryBatch && 'history-detail', renameHistoryOpen && 'history',
+    renameTemplateEditorOpen && 'template', tmdbEpisodeDetail && 'episode-detail', addEmbyKeyOpen && 'emby-key', auditTmdbMatchOpen && 'audit-tmdb', tmdbMatchOpen && 'tmdb',
+    batchEpisodeOpen && 'batch', editingWatchDir && 'edit-dir', addWatchDirOpen && 'add-dir', rescanOpen && 'rescan', selectedUploadBatch && 'upload-detail',
+    uploadCookieProvider && 'upload-cookie', (newUploadProviderOpen || uploadProviderModal) && 'upload-provider', selectedTask && 'task-detail',
+    recentArtifactsOpen && 'artifacts'
+  ].filter(Boolean).join('|');
 
   useEffect(() => {
     if (!notice) return;
@@ -899,16 +979,23 @@ export function App() {
   useEffect(() => {
     async function load() {
       try {
-        const [healthResponse, configResponse, toolsResponse, tasksResponse, dirsResponse, artifactsResponse] = await Promise.all([
+        const [healthResponse, configResponse, toolsResponse, tasksResponse, dirsResponse, artifactsResponse, desktopRuntime] = await Promise.all([
           fetch('/api/health'),
           fetch('/api/config'),
           fetch('/api/tools/status'),
           fetch(`/api/tasks?page=1&pageSize=${taskPageSize}`),
           fetch('/api/watch-dirs'),
-          fetch('/api/artifacts?limit=10')
+          fetch('/api/artifacts?limit=10'),
+          getRuntimeInfo()
         ]);
-        setHealth(await healthResponse.json());
-        setConfig(await configResponse.json());
+        const loadedHealth = await healthResponse.json() as Health;
+        const loadedConfig = await configResponse.json() as AppConfig;
+        setHealth(loadedHealth);
+        setConnectionOnline(healthResponse.ok);
+        setHealthCheckedAt(new Date());
+        setConfig(loadedConfig);
+        setSavedConfig(structuredClone(loadedConfig));
+        setRuntimeInfo(desktopRuntime);
         setTools(asArray<ToolStatus>(await toolsResponse.json()));
         applyTaskList(await tasksResponse.json());
         setWatchDirs(asArray<WatchDir>(await dirsResponse.json()));
@@ -916,12 +1003,154 @@ export function App() {
         await loadRenameHistory();
         await loadEmbyAPIKeys();
       } catch (err) {
+        setConnectionOnline(false);
         setError(err instanceof Error ? err.message : '加载失败');
+      } finally {
+        setInitialLoading(false);
       }
     }
 
     void load();
   }, [taskPageSize]);
+
+  useEffect(() => {
+    let active = true;
+    async function refreshHealth() {
+      try {
+        const response = await fetch('/api/health');
+        if (!response.ok) throw new Error(response.statusText);
+        const next = await response.json() as Health;
+        if (!active) return;
+        setHealth(next);
+        setConnectionOnline(true);
+        setHealthCheckedAt(new Date());
+      } catch {
+        if (active) {
+          setConnectionOnline(false);
+          setHealthCheckedAt(new Date());
+        }
+      }
+    }
+    const interval = window.setInterval(() => void refreshHealth(), 10000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  function requestConfirmation(request: ConfirmationRequest) {
+    setConfirmation(request);
+  }
+
+  async function acceptConfirmation() {
+    if (!confirmation || confirming) return;
+    const action = confirmation.onConfirm;
+    setConfirming(true);
+    try {
+      await action();
+      setConfirmation(null);
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!configDirty) return;
+    const preventUnload = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener('beforeunload', preventUnload);
+    return () => window.removeEventListener('beforeunload', preventUnload);
+  }, [configDirty]);
+
+  useEffect(() => {
+    function saveShortcut(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && activePage === 'settings' && configDirty) {
+        event.preventDefault();
+        void saveConfig();
+      }
+    }
+    window.addEventListener('keydown', saveShortcut);
+    return () => window.removeEventListener('keydown', saveShortcut);
+  }, [activePage, configDirty, config]);
+
+  useEffect(() => {
+    if (!modalStackKey || confirmation) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const focusTimer = window.setTimeout(() => {
+      const dialogs = Array.from(document.querySelectorAll<HTMLElement>('.modal-card')).filter((dialog) => dialog.offsetParent !== null);
+      const activeDialog = dialogs[dialogs.length - 1];
+      if (!activeDialog) return;
+      const initialFocus = activeDialog.querySelector<HTMLElement>('[autofocus]')
+        ?? activeDialog.querySelector<HTMLElement>('.icon-close-button:not(:disabled), button:not(:disabled), input:not(:disabled)');
+      if (initialFocus) initialFocus.focus();
+      else {
+        activeDialog.tabIndex = -1;
+        activeDialog.focus();
+      }
+    }, 0);
+
+    function closeTopModal() {
+      if (directoryPicker) setDirectoryPicker(null);
+      else if (targetPathEditor) setTargetPathEditor(null);
+      else if (selectedHistoryBatch) setSelectedHistoryBatch(null);
+      else if (renameHistoryOpen) setRenameHistoryOpen(false);
+      else if (renameTemplateEditorOpen) setRenameTemplateEditorOpen(false);
+      else if (tmdbEpisodeDetail) setTmdbEpisodeDetail(null);
+      else if (addEmbyKeyOpen && !modalBusyRef.current.savingEmbyKey) setAddEmbyKeyOpen(false);
+      else if (auditTmdbMatchOpen) setAuditTmdbMatchOpen(false);
+      else if (tmdbMatchOpen) setTmdbMatchOpen(false);
+      else if (batchEpisodeOpen && !modalBusyRef.current.applyingBatchEpisode) setBatchEpisodeOpen(false);
+      else if (editingWatchDir) setEditingWatchDir(null);
+      else if (addWatchDirOpen) setAddWatchDirOpen(false);
+      else if (rescanOpen && !modalBusyRef.current.rescanning) setRescanOpen(false);
+      else if (selectedUploadBatch) setSelectedUploadBatch(null);
+      else if (uploadCookieProvider && !modalBusyRef.current.savingUploadProvider) { setUploadCookieProvider(null); setCookieAuth(null); setUploadCookieValue(''); }
+      else if ((newUploadProviderOpen || uploadProviderModal) && !modalBusyRef.current.savingUploadProvider) { setNewUploadProviderOpen(false); setUploadProviderModal(null); }
+      else if (selectedTask) setSelectedTask(null);
+      else if (recentArtifactsOpen) setRecentArtifactsOpen(false);
+    }
+
+    function handleDialogKey(event: KeyboardEvent) {
+      const dialogs = Array.from(document.querySelectorAll<HTMLElement>('.modal-card')).filter((dialog) => dialog.offsetParent !== null);
+      const activeDialog = dialogs[dialogs.length - 1];
+      if (!activeDialog) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeTopModal();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(activeDialog.querySelectorAll<HTMLElement>('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'));
+      if (!focusable.length) {
+        event.preventDefault();
+        activeDialog.tabIndex = -1;
+        activeDialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!activeDialog.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener('keydown', handleDialogKey);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener('keydown', handleDialogKey);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus();
+    };
+  }, [modalStackKey, confirmation]);
 
   async function loadRenameHistory() {
     setLoadingRenameHistory(true);
@@ -980,6 +1209,24 @@ export function App() {
   }, [config?.scraping.language, renameLanguageInitialized]);
 
   function navigate(page: PageKey) {
+    if (page === activePage) return;
+    if (activePage === 'settings' && page !== 'settings' && configDirty) {
+      requestConfirmation({
+        title: '放弃设置修改？',
+        message: '当前页面包含尚未保存的修改。离开后这些修改将无法恢复。',
+        confirmLabel: '放弃并离开',
+        tone: 'danger',
+        onConfirm: () => {
+          discardConfigChanges();
+          navigateDirect(page);
+        }
+      });
+      return;
+    }
+    navigateDirect(page);
+  }
+
+  function navigateDirect(page: PageKey) {
     setActivePage(page);
     const path = pagePaths[page];
     if (window.location.pathname !== path) {
@@ -989,6 +1236,7 @@ export function App() {
 
   function applyTaskList(value: TaskListResponse | Task[] | null | undefined) {
     if (Array.isArray(value)) {
+      observeTaskStatuses(value);
       setTasks(value);
       setTaskTotal(value.length);
       setTaskPage(1);
@@ -996,6 +1244,7 @@ export function App() {
       return;
     }
     const items = asArray<Task>(value?.items);
+    observeTaskStatuses(items);
     setTasks(items);
     setTaskTotal(value?.total ?? 0);
     setTaskPage(value?.page ?? 1);
@@ -1017,9 +1266,35 @@ export function App() {
   }
 
   function applyUploadBatchList(value: UploadBatchListResponse) {
-    setUploadBatches(asArray<UploadBatch>(value.items));
+    const items = asArray<UploadBatch>(value.items);
+    observeUploadStatuses(items);
+    setUploadBatches(items);
     setUploadTotal(value.total ?? 0);
     setUploadPage(value.page ?? 1);
+  }
+
+  function observeTaskStatuses(items: Task[]) {
+    const observed = observedTaskStatusesRef.current;
+    for (const task of items) {
+      const previous = observed.get(task.id);
+      observed.set(task.id, task.status);
+      if (!previous || previous === task.status || !['completed', 'failed'].includes(task.status)) continue;
+      const name = task.mediaPath.split(/[\\/]/).pop() || task.mediaPath || `任务 #${task.id}`;
+      const failed = task.status === 'failed';
+      void notifyDesktop(failed ? '媒体任务失败' : '媒体任务完成', failed ? `${name}：${task.errorSummary || '请打开任务详情查看原因'}` : name).catch(() => {});
+    }
+  }
+
+  function observeUploadStatuses(items: UploadBatch[]) {
+    const observed = observedUploadStatusesRef.current;
+    for (const batch of items) {
+      const previous = observed.get(batch.id);
+      observed.set(batch.id, batch.status);
+      if (!previous || previous === batch.status || !['completed', 'partial', 'failed'].includes(batch.status)) continue;
+      const failed = batch.status === 'failed' || batch.status === 'partial';
+      const name = batch.seriesPath.split(/[\\/]/).pop() || batch.seriesKey || `上传批次 #${batch.id}`;
+      void notifyDesktop(failed ? '上传批次需要处理' : '上传批次完成', failed ? `${name}：${batch.failedTargets} 个目标失败` : name).catch(() => {});
+    }
   }
 
   async function loadUploadProviders() {
@@ -1057,6 +1332,44 @@ export function App() {
     }
   }
 
+  async function browseDirectory(options: { title: string; value: string; rootPath?: string; onSelect: (path: string) => void }) {
+    setError('');
+    try {
+      const result = await pickDesktopDirectory({ title: options.title, initialPath: options.value, allowedRoot: options.rootPath });
+      if (result.handled) {
+        if (result.path) options.onSelect(result.path);
+        return;
+      }
+      setDirectoryPicker(options);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '选择目录失败');
+    }
+  }
+
+  async function browseFile(options: { title: string; value: string; displayName?: string; pattern?: string; onSelect: (path: string) => void }) {
+    setError('');
+    try {
+      const result = await pickDesktopFile({ title: options.title, initialPath: options.value, displayName: options.displayName, pattern: options.pattern });
+      if (!result.handled) {
+        setNotice('浏览器管理模式不支持系统文件选择，请直接填写路径。');
+        return;
+      }
+      if (result.path) options.onSelect(result.path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '选择文件失败');
+    }
+  }
+
+  async function revealPath(path: string) {
+    if (!path) return;
+    try {
+      const handled = await revealDesktopPath(path);
+      if (!handled) setNotice('该操作仅在桌面应用中可用。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '无法在文件管理器中定位该路径');
+    }
+  }
+
   async function loadUploadBatchDetail(batchID: number) {
     try {
       const response = await fetch(`/api/uploads/${batchID}`);
@@ -1089,8 +1402,17 @@ export function App() {
     }
   }
 
-  async function deleteUploadProvider(provider: UploadProvider) {
-    if (!window.confirm(`删除上传目标“${provider.name}”？已有上传历史会阻止删除，建议优先禁用。`)) return;
+  function deleteUploadProvider(provider: UploadProvider) {
+    requestConfirmation({
+      title: `删除“${provider.name}”？`,
+      message: '该上传目标将停止接收新批次。已有上传历史会阻止删除，通常更建议先禁用目标。',
+      confirmLabel: '删除上传目标',
+      tone: 'danger',
+      onConfirm: () => performDeleteUploadProvider(provider)
+    });
+  }
+
+  async function performDeleteUploadProvider(provider: UploadProvider) {
     try {
       const response = await fetch(`/api/upload/providers/${provider.id}`, { method: 'DELETE' });
       if (!response.ok) throw new Error(await response.text());
@@ -1153,7 +1475,21 @@ export function App() {
     }
   }
 
-  async function actOnUploadTarget(target: UploadBatchTarget, action: 'retry' | 'cancel') {
+  function actOnUploadTarget(target: UploadBatchTarget, action: 'retry' | 'cancel') {
+    if (action === 'cancel') {
+      requestConfirmation({
+        title: `取消向“${target.providerName}”上传？`,
+        message: '尚未传输的文件将停止；已经上传到远端的文件不会被删除。之后可以手动重新排队。',
+        confirmLabel: '取消上传',
+        tone: 'danger',
+        onConfirm: () => performUploadTargetAction(target, action)
+      });
+      return;
+    }
+    void performUploadTargetAction(target, action);
+  }
+
+  async function performUploadTargetAction(target: UploadBatchTarget, action: 'retry' | 'cancel') {
     setUploadTargetActionID(target.id);
     try {
       const response = await fetch(`/api/uploads/targets/${target.id}/${action}`, { method: 'POST' });
@@ -1184,6 +1520,36 @@ export function App() {
     }, uploadListRefreshIntervalMs);
     return () => window.clearInterval(interval);
   }, [activePage, uploadPage, uploadStatusFilter, uploadPathFilter, taskPageSize]);
+
+  useEffect(() => {
+    if (!runtimeInfo?.desktop) return;
+    let active = true;
+    async function pollDesktopNotifications() {
+      try {
+        const [tasksResponse, uploadsResponse] = await Promise.all([
+          fetch('/api/tasks?page=1&pageSize=50'),
+          fetch('/api/uploads?page=1&pageSize=50')
+        ]);
+        if (!active) return;
+        if (tasksResponse.ok) {
+          const value = await tasksResponse.json() as TaskListResponse;
+          observeTaskStatuses(asArray<Task>(value.items));
+        }
+        if (uploadsResponse.ok) {
+          const value = await uploadsResponse.json() as UploadBatchListResponse;
+          observeUploadStatuses(asArray<UploadBatch>(value.items));
+        }
+      } catch {
+        // Notification polling must not replace the main connection status.
+      }
+    }
+    void pollDesktopNotifications();
+    const interval = window.setInterval(() => void pollDesktopNotifications(), desktopNotificationPollIntervalMs);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [runtimeInfo?.desktop]);
 
   useEffect(() => {
     if (!selectedUploadBatch) return;
@@ -1281,11 +1647,31 @@ export function App() {
     setRenamePreviewCount(0);
     setRenamePreviewTotal(0);
     setSelectedRenamePaths([]);
+    const controller = new AbortController();
+    renamePreviewAbortRef.current = controller;
     try {
+      const input = {
+        path: renamePath.trim(),
+        template: renameTemplate,
+        matchPattern: renameMatchPattern,
+        bypassTmdbCache,
+        language: renameLanguage,
+        releaseGroup: renameReleaseGroup.trim()
+      };
+      const handledByDesktop = await previewDesktopRename(input, (event) => applyRenamePreviewMessage({
+        type: event.type,
+        item: event.item as RenamePreviewItem | undefined,
+        count: event.count,
+        total: event.total,
+        error: event.error
+      }), controller.signal);
+      if (handledByDesktop) return;
+
       const response = await fetch('/api/rename/preview/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: renamePath.trim(), template: renameTemplate, matchPattern: renameMatchPattern, bypassTmdbCache, language: renameLanguage, releaseGroup: renameReleaseGroup.trim() })
+        body: JSON.stringify(input),
+        signal: controller.signal
       });
       if (!response.ok) {
         setError(await response.text());
@@ -1313,10 +1699,20 @@ export function App() {
         handleRenamePreviewMessage(pending);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '生成预览失败');
+      if (err instanceof Error && err.name === 'AbortError') {
+        setError('');
+        setNotice('已取消重命名预览。');
+      } else {
+        setError(err instanceof Error ? err.message : '生成预览失败');
+      }
     } finally {
+      if (renamePreviewAbortRef.current === controller) renamePreviewAbortRef.current = null;
       setPreviewingRename(false);
     }
+  }
+
+  function cancelRenamePreview() {
+    renamePreviewAbortRef.current?.abort();
   }
 
   function rememberRenamePreferences() {
@@ -1342,7 +1738,10 @@ export function App() {
 
   function handleRenamePreviewMessage(line: string) {
     if (!line.trim()) return;
-    const message = JSON.parse(line) as RenamePreviewStreamMessage;
+    applyRenamePreviewMessage(JSON.parse(line) as RenamePreviewStreamMessage);
+  }
+
+  function applyRenamePreviewMessage(message: RenamePreviewStreamMessage) {
     if (message.type === 'start') {
       setRenamePreviewTotal(message.total ?? 0);
     } else if (message.type === 'item' && message.item) {
@@ -1580,15 +1979,21 @@ export function App() {
     }
   }
 
-  async function applySelectedRenames() {
+  function applySelectedRenames() {
     const targets = renamePreview.filter((item) => selectedRenamePaths.includes(item.path));
     if (!targets.length) {
       setError('请先勾选要重命名的文件');
       return;
     }
-    if (!window.confirm(`确认重命名选中的 ${targets.length} 个文件？不会覆盖已存在的目标文件。`)) {
-      return;
-    }
+    requestConfirmation({
+      title: `重命名 ${targets.length} 个文件？`,
+      message: '应用会同时移动匹配的字幕、NFO、图片等伴生文件，并拒绝覆盖已经存在的目标。操作完成后可以从历史记录撤销。',
+      confirmLabel: '应用重命名',
+      onConfirm: () => performSelectedRenames(targets)
+    });
+  }
+
+  async function performSelectedRenames(targets: RenamePreviewItem[]) {
     setApplyingRename(true);
     setError('');
     setNotice('');
@@ -1629,9 +2034,16 @@ export function App() {
       setSelectedHistoryBatch(check.batch);
       return;
     }
-    if (!window.confirm(`确认撤销该批次的 ${check.items.length} 个文件移动？`)) {
-      return;
-    }
+    requestConfirmation({
+      title: `撤销 ${check.items.length} 个文件移动？`,
+      message: '文件将恢复到该批次执行前的位置。若路径已被其他文件占用，撤销会停止并保留当前状态。',
+      confirmLabel: '撤销该批次',
+      tone: 'danger',
+      onConfirm: () => performUndoRenameBatch(id)
+    });
+  }
+
+  async function performUndoRenameBatch(id: string) {
     setUndoingHistoryId(id);
     setError('');
     try {
@@ -1712,7 +2124,18 @@ export function App() {
     return true;
   }
 
-  async function deleteWatchDir(id: number) {
+  function deleteWatchDir(id: number) {
+    const directory = watchDirs.find((item) => item.id === id);
+    requestConfirmation({
+      title: '移除媒体目录？',
+      message: `${directory?.path ?? '该目录'} 将不再被自动监听。已有任务、产物和媒体文件不会被删除。`,
+      confirmLabel: '移除目录',
+      tone: 'danger',
+      onConfirm: () => performDeleteWatchDir(id)
+    });
+  }
+
+  async function performDeleteWatchDir(id: number) {
     setError('');
     const response = await fetch(`/api/watch-dirs/${id}`, { method: 'DELETE' });
     if (!response.ok) {
@@ -1720,6 +2143,7 @@ export function App() {
       return;
     }
     setWatchDirs((items) => items.filter((item) => item.id !== id));
+    setNotice('媒体目录已移除，磁盘上的文件未被修改。');
   }
 
   async function rescan() {
@@ -1909,7 +2333,18 @@ export function App() {
     }
   }
 
-  async function deleteEmbyAPIKey(id: number) {
+  function deleteEmbyAPIKey(id: number) {
+    const key = auditEmbyAPIKeys.find((item) => item.id === id);
+    requestConfirmation({
+      title: `删除 API Key“${key?.title ?? ''}”？`,
+      message: '删除后无法恢复。该操作不会影响 Emby 服务器上的其他 API Key。',
+      confirmLabel: '删除 API Key',
+      tone: 'danger',
+      onConfirm: () => performDeleteEmbyAPIKey(id)
+    });
+  }
+
+  async function performDeleteEmbyAPIKey(id: number) {
     setError('');
     const response = await fetch(`/api/emby-api-keys/${id}`, { method: 'DELETE' });
     if (!response.ok) {
@@ -1920,6 +2355,7 @@ export function App() {
     if (auditSelectedEmbyKeyId === String(id)) {
       setAuditSelectedEmbyKeyId('');
     }
+    setNotice('Emby API Key 已删除。');
   }
 
   async function fetchTaskDetail(id: number) {
@@ -2025,8 +2461,17 @@ export function App() {
     }
   }
 
-  async function cancelActiveTasks() {
-    if (!window.confirm('确定取消所有待执行和执行中的任务吗？')) return;
+  function cancelActiveTasks() {
+    requestConfirmation({
+      title: '取消全部活动任务？',
+      message: `将取消当前列表中的待执行和执行中任务。已经生成的文件不会自动删除。`,
+      confirmLabel: '取消活动任务',
+      tone: 'danger',
+      onConfirm: performCancelActiveTasks
+    });
+  }
+
+  async function performCancelActiveTasks() {
     setCancelingTasks(true);
     setError('');
     setNotice('');
@@ -2067,7 +2512,9 @@ export function App() {
       }
       const result = await response.json();
       setConfig(result.config);
-      setNotice(result.restartRequired ? '配置已保存，部分后台任务需要重启服务后生效。' : '配置已保存。');
+      setSavedConfig(structuredClone(result.config));
+      setRestartRequired(Boolean(result.restartRequired));
+      setNotice('配置已保存。');
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存配置失败');
     } finally {
@@ -2084,33 +2531,94 @@ export function App() {
     });
   }
 
+  function discardConfigChanges() {
+    if (!savedConfig) return;
+    setConfig(structuredClone(savedConfig));
+    setNotice('未保存的设置已放弃。');
+  }
+
+  function handleSettingsTabKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, currentTab: SettingsTab) {
+    const currentIndex = settingsTabOptions.findIndex((option) => option.value === currentTab);
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % settingsTabOptions.length;
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + settingsTabOptions.length) % settingsTabOptions.length;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = settingsTabOptions.length - 1;
+    if (nextIndex === null) return;
+
+    event.preventDefault();
+    const nextTab = settingsTabOptions[nextIndex].value;
+    setSettingsTab(nextTab);
+    document.getElementById(`settings-tab-${nextTab}`)?.focus();
+  }
+
   const extensionInput = config?.processing.extensions?.join('\n') ?? '';
+  const CurrentPageIcon = currentPageMeta.icon;
 
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <div>
-          <p className="eyebrow">NyaMediaMetadataTool</p>
-          <h1>媒体元数据管理后台</h1>
-          <p className="summary">本地媒体伴生文件、NFO、BIF、字幕和刮削任务管理。</p>
+        <div className="brand-lockup">
+          <span className="brand-mark" aria-hidden="true"><Film size={20} /></span>
+          <div className="brand-copy">
+            <h1>Nya Media</h1>
+            <span>Metadata Desktop</span>
+          </div>
         </div>
-        <nav className="module-nav" aria-label="后台模块">
-          <TabButton active={activePage === 'dashboard'} label="Dashboard" onClick={() => navigate('dashboard')} />
-          <TabButton active={activePage === 'settings'} label="设置" onClick={() => navigate('settings')} />
-          <TabButton active={activePage === 'watchDirs'} label="媒体目录" onClick={() => navigate('watchDirs')} />
-          <TabButton active={activePage === 'tasks'} label="任务" onClick={() => navigate('tasks')} />
-          <TabButton active={activePage === 'uploads'} label="上传" onClick={() => navigate('uploads')} />
-          <TabButton active={activePage === 'rename'} label="整理命名" onClick={() => navigate('rename')} />
-          <TabButton active={activePage === 'audit'} label="剧集核对" onClick={() => navigate('audit')} />
+        <nav className="module-nav" aria-label="应用模块">
+          <p className="nav-section-label">工作台</p>
+          {workspacePages.map((page) => <TabButton key={page} active={activePage === page} label={pageMeta[page].title} icon={pageMeta[page].icon} onClick={() => navigate(page)} />)}
+          <p className="nav-section-label">自动化</p>
+          {automationPages.map((page) => (
+            <TabButton
+              key={page}
+              active={activePage === page}
+              label={pageMeta[page].title}
+              icon={pageMeta[page].icon}
+              badge={page === 'tasks' && activeTaskCount ? activeTaskCount : page === 'uploads' && uploadSummary.failed ? uploadSummary.failed : undefined}
+              badgeTone={page === 'uploads' && uploadSummary.failed ? 'danger' : 'default'}
+              onClick={() => navigate(page)}
+            />
+          ))}
         </nav>
-        <div className="service-mini">
-          <span>服务状态</span>
-          <strong>{health?.status ?? 'loading'}</strong>
+        <div className="sidebar-footer">
+          <TabButton active={activePage === 'settings'} label={pageMeta.settings.title} icon={Settings} badge={configDirty ? 1 : undefined} badgeTone="warn" onClick={() => navigate('settings')} />
+          <button className="service-mini" type="button" onClick={() => navigate('dashboard')}>
+            <span className={connectionOnline ? 'connection-dot online' : 'connection-dot offline'} aria-hidden="true" />
+            <span className="service-copy"><strong>{connectionOnline ? '后台运行正常' : '连接已中断'}</strong><small>{healthCheckedAt ? `${healthCheckedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 更新` : '正在连接'}</small></span>
+            <Activity size={16} aria-hidden="true" />
+          </button>
         </div>
       </aside>
 
       <section className="content-panel">
-        {notice && <section className="toast-card" role="status">{notice}</section>}
+        <header className="workspace-header">
+          <div className="workspace-title">
+            <span className="workspace-title-icon" aria-hidden="true"><CurrentPageIcon size={19} /></span>
+            <div>
+              <h2>{currentPageMeta.title}</h2>
+              <p>{currentPageMeta.description}</p>
+            </div>
+          </div>
+          <div className="workspace-status">
+            <span className="environment-chip" title={runtimeInfo?.desktop ? runtimeInfo.dataDir : '通过浏览器访问后台服务'}>
+              {runtimeInfo?.desktop ? <Monitor size={15} /> : <Database size={15} />}
+              {runtimeInfo?.desktop ? `${runtimeInfo.platform} · ${runtimeInfo.version}` : 'Web 管理模式'}
+            </span>
+            <button className="icon-button secondary" type="button" title="刷新页面" aria-label="刷新页面" onClick={() => window.location.reload()}><RefreshCw size={17} /></button>
+          </div>
+        </header>
+
+        {restartRequired && (
+          <section className="restart-banner" role="status">
+            <RefreshCw size={18} aria-hidden="true" />
+            <div><strong>配置将在重启后完全生效</strong><span>当前任务可以继续运行；完成后关闭并重新打开应用即可。</span></div>
+          </section>
+        )}
+        {notice && <section className="toast-card" role="status"><CheckCircle2 size={18} /><span>{notice}</span><button className="toast-close" type="button" aria-label="关闭通知" onClick={() => setNotice('')}><X size={16} /></button></section>}
+        {initialLoading && <InitialLoading />}
+
+        <div className={initialLoading ? 'workspace-content loading' : 'workspace-content'}>
 
         {activePage === 'dashboard' && (
         <section className="dashboard-page">
@@ -2130,11 +2638,25 @@ export function App() {
             </div>
           </section>
 
+          {(!coreToolsReady || watchDirs.length === 0) && (
+            <section className="setup-checklist" aria-labelledby="setup-checklist-title">
+              <div className="setup-checklist-heading">
+                <div><span className="eyebrow">运行准备</span><h3 id="setup-checklist-title">完成基础配置</h3></div>
+                <span className="setup-progress">{Number(coreToolsReady) + Number(watchDirs.length > 0)}/2 已完成</span>
+              </div>
+              <div className="setup-rows">
+                <SetupRow icon={FileCheck2} title="媒体工具" detail={coreToolsReady ? 'ffmpeg 与 ffprobe 已可用' : '需要配置 ffmpeg 与 ffprobe'} complete={coreToolsReady} actionLabel={coreToolsReady ? undefined : '配置工具'} onAction={() => { setSettingsTab('basic'); navigate('settings'); }} />
+                <SetupRow icon={FolderCog} title="媒体目录" detail={watchDirs.length ? `已添加 ${watchDirs.length} 个目录` : '尚未添加自动扫描目录'} complete={watchDirs.length > 0} actionLabel={watchDirs.length ? undefined : '添加目录'} onAction={() => { setNewWatchDirProcessing(outputProcessingFromConfig(config)); setAddWatchDirOpen(true); }} />
+                <SetupRow icon={WandSparkles} title="元数据来源" detail={config?.scraping.enableTmdb ? 'TMDB 刮削已开启' : '可选：配置 TMDB 以补全剧集资料'} complete={Boolean(config?.scraping.enableTmdb)} optional actionLabel={config?.scraping.enableTmdb ? undefined : '查看设置'} onAction={() => { setSettingsTab('scraping'); navigate('settings'); }} />
+              </div>
+            </section>
+          )}
+
           <section className="dashboard-content-grid">
             <Card title="配置摘要">
-              <Row label="监听地址" value={config?.server.addr ?? '-'} />
+              <Row label="运行模式" value={runtimeInfo?.desktop ? '桌面内置服务（无本地端口）' : `Web · ${config?.server.addr ?? '-'}`} />
               <Row label="显示时区" value={displayTimezone} />
-              <Row label="数据库" value={config?.database.path ?? '-'} />
+              <Row label="数据库" value={runtimeInfo?.database || config?.database.path || '-'} />
               <Row label="扫描并发" value={String(config?.processing.concurrency ?? '-')} />
               <Row label="重命名并发" value={String(config?.renaming?.concurrency ?? '-')} />
               <Row label="扩展名" value={config?.processing.extensions?.join(', ') ?? '-'} />
@@ -2169,27 +2691,34 @@ export function App() {
 
         {activePage === 'settings' && (
         <section className="page-grid settings-grid">
-            <Card title="设置" action={<button onClick={saveConfig} disabled={savingConfig || !config || (config.upload.includeTypes ?? []).length === 0}>{savingConfig ? '保存中' : '保存配置'}</button>}>
+            <Card title="设置" action={<div className="inline-actions"><button className="secondary icon-text-button" type="button" onClick={discardConfigChanges} disabled={!configDirty || savingConfig}><RefreshCw size={16} />放弃修改</button><button className="icon-text-button" onClick={saveConfig} disabled={savingConfig || !configDirty || !config || (config.upload.includeTypes ?? []).length === 0}><Save size={16} />{savingConfig ? '保存中' : '保存配置'}</button></div>}>
             {config ? (
               <div className="config-form settings-form">
-                <div className="settings-tabs" role="tablist" aria-label="设置分类">
-                  <button className={settingsTab === 'basic' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'basic'} onClick={() => setSettingsTab('basic')}>基础</button>
-                  <button className={settingsTab === 'processing' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'processing'} onClick={() => setSettingsTab('processing')}>处理</button>
-                  <button className={settingsTab === 'uploads' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'uploads'} onClick={() => setSettingsTab('uploads')}>上传</button>
-                  <button className={settingsTab === 'scraping' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'scraping'} onClick={() => setSettingsTab('scraping')}>刮削</button>
-                  <button className={settingsTab === 'sources' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={settingsTab === 'sources'} onClick={() => setSettingsTab('sources')}>数据源</button>
+                <div className="settings-tabs" role="tablist" aria-label="设置分类" aria-orientation="horizontal">
+                  {settingsTabOptions.map((option) => <button
+                    id={`settings-tab-${option.value}`}
+                    className={settingsTab === option.value ? 'status-tab active' : 'status-tab'}
+                    type="button"
+                    role="tab"
+                    aria-selected={settingsTab === option.value}
+                    aria-controls={`settings-panel-${option.value}`}
+                    tabIndex={settingsTab === option.value ? 0 : -1}
+                    key={option.value}
+                    onClick={() => setSettingsTab(option.value)}
+                    onKeyDown={(event) => handleSettingsTabKeyDown(event, option.value)}
+                  >{option.label}</button>)}
                 </div>
-                <section className={`settings-section ${settingsTab === 'basic' ? 'active' : ''}`}>
+                <section id="settings-panel-basic" className={`settings-section ${settingsTab === 'basic' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-basic" hidden={settingsTab !== 'basic'}>
                   <label>显示时区<input list="timezone-options" value={config.server.timezone} onChange={(event) => updateConfig((draft) => { draft.server.timezone = event.target.value; })} placeholder="Asia/Shanghai" /></label>
                   <datalist id="timezone-options">
                     {timeZoneOptions.map((timezone) => <option key={timezone} value={timezone} />)}
                   </datalist>
-                  <label>ffmpeg<input value={config.tools.ffmpeg} onChange={(event) => updateConfig((draft) => { draft.tools.ffmpeg = event.target.value; })} /></label>
-                  <label>ffprobe<input value={config.tools.ffprobe} onChange={(event) => updateConfig((draft) => { draft.tools.ffprobe = event.target.value; })} /></label>
-                  <label>mkvextract<input value={config.tools.mkvextract} onChange={(event) => updateConfig((draft) => { draft.tools.mkvextract = event.target.value; })} /></label>
-                  <label>mediainfo<input value={config.tools.mediainfo} onChange={(event) => updateConfig((draft) => { draft.tools.mediainfo = event.target.value; })} /></label>
+                  <PathField label="ffmpeg" value={config.tools.ffmpeg} onChange={(value) => updateConfig((draft) => { draft.tools.ffmpeg = value; })} onBrowse={() => void browseFile({ title: '选择 ffmpeg', value: config.tools.ffmpeg, onSelect: (value) => updateConfig((draft) => { draft.tools.ffmpeg = value; }) })} />
+                  <PathField label="ffprobe" value={config.tools.ffprobe} onChange={(value) => updateConfig((draft) => { draft.tools.ffprobe = value; })} onBrowse={() => void browseFile({ title: '选择 ffprobe', value: config.tools.ffprobe, onSelect: (value) => updateConfig((draft) => { draft.tools.ffprobe = value; }) })} />
+                  <PathField label="mkvextract" value={config.tools.mkvextract} onChange={(value) => updateConfig((draft) => { draft.tools.mkvextract = value; })} onBrowse={() => void browseFile({ title: '选择 mkvextract', value: config.tools.mkvextract, onSelect: (value) => updateConfig((draft) => { draft.tools.mkvextract = value; }) })} />
+                  <PathField label="mediainfo" value={config.tools.mediainfo} onChange={(value) => updateConfig((draft) => { draft.tools.mediainfo = value; })} onBrowse={() => void browseFile({ title: '选择 mediainfo', value: config.tools.mediainfo, onSelect: (value) => updateConfig((draft) => { draft.tools.mediainfo = value; }) })} />
                 </section>
-                <section className={`settings-section ${settingsTab === 'processing' ? 'active' : ''}`}>
+                <section id="settings-panel-processing" className={`settings-section ${settingsTab === 'processing' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-processing" hidden={settingsTab !== 'processing'}>
                   <label className="extensions-field">扩展名<textarea value={extensionInput} onChange={(event) => updateConfig((draft) => { draft.processing.extensions = normalizeExtensions(event.target.value); })} placeholder={commonVideoExtensions.join('\n')} rows={8} /><small>每行一个后缀，或用逗号分隔，例如 `.mkv`、`.mp4`、`.rmvb`。</small></label>
                   <label>扫描处理并发<input type="number" min="1" value={config.processing.concurrency} onChange={(event) => updateConfig((draft) => { draft.processing.concurrency = Number(event.target.value); })} /></label>
                   <label>整理命名并发<input type="number" min="1" max="8" value={config.renaming?.concurrency ?? 3} onChange={(event) => updateConfig((draft) => { draft.renaming = { ...(draft.renaming ?? { concurrency: 3 }), concurrency: Number(event.target.value) }; })} /><small>用于生成预览、批量修正季集、批量应用剧集；设为 1 可降低 TMDB 风控风险。</small></label>
@@ -2202,7 +2731,7 @@ export function App() {
                   <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
                   <SelectField label="BIF 加速" value={config.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => updateConfig((draft) => { draft.processing.bifHwAccel = value; })} />
                 </section>
-                <section className={`settings-section settings-section-wide ${settingsTab === 'uploads' ? 'active' : ''}`}>
+                <section id="settings-panel-uploads" className={`settings-section settings-section-wide ${settingsTab === 'uploads' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-uploads" hidden={settingsTab !== 'uploads'}>
                   <SettingsGroup title="上传调度">
                     <Toggle label="元数据完成后自动创建上传批次" checked={config.upload.enabled} onChange={(value) => updateConfig((draft) => { draft.upload.enabled = value; })} />
                     <label>上传目标并发<input type="number" min="1" max="8" value={config.upload.concurrency} onChange={(event) => updateConfig((draft) => { draft.upload.concurrency = Number(event.target.value); })} /></label>
@@ -2212,7 +2741,7 @@ export function App() {
                     <p className="settings-note">网盘账号、Cookie 和目标目录在“上传”页面管理。一个批次会为每个启用目标保留独立状态，后续通知可按目标分别消费。</p>
                   </SettingsGroup>
                 </section>
-                <section className={`settings-section settings-section-wide ${settingsTab === 'scraping' ? 'active' : ''}`}>
+                <section id="settings-panel-scraping" className={`settings-section settings-section-wide ${settingsTab === 'scraping' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-scraping" hidden={settingsTab !== 'scraping'}>
                   <SettingsGroup title="刮削内容">
                     <Toggle label="TMDB 刮削" checked={config.scraping.enableTmdb} onChange={(value) => updateConfig((draft) => { draft.scraping.enableTmdb = value; })} />
                     <Toggle label="刮削演员/职员" checked={config.scraping.enablePeople} onChange={(value) => updateConfig((draft) => { draft.scraping.enablePeople = value; })} />
@@ -2226,7 +2755,7 @@ export function App() {
                     <ImageSourcePriorityPicker label="图片源顺序" values={config.scraping.imageSources ?? []} onChange={(values) => updateConfig((draft) => { draft.scraping.imageSources = values; })} />
                   </SettingsGroup>
                 </section>
-                <section className={`settings-section settings-section-wide ${settingsTab === 'sources' ? 'active' : ''}`}>
+                <section id="settings-panel-sources" className={`settings-section settings-section-wide ${settingsTab === 'sources' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-sources" hidden={settingsTab !== 'sources'}>
                   <SettingsGroup title="TMDB">
                     <label>Token<input type="password" value={config.scraping.tmdbToken} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbToken = event.target.value; })} placeholder="Bearer token" /></label>
                     <label>API Key<input value={config.scraping.tmdbApiKey} onChange={(event) => updateConfig((draft) => { draft.scraping.tmdbApiKey = event.target.value; })} placeholder="可选，优先使用 Token" /></label>
@@ -2273,7 +2802,7 @@ export function App() {
         <section className="page-grid rename-page-grid">
           <Card title="整理命名" action={<button className="secondary" type="button" onClick={() => setRenameHistoryOpen(true)}>重命名历史{renameHistory.length ? ` (${renameHistory.length})` : ''}</button>}>
             <div className="rename-controls">
-              <label className="rename-control-primary">目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}>选择</button></div></label>
+              <label className="rename-control-primary">目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" className="icon-text-button" onClick={() => void browseDirectory({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}><FolderOpen size={16} />选择</button></div></label>
               <label className="rename-control-primary">命名模板
                 <div className="template-input-row">
                   <button className="target-path-preview rename-template-preview" type="button" onClick={() => setRenameTemplateEditorOpen(true)}>{renameTemplate || defaultRenameTemplate}</button>
@@ -2291,7 +2820,7 @@ export function App() {
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <label>字幕组<input value={renameReleaseGroup} onChange={(event) => setRenameReleaseGroup(event.target.value)} placeholder="留空则从原文件名识别" /></label>
               <div className="rename-preview-action">
-                <button className="secondary" type="button" onClick={() => void previewRename(true)} disabled={previewingRename}>忽略缓存重新生成</button>
+                <button className="secondary" type="button" onClick={previewingRename ? cancelRenamePreview : () => void previewRename(true)}>{previewingRename ? '取消预览' : '忽略缓存重新生成'}</button>
                 <button type="button" onClick={() => void previewRename()} disabled={previewingRename}>{previewingRename ? renamePreviewTotal ? `生成预览 ${renamePreviewCount} / ${renamePreviewTotal}` : '正在扫描文件…' : '生成预览'}</button>
               </div>
             </div>
@@ -2383,15 +2912,15 @@ export function App() {
 
         {activePage === 'audit' && (
         <section className="page-grid audit-page-grid">
-          <div className="audit-tabs" role="tablist" aria-label="核对类型">
-            <button className={auditTab === 'missing' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'missing'} onClick={() => setAuditTab('missing')}>剧集缺漏</button>
-            <button className={auditTab === 'emby' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'emby'} onClick={() => setAuditTab('emby')}>Emby 与本地核对</button>
-            <button className={auditTab === 'files' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'files'} onClick={() => setAuditTab('files')}>文件对齐检查</button>
+          <div className="audit-tabs" role="group" aria-label="核对类型">
+            <button className={auditTab === 'missing' ? 'status-tab active' : 'status-tab'} type="button" aria-pressed={auditTab === 'missing'} onClick={() => setAuditTab('missing')}>剧集缺漏</button>
+            <button className={auditTab === 'emby' ? 'status-tab active' : 'status-tab'} type="button" aria-pressed={auditTab === 'emby'} onClick={() => setAuditTab('emby')}>Emby 与本地核对</button>
+            <button className={auditTab === 'files' ? 'status-tab active' : 'status-tab'} type="button" aria-pressed={auditTab === 'files'} onClick={() => setAuditTab('files')}>文件对齐检查</button>
           </div>
 
           {auditTab === 'missing' && <Card title="剧集缺漏" action={<button onClick={() => runSeriesAudit('missing')} disabled={auditingMissing}>{auditingMissing ? '核对中' : '开始核对'}</button>}>
             <div className="audit-controls">
-              <label>剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择剧集根目录', value: auditRoot, onSelect: setAuditRoot })}>选择</button></div></label>
+              <label>剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" className="icon-text-button" onClick={() => void browseDirectory({ title: '选择剧集根目录', value: auditRoot, onSelect: setAuditRoot })}><FolderOpen size={16} />选择</button></div></label>
               <label><FieldLabel label="TMDB 剧集 ID" help="留空时读取 tvshow.nfo 中的 TMDB ID；手动填写或选择剧集会覆盖自动读取的 ID。" /><div className="path-input"><input value={auditTmdbId} onChange={(event) => setAuditTmdbId(event.target.value)} inputMode="numeric" placeholder="可选，优先于 tvshow.nfo" /><button type="button" onClick={openAuditTmdbMatch}>选择剧集</button></div></label>
             </div>
             <div className="audit-option-row">
@@ -2407,7 +2936,7 @@ export function App() {
                   <span>选择本地剧集，并粘贴对应的 Emby 剧集详情页地址。</span>
                 </div>
                 <div className="emby-audit-targets">
-                  <label>本地剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择本地剧集根目录', value: auditRoot, onSelect: setAuditRoot })}>选择</button></div></label>
+                  <label>本地剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" className="icon-text-button" onClick={() => void browseDirectory({ title: '选择本地剧集根目录', value: auditRoot, onSelect: setAuditRoot })}><FolderOpen size={16} />选择</button></div></label>
                   <label>Emby 剧集页面 URL<input value={auditEmbyItemUrl} onChange={(event) => setAuditEmbyItemUrl(event.target.value)} placeholder="https://emby.example.com/web/index.html#!/item?id=662" /></label>
                 </div>
               </section>
@@ -2425,7 +2954,7 @@ export function App() {
                           {auditSelectedEmbyKeyId === String(key.id) ? <span className="emby-key-check" aria-hidden="true">✓</span> : null}
                           <span>{key.title}</span>
                         </button>
-                        <button className="template-history-delete" type="button" title="删除 API Key" aria-label={`删除 API Key ${key.title}`} onClick={() => void deleteEmbyAPIKey(key.id)}><span aria-hidden="true">&times;</span></button>
+                        <button className="template-history-delete" type="button" title="删除 API Key" aria-label={`删除 API Key ${key.title}`} onClick={() => deleteEmbyAPIKey(key.id)}><X size={15} aria-hidden="true" /></button>
                       </div>
                     ))}
                     <button className="emby-key-add" type="button" onClick={() => { setNewEmbyKeyTitle(''); setNewEmbyKeyValue(''); setAddEmbyKeyOpen(true); }}>+ 添加 API Key</button>
@@ -2446,7 +2975,7 @@ export function App() {
                   <span>比较本地目录与远端 SFTP 目录中的文件树。</span>
                 </div>
                 <div className="file-audit-targets">
-                  <label>本地目录<div className="path-input"><input value={fileAuditLocalRoot} onChange={(event) => setFileAuditLocalRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" onClick={() => setDirectoryPicker({ title: '选择本地目录', value: fileAuditLocalRoot, onSelect: setFileAuditLocalRoot })}>选择</button></div></label>
+                  <label>本地目录<div className="path-input"><input value={fileAuditLocalRoot} onChange={(event) => setFileAuditLocalRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" className="icon-text-button" onClick={() => void browseDirectory({ title: '选择本地目录', value: fileAuditLocalRoot, onSelect: setFileAuditLocalRoot })}><FolderOpen size={16} />选择</button></div></label>
                   <label>远端目录<input value={fileAuditRemoteRoot} onChange={(event) => setFileAuditRemoteRoot(event.target.value)} placeholder="/media/TV/Example Show" /></label>
                 </div>
               </section>
@@ -2459,8 +2988,8 @@ export function App() {
                   <label>SFTP 地址<input value={fileAuditSFTPAddr} onChange={(event) => setFileAuditSFTPAddr(event.target.value)} placeholder="nas.example.com:22" /></label>
                   <label>SFTP 用户<input value={fileAuditSFTPUser} onChange={(event) => setFileAuditSFTPUser(event.target.value)} placeholder="user" /></label>
                   <label>SFTP 密码<input type="password" value={fileAuditSFTPPassword} onChange={(event) => setFileAuditSFTPPassword(event.target.value)} placeholder="可选，不保存" /></label>
-                  <label>私钥路径<input value={fileAuditSFTPKeyPath} onChange={(event) => setFileAuditSFTPKeyPath(event.target.value)} placeholder="C:\Users\me\.ssh\id_ed25519" /></label>
-                  <label>known_hosts<input value={fileAuditSFTPKnownHostsPath} onChange={(event) => setFileAuditSFTPKnownHostsPath(event.target.value)} placeholder="C:\Users\me\.ssh\known_hosts" /></label>
+                  <PathField label="私钥路径" value={fileAuditSFTPKeyPath} placeholder="C:\Users\me\.ssh\id_ed25519" onChange={setFileAuditSFTPKeyPath} onBrowse={() => void browseFile({ title: '选择 SFTP 私钥', value: fileAuditSFTPKeyPath, onSelect: setFileAuditSFTPKeyPath })} />
+                  <PathField label="known_hosts" value={fileAuditSFTPKnownHostsPath} placeholder="C:\Users\me\.ssh\known_hosts" onChange={setFileAuditSFTPKnownHostsPath} onBrowse={() => void browseFile({ title: '选择 known_hosts', value: fileAuditSFTPKnownHostsPath, onSelect: setFileAuditSFTPKnownHostsPath })} />
                 </div>
                 <div className="file-audit-security-option">
                   <Toggle label={<FieldLabel label="跳过 SFTP 主机指纹校验" help="仅在无法提供 known_hosts 时使用。开启后无法验证连接的远端主机身份。" />} checked={fileAuditSFTPInsecure} onChange={setFileAuditSFTPInsecure} />
@@ -2680,8 +3209,8 @@ export function App() {
           </Card>
 
           <Card title="上传批次" action={<button className="secondary" type="button" onClick={() => void refreshUploads(1)}>刷新队列</button>}>
-            <div className="task-status-tabs" role="tablist" aria-label="上传批次状态过滤">
-              {uploadStatusFilters.map((status) => <button className={uploadStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} role="tab" aria-selected={uploadStatusFilter === status.value} onClick={() => { setUploadStatusFilter(status.value); void refreshUploads(1, status.value); }}>{status.label}</button>)}
+            <div className="task-status-tabs" role="group" aria-label="上传批次状态过滤">
+              {uploadStatusFilters.map((status) => <button className={uploadStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} aria-pressed={uploadStatusFilter === status.value} onClick={() => { setUploadStatusFilter(status.value); void refreshUploads(1, status.value); }}>{status.label}</button>)}
             </div>
             <div className="task-filters upload-filters">
               <label>番剧路径<input value={uploadPathFilter} onChange={(event) => setUploadPathFilter(event.target.value)} placeholder="输入番剧目录关键字" /></label>
@@ -2718,9 +3247,9 @@ export function App() {
         {activePage === 'tasks' && (
         <section className="page-grid task-page-grid">
           <Card title="任务列表" action={<div className="inline-actions"><button className="secondary" type="button" onClick={() => setRecentArtifactsOpen(true)}>最近产物</button><button className="secondary" onClick={() => void retrySelectedTasks()} disabled={retryingTasks || selectedTaskIds.length === 0}>{retryingTasks ? '重试中' : `重试选中${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="secondary" onClick={() => void ignoreSelectedTasks()} disabled={ignoringTasks || selectedTaskIds.length === 0}>{ignoringTasks ? '忽略中' : `忽略失败${selectedTaskIds.length ? `(${selectedTaskIds.length})` : ''}`}</button><button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks}>{cancelingTasks ? '取消中' : '取消待执行/执行中'}</button></div>}>
-            <div className="task-status-tabs" role="tablist" aria-label="任务状态过滤">
+            <div className="task-status-tabs" role="group" aria-label="任务状态过滤">
               {taskStatusFilters.map((status) => (
-                <button className={taskStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} role="tab" aria-selected={taskStatusFilter === status.value} onClick={() => selectTaskStatusFilter(status.value)}>
+                <button className={taskStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} aria-pressed={taskStatusFilter === status.value} onClick={() => selectTaskStatusFilter(status.value)}>
                   {status.label}
                 </button>
               ))}
@@ -2750,7 +3279,7 @@ export function App() {
                 </thead>
                 <tbody>
                   {tasks.length ? tasks.map((task, index) => (
-                    <tr key={task.id} className={selectedTaskIds.includes(task.id) ? 'selected' : ''} onClick={(event) => handleTaskRowClick(event, task, index)}>
+                    <tr key={task.id} className={selectedTaskIds.includes(task.id) ? 'selected interactive-row' : 'interactive-row'} tabIndex={0} aria-selected={selectedTaskIds.includes(task.id)} onClick={(event) => handleTaskRowClick(event, task, index)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void loadTaskDetail(task.id); } else if (event.key === ' ') { event.preventDefault(); toggleTaskSelection(task.id, !selectedTaskIds.includes(task.id), event.shiftKey); } }}>
                       <td><input type="checkbox" aria-label={`选择任务 ${task.id}`} checked={selectedTaskIds.includes(task.id)} onChange={(event) => toggleTaskSelection(task.id, event.target.checked, (event.nativeEvent as MouseEvent).shiftKey)} /></td>
                       <td>#{task.id}</td>
                       <td><span className={taskStatusPillClass(task.status)}>{task.status}</span></td>
@@ -2758,7 +3287,7 @@ export function App() {
                       <td className="path-cell">{task.mediaPath || '-'}</td>
                       <td>{formatStoredTime(task.createdAt, displayTimezone)}</td>
                       <td className="path-cell">{task.errorSummary || '-'}</td>
-                      <td><button className="secondary" type="button" onClick={() => void loadTaskDetail(task.id)}>详情</button></td>
+                      <td><div className="table-actions"><button className="icon-button secondary" type="button" title="在文件管理器中显示" aria-label={`在文件管理器中显示任务 ${task.id}`} disabled={!task.mediaPath} onClick={(event) => { event.stopPropagation(); void revealPath(task.mediaPath); }}><FolderOpen size={16} /></button><button className="secondary" type="button" onClick={(event) => { event.stopPropagation(); void loadTaskDetail(task.id); }}>详情</button></div></td>
                     </tr>
                   )) : (
                     <tr><td colSpan={8} className="empty-cell">暂无任务。</td></tr>
@@ -2779,12 +3308,13 @@ export function App() {
           {selectedTask && <TaskDetailModal detail={selectedTask} timezone={displayTimezone} onClose={() => setSelectedTask(null)} />}
         </section>
       )}
+        </div>
       {(newUploadProviderOpen || uploadProviderModal) && <UploadProviderModal provider={uploadProviderModal ?? undefined} providerTypes={uploadProviderTypes} watchDirs={watchDirs} saving={savingUploadProvider} onClose={() => { setNewUploadProviderOpen(false); setUploadProviderModal(null); }} onSubmit={(provider) => void saveUploadProvider(provider)} />}
       {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onCookieChange={setUploadCookieValue} onClose={() => { setUploadCookieProvider(null); setCookieAuth(null); setUploadCookieValue(''); }} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
       {selectedUploadBatch && <UploadBatchDetailModal detail={selectedUploadBatch} timezone={displayTimezone} actionTargetID={uploadTargetActionID} onClose={() => setSelectedUploadBatch(null)} onRetry={(target) => void actOnUploadTarget(target, 'retry')} onCancel={(target) => void actOnUploadTarget(target, 'cancel')} />}
-      {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} watchDirId={rescanWatchDirId} useCustomProcessing={rescanUseCustomProcessing} processing={rescanProcessing} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={(value) => { setRescanScope(value); setRescanTarget(''); setRescanWatchDirId(''); }} onTargetChange={setRescanTarget} onWatchDirIdChange={(value) => { setRescanWatchDirId(value); setRescanTarget(''); }} onUseCustomProcessingChange={(value) => { setRescanUseCustomProcessing(value); if (value) setRescanProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setRescanProcessing((value) => ({ ...value, ...patch }))} onBrowsePath={() => { const rootPath = rescanScope === 'dir' ? watchDirs.find((dir) => String(dir.id) === rescanWatchDirId)?.path ?? '' : ''; setDirectoryPicker({ title: '选择扫描路径', value: rescanTarget || rootPath, rootPath: rootPath || undefined, onSelect: setRescanTarget }); }} onSubmit={() => void rescan()} />}
-      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
-      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => setDirectoryPicker({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
+      {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} watchDirId={rescanWatchDirId} useCustomProcessing={rescanUseCustomProcessing} processing={rescanProcessing} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={(value) => { setRescanScope(value); setRescanTarget(''); setRescanWatchDirId(''); }} onTargetChange={setRescanTarget} onWatchDirIdChange={(value) => { setRescanWatchDirId(value); setRescanTarget(''); }} onUseCustomProcessingChange={(value) => { setRescanUseCustomProcessing(value); if (value) setRescanProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setRescanProcessing((value) => ({ ...value, ...patch }))} onBrowsePath={() => { const rootPath = rescanScope === 'dir' ? watchDirs.find((dir) => String(dir.id) === rescanWatchDirId)?.path ?? '' : ''; void browseDirectory({ title: '选择扫描路径', value: rescanTarget || rootPath, rootPath: rootPath || undefined, onSelect: setRescanTarget }); }} onSubmit={() => void rescan()} />}
+      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
+      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
       {auditTmdbMatchOpen && <TmdbMatchModal title="选择核对剧集" description="选择后会将 TMDB ID 用于剧集缺漏判断。" applyLabel="选择剧集" query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={null} applyProgress={0} applyTotal={0} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={applyTmdbShowToAudit} onClose={() => setAuditTmdbMatchOpen(false)} />}
@@ -2795,6 +3325,7 @@ export function App() {
       {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} matchPattern={renameMatchPattern} sample={renamePreview[0]?.currentName || renamePath} placeholders={renamePlaceholders} onChange={setRenameTemplate} onMatchPatternChange={setRenameMatchPattern} onClose={() => setRenameTemplateEditorOpen(false)} />}
       {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} rootPath={directoryPicker.rootPath} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
+      {confirmation && <ConfirmDialog request={confirmation} pending={confirming} onCancel={() => setConfirmation(null)} onConfirm={() => void acceptConfirmation()} />}
       {error && <AlertDialog title="操作失败" message={error} onClose={() => setError('')} />}
       </section>
     </main>
@@ -2994,23 +3525,79 @@ function formatUploadBytes(value: number) {
   return `${result >= 10 || index === 0 ? result.toFixed(0) : result.toFixed(1)} ${units[index]}`;
 }
 
-function AlertDialog(props: { title: string; message: string; onClose: () => void }) {
+function ConfirmDialog(props: { request: ConfirmationRequest; pending: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const onCancelRef = useRef(props.onCancel);
+  const pendingRef = useRef(props.pending);
+  onCancelRef.current = props.onCancel;
+  pendingRef.current = props.pending;
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    cancelRef.current?.focus();
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape' && !pendingRef.current) {
+        event.preventDefault();
+        onCancelRef.current();
+        return;
+      }
+      if (event.key !== 'Tab' || !dialogRef.current) return;
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'));
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!dialogRef.current.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus();
+    };
+  }, []);
+
   return (
-    <div className="modal-backdrop alert-backdrop" role="presentation" onClick={props.onClose}>
-      <section className="modal-card alert-dialog" role="alertdialog" aria-modal="true" aria-labelledby="alert-dialog-title" onClick={(event) => event.stopPropagation()}>
-        <div className="card-header alert-header">
-          <div className="alert-title">
-            <span aria-hidden="true">!</span>
-            <h2 id="alert-dialog-title">{props.title}</h2>
-          </div>
-          <IconCloseButton onClick={props.onClose} />
+    <div className="modal-backdrop confirm-backdrop" role="presentation" onMouseDown={props.pending ? undefined : props.onCancel}>
+      <section ref={dialogRef} className="modal-card confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message" tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
+        <span className={props.request.tone === 'danger' ? 'confirm-icon danger' : 'confirm-icon'} aria-hidden="true"><AlertTriangle size={21} /></span>
+        <div className="confirm-content">
+          <h2 id="confirm-title">{props.request.title}</h2>
+          <p id="confirm-message">{props.request.message}</p>
         </div>
-        <div className="alert-message">{props.message}</div>
         <div className="inline-actions modal-actions">
-          <button onClick={props.onClose} autoFocus>知道了</button>
+          <button ref={cancelRef} className="secondary" type="button" disabled={props.pending} onClick={props.onCancel}>取消</button>
+          <button className={props.request.tone === 'danger' ? 'danger' : ''} type="button" disabled={props.pending} onClick={props.onConfirm}>{props.pending ? '处理中...' : props.request.confirmLabel}</button>
         </div>
       </section>
     </div>
+  );
+}
+
+function AlertDialog(props: { title: string; message: string; onClose: () => void }) {
+  return (
+    <section className="error-toast" role="alert" aria-live="assertive">
+      <span className="error-toast-icon" aria-hidden="true"><AlertTriangle size={19} /></span>
+      <div><strong>{props.title}</strong><span>{props.message}</span></div>
+      <button className="icon-button" type="button" aria-label="关闭错误消息" title="关闭" onClick={props.onClose}><X size={16} /></button>
+    </section>
   );
 }
 
@@ -3041,13 +3628,29 @@ function AddEmbyKeyModal(props: { title: string; apiKey: string; saving: boolean
 function IconCloseButton(props: { onClick: () => void; disabled?: boolean }) {
   return (
     <button className="icon-close-button" type="button" onClick={props.onClick} disabled={props.disabled} aria-label="关闭" title="关闭">
-      <span aria-hidden="true">&times;</span>
+      <X size={18} aria-hidden="true" />
     </button>
   );
 }
 
-function TabButton(props: { active: boolean; label: string; onClick: () => void }) {
-  return <button className={props.active ? 'tab-button active' : 'tab-button'} onClick={props.onClick}>{props.label}</button>;
+function TabButton(props: { active: boolean; label: string; icon: LucideIcon; badge?: number; badgeTone?: 'default' | 'warn' | 'danger'; onClick: () => void }) {
+  const Icon = props.icon;
+  return (
+    <button className={props.active ? 'tab-button active' : 'tab-button'} type="button" aria-current={props.active ? 'page' : undefined} title={props.label} onClick={props.onClick}>
+      <Icon size={18} aria-hidden="true" />
+      <span className="tab-button-label">{props.label}</span>
+      {props.badge ? <span className={`nav-badge ${props.badgeTone ?? 'default'}`}>{props.badge}</span> : null}
+    </button>
+  );
+}
+
+function InitialLoading() {
+  return (
+    <section className="initial-loading" aria-live="polite" aria-label="正在加载工作区">
+      <span className="loading-spinner" aria-hidden="true" />
+      <div><strong>正在启动媒体工作区</strong><span>连接数据库并恢复后台任务...</span></div>
+    </section>
+  );
 }
 
 function Card(props: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
@@ -3089,6 +3692,18 @@ function DashboardFeature(props: { label: string; enabled?: boolean }) {
   );
 }
 
+function SetupRow(props: { icon: LucideIcon; title: string; detail: string; complete: boolean; optional?: boolean; actionLabel?: string; onAction: () => void }) {
+  const Icon = props.icon;
+  return (
+    <div className="setup-row">
+      <span className={props.complete ? 'setup-row-icon complete' : 'setup-row-icon'} aria-hidden="true">{props.complete ? <CheckCircle2 size={18} /> : <Icon size={18} />}</span>
+      <div><strong>{props.title}</strong><span>{props.detail}</span></div>
+      {props.optional && !props.complete ? <span className="setup-optional">可选</span> : null}
+      {props.actionLabel ? <button className="secondary" type="button" onClick={props.onAction}>{props.actionLabel}</button> : <span className="setup-complete">已就绪</span>}
+    </div>
+  );
+}
+
 function ArtifactRow(props: { artifact: Artifact; timezone: string }) {
   return <Row label={`${props.artifact.type} · ${formatStoredTime(props.artifact.createdAt, props.timezone)}`} value={props.artifact.path} />;
 }
@@ -3110,10 +3725,10 @@ function RecentArtifactsModal(props: { artifacts: Artifact[]; timezone: string; 
 function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose: () => void }) {
   const logs = [...asArray<TaskLog>(props.detail.logs)].reverse();
   return (
-    <div className="modal-backdrop">
-      <section className="modal-card rescan-modal">
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card rescan-modal" role="dialog" aria-modal="true" aria-labelledby="task-detail-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
-          <h2>任务详情</h2>
+          <h2 id="task-detail-title">任务详情</h2>
           <IconCloseButton onClick={props.onClose} />
         </div>
         <Row label="任务" value={`${props.detail.task.type} #${props.detail.task.id}`} />
@@ -3165,10 +3780,10 @@ function RescanModal(props: {
   onSubmit: () => void;
 }) {
   return (
-    <div className="modal-backdrop">
-      <section className="modal-card">
+    <div className="modal-backdrop" role="presentation" onClick={props.rescanning ? undefined : props.onClose}>
+      <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="rescan-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
-          <h2>扫描生成</h2>
+          <h2 id="rescan-title">扫描生成</h2>
           <IconCloseButton onClick={props.onClose} />
         </div>
         <div className="rescan-modal-grid">
@@ -3258,10 +3873,10 @@ function WatchDirModal(props: {
   onSubmit: () => void;
 }) {
   return (
-    <div className="modal-backdrop">
-      <section className="modal-card watch-dir-modal">
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card watch-dir-modal" role="dialog" aria-modal="true" aria-labelledby="watch-dir-modal-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
-          <h2>{props.title}</h2>
+          <h2 id="watch-dir-modal-title">{props.title}</h2>
           <IconCloseButton onClick={props.onClose} />
         </div>
         <div className="config-form watch-dir-modal-form">
@@ -3311,10 +3926,10 @@ function BatchEpisodeModal(props: {
   onSubmit: () => void;
 }) {
   return (
-    <div className="modal-backdrop">
-      <section className="modal-card batch-episode-modal">
+    <div className="modal-backdrop" role="presentation" onClick={props.applying ? undefined : props.onClose}>
+      <section className="modal-card batch-episode-modal" role="dialog" aria-modal="true" aria-labelledby="batch-episode-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
-          <h2>批量修正季集</h2>
+          <h2 id="batch-episode-title">批量修正季集</h2>
           <IconCloseButton onClick={props.onClose} />
         </div>
         <p className="muted">将应用到当前勾选的 {props.count} 个文件，并按修正后的季集重新查询 TMDB 预览。</p>
@@ -3452,10 +4067,10 @@ function RenameHistoryModal(props: {
   onUndo: (id: string) => void;
 }) {
   return (
-    <div className="modal-backdrop">
-      <section className="modal-card rename-history-modal">
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card rename-history-modal" role="dialog" aria-modal="true" aria-labelledby="rename-history-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
-          <h2>重命名历史</h2>
+          <h2 id="rename-history-title">重命名历史</h2>
           <div className="inline-actions">
             <button className="secondary" onClick={props.onRefresh} disabled={props.loading}>{props.loading ? '刷新中' : '刷新历史'}</button>
             <IconCloseButton onClick={props.onClose} />
@@ -3484,11 +4099,11 @@ function RenameHistoryModal(props: {
 
 function RenameHistoryDetailsModal(props: { batch: RenameHistoryBatch; undoCheck: RenameUndoCheckResult | null; timezone: string; onClose: () => void }) {
   return (
-    <div className="modal-backdrop detail-backdrop">
-      <section className="modal-card rename-history-detail-modal">
+    <div className="modal-backdrop detail-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card rename-history-detail-modal" role="dialog" aria-modal="true" aria-labelledby="rename-history-detail-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
           <div>
-            <h2>历史详情</h2>
+            <h2 id="rename-history-detail-title">历史详情</h2>
             <small>{formatStoredTime(props.batch.createdAt, props.timezone)} · {props.batch.items.length} 项 · {props.batch.id}</small>
           </div>
           <IconCloseButton onClick={props.onClose} />
@@ -3558,10 +4173,10 @@ function RenameTemplateEditorModal(props: { value: string; matchPattern: string;
   }
 
   return (
-    <div className="modal-backdrop">
-      <section className="modal-card rename-template-modal">
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card rename-template-modal" role="dialog" aria-modal="true" aria-labelledby="rename-template-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
-          <h2>编辑命名模板</h2>
+          <h2 id="rename-template-title">编辑命名模板</h2>
           <IconCloseButton onClick={props.onClose} />
         </div>
         <textarea ref={textareaRef} value={props.value} onChange={(event) => props.onChange(event.target.value)} placeholder={defaultRenameTemplate} autoFocus />
@@ -3613,10 +4228,10 @@ function testMatchPattern(pattern: string, sample: string): { matched: boolean; 
 
 function TargetPathEditorModal(props: { value: string; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   return (
-    <div className="modal-backdrop">
-      <section className="modal-card target-path-modal">
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card target-path-modal" role="dialog" aria-modal="true" aria-labelledby="target-path-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
-          <h2>编辑目标路径</h2>
+          <h2 id="target-path-title">编辑目标路径</h2>
           <IconCloseButton onClick={props.onClose} />
         </div>
         <textarea value={props.value} onChange={(event) => props.onChange(event.target.value)} autoFocus />
@@ -3663,10 +4278,10 @@ function DirectoryPicker(props: { title: string; initialPath: string; rootPath?:
   }
 
   return (
-    <div className="modal-backdrop">
-      <section className="modal-card">
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="directory-picker-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
-          <h2>{props.title}</h2>
+          <h2 id="directory-picker-title">{props.title}</h2>
           <IconCloseButton onClick={props.onClose} />
         </div>
         <div className="form-row">
@@ -3690,6 +4305,20 @@ function DirectoryPicker(props: { title: string; initialPath: string; rootPath?:
 
 function Flag(props: { label: string; enabled?: boolean }) {
   return <Row label={props.label} value={props.enabled ? '开启' : '关闭'} />;
+}
+
+function PathField(props: { label: string; value: string; placeholder?: string; onChange: (value: string) => void; onBrowse: () => void }) {
+  return (
+    <label className="path-field">
+      <span>{props.label}</span>
+      <div className="path-input">
+        <input value={props.value} placeholder={props.placeholder} onChange={(event) => props.onChange(event.target.value)} />
+        <button className="icon-button" type="button" title={`选择${props.label}`} aria-label={`选择${props.label}`} onClick={props.onBrowse}>
+          <FolderOpen size={17} />
+        </button>
+      </div>
+    </label>
+  );
 }
 
 function FieldLabel(props: { label: string; help: string }) {

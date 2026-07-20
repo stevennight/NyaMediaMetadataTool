@@ -11,12 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"NyaMediaMetadataTool/internal/api"
-	"NyaMediaMetadataTool/internal/config"
-	"NyaMediaMetadataTool/internal/runner"
-	"NyaMediaMetadataTool/internal/store"
-	"NyaMediaMetadataTool/internal/upload"
-	"NyaMediaMetadataTool/internal/watcher"
+	"NyaMediaMetadataTool/internal/appcore"
 )
 
 func main() {
@@ -25,96 +20,40 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	cfg, err := config.Load(*configPath)
+	service, err := appcore.Start(context.Background(), *configPath, logger)
 	if err != nil {
-		logger.Error("load config", "error", err)
+		logger.Error("start service", "error", err)
 		os.Exit(1)
 	}
-
-	db, err := store.Open(cfg.Database.Path)
-	if err != nil {
-		logger.Error("open database", "error", err)
-		os.Exit(1)
-	}
-	defer db.Close()
-
-	if err := db.Migrate(context.Background()); err != nil {
-		logger.Error("migrate database", "error", err)
-		os.Exit(1)
-	}
-	if err := db.ResetRunningTasks(context.Background()); err != nil {
-		logger.Error("reset running tasks", "error", err)
-		os.Exit(1)
-	}
-	if err := db.ResetRunningUploadWork(context.Background()); err != nil {
-		logger.Error("reset running upload work", "error", err)
-		os.Exit(1)
-	}
-	if err := db.DisableWatchDirScanOnStart(context.Background()); err != nil {
-		logger.Error("disable watch dir scan on start", "error", err)
-		os.Exit(1)
-	}
-	dirs, err := db.ListWatchDirs(context.Background())
-	if err != nil {
-		logger.Error("load watch dirs", "error", err)
-		os.Exit(1)
-	}
-	cfg.WatchDirs = watchDirsFromStore(dirs)
-
-	serviceCtx, serviceCancel := context.WithCancel(context.Background())
-	defer serviceCancel()
-
-	watcherService := watcher.New(cfg, db, logger)
-	go func() {
-		if err := watcherService.Run(serviceCtx); err != nil {
-			logger.Error("watcher stopped", "error", err)
-		}
-	}()
-
-	uploadManager := upload.New(cfg.Upload, db, logger)
-	taskRunner := runner.New(cfg, db, logger, uploadManager)
-	go func() {
-		if err := taskRunner.Run(serviceCtx); err != nil {
-			logger.Error("runner stopped", "error", err)
-		}
-	}()
-	go func() {
-		if err := uploadManager.Run(serviceCtx); err != nil {
-			logger.Error("upload manager stopped", "error", err)
-		}
-	}()
 
 	server := &http.Server{
-		Addr:              cfg.Server.Addr,
-		Handler:           api.NewServer(cfg, *configPath, db, taskRunner, watcherService, logger, uploadManager),
+		Addr:              service.Config.Server.Addr,
+		Handler:           service.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	serverErr := make(chan error, 1)
 	go func() {
-		logger.Info("server started", "addr", cfg.Server.Addr)
+		logger.Info("server started", "addr", service.Config.Server.Addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server failed", "error", err)
-			os.Exit(1)
+			serverErr <- err
 		}
 	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
-	serviceCancel()
+	select {
+	case <-stop:
+	case err := <-serverErr:
+		logger.Error("server failed", "error", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("shutdown server", "error", err)
-		os.Exit(1)
 	}
-}
-
-func watchDirsFromStore(dirs []store.WatchDir) []config.WatchDir {
-	result := make([]config.WatchDir, 0, len(dirs))
-	for _, dir := range dirs {
-		result = append(result, config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: dir.Enabled, WatchEnabled: dir.WatchEnabled, ScanOnStart: dir.ScanOnStart})
+	if err := service.Close(ctx); err != nil {
+		logger.Error("shutdown service", "error", err)
 	}
-	return result
 }

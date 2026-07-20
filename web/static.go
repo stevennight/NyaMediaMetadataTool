@@ -8,12 +8,20 @@ import (
 	"strings"
 )
 
-//go:embed dist/* dist/assets/*
+//go:embed all:dist
 var distFS embed.FS
 
-func Handler() http.Handler {
+func Assets() fs.FS {
 	sub, err := fs.Sub(distFS, "dist")
 	if err != nil {
+		return nil
+	}
+	return sub
+}
+
+func Handler() http.Handler {
+	sub := Assets()
+	if sub == nil {
 		return http.NotFoundHandler()
 	}
 	fileServer := http.FileServer(http.FS(sub))

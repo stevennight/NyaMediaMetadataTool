@@ -169,7 +169,10 @@ func Save(path string, cfg Config) error {
 			return err
 		}
 	}
-	return os.WriteFile(path, data, 0o644)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func Default() Config {

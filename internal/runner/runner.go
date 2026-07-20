@@ -57,10 +57,17 @@ func (r *Runner) Run(ctx context.Context) error {
 	if workers <= 0 {
 		workers = 1
 	}
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		go r.worker(ctx)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.worker(ctx)
+		}()
 	}
 	<-ctx.Done()
+	r.CancelRunningTasks()
+	wg.Wait()
 	return nil
 }
 

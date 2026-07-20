@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -25,6 +26,8 @@ type Watcher struct {
 	mu       sync.Mutex
 	timers   map[string]*time.Timer
 	reloadCh chan reloadRequest
+	asyncWG  sync.WaitGroup
+	stopping bool
 }
 
 type reloadRequest struct {
@@ -63,6 +66,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		return err
 	}
 	defer fsw.Close()
+	defer w.stopAsync()
 
 	watched := map[string]struct{}{}
 	if err := w.reloadWatchDirs(ctx, fsw, watched); err != nil {
@@ -85,6 +89,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 				return nil
 			}
 			w.logger.Warn("watcher error", "error", err)
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				w.startAsync(func() { w.recoverFromOverflow(ctx) })
+			}
 		}
 	}
 }
@@ -178,8 +185,12 @@ func (w *Watcher) handleEvent(ctx context.Context, fsw *fsnotify.Watcher, watche
 			if hasIgnoreFile(event.Name) {
 				return
 			}
+			dir, err := w.store.FindWatchDirForPath(ctx, event.Name)
+			if err != nil || !dir.Recursive {
+				return
+			}
 			_ = w.addWatchDirs(fsw, watched, event.Name, true)
-			go w.scheduleDirectory(ctx, event.Name)
+			w.startAsync(func() { w.scheduleDirectory(ctx, event.Name) })
 			return
 		}
 	}
@@ -206,6 +217,9 @@ func (w *Watcher) scheduleDirectory(ctx context.Context, root string) {
 	}
 
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			return nil
 		}
@@ -225,16 +239,71 @@ func (w *Watcher) scheduleDirectory(ctx context.Context, root string) {
 
 func (w *Watcher) debounceFile(ctx context.Context, path string) {
 	w.mu.Lock()
+	if w.stopping {
+		w.mu.Unlock()
+		return
+	}
 	if timer, ok := w.timers[path]; ok {
 		timer.Stop()
 	}
 	w.timers[path] = time.AfterFunc(w.cfg.Processing.StableDelay, func() {
 		w.mu.Lock()
 		delete(w.timers, path)
+		if w.stopping {
+			w.mu.Unlock()
+			return
+		}
+		w.asyncWG.Add(1)
 		w.mu.Unlock()
+		defer w.asyncWG.Done()
 		w.scheduleFile(ctx, path)
 	})
 	w.mu.Unlock()
+}
+
+func (w *Watcher) startAsync(run func()) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopping {
+		return false
+	}
+	w.asyncWG.Add(1)
+	go func() {
+		defer w.asyncWG.Done()
+		run()
+	}()
+	return true
+}
+
+func (w *Watcher) stopAsync() {
+	w.mu.Lock()
+	w.stopping = true
+	for path, timer := range w.timers {
+		timer.Stop()
+		delete(w.timers, path)
+	}
+	w.mu.Unlock()
+	w.asyncWG.Wait()
+}
+
+func (w *Watcher) recoverFromOverflow(ctx context.Context) {
+	dirs, err := w.store.ListWatchDirs(ctx)
+	if err != nil {
+		w.logger.Warn("reload directories after watcher overflow failed", "error", err)
+		return
+	}
+	for _, dir := range dirs {
+		if ctx.Err() != nil {
+			return
+		}
+		if !dir.Enabled || !dir.WatchEnabled {
+			continue
+		}
+		cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: true, WatchEnabled: true}
+		if err := bootstrap.ScanWatchDir(ctx, w.cfg, w.store, w.logger, cfgDir, bootstrap.ScanOptions{InheritProcessing: true}); err != nil && !errors.Is(err, context.Canceled) {
+			w.logger.Warn("rescan after watcher overflow failed", "path", dir.Path, "error", err)
+		}
+	}
 }
 
 func (w *Watcher) cancelTimersOutside(activeRoots []string) {

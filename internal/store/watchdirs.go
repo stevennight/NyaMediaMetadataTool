@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"NyaMediaMetadataTool/internal/config"
@@ -171,7 +172,7 @@ func (s *Store) FindWatchDirForPath(ctx context.Context, path string) (WatchDir,
 	var matched WatchDir
 	for _, dir := range dirs {
 		cleanRoot := filepath.Clean(dir.Path)
-		if cleanPath != cleanRoot && !strings.HasPrefix(cleanPath, cleanRoot+string(os.PathSeparator)) {
+		if !watchDirContainsPath(cleanRoot, cleanPath) {
 			continue
 		}
 		if matched.Path == "" || len(cleanRoot) > len(filepath.Clean(matched.Path)) {
@@ -182,6 +183,18 @@ func (s *Store) FindWatchDirForPath(ctx context.Context, path string) (WatchDir,
 		return WatchDir{}, ErrWatchDirNotFound
 	}
 	return matched, nil
+}
+
+func watchDirContainsPath(root string, path string) bool {
+	if runtime.GOOS == "windows" {
+		root = strings.ToLower(root)
+		path = strings.ToLower(path)
+	}
+	relative, err := filepath.Rel(root, path)
+	if err != nil || filepath.IsAbs(relative) {
+		return false
+	}
+	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)))
 }
 
 func encodeWatchDirProcessing(processing config.OutputProcessingConfig) (string, error) {

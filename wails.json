@@ -1,0 +1,23 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "version": "2",
+  "name": "Nya Media",
+  "outputfilename": "NyaMediaMetadataTool",
+  "build:dir": "build",
+  "frontend:dir": "web",
+  "frontend:install": "npm ci",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "wailsjsdir": "./web",
+  "author": {
+    "name": "NyaMediaMetadataTool"
+  },
+  "info": {
+    "companyName": "Nya Media",
+    "productName": "Nya Media",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright (c) 2026 Nya Media",
+    "comments": "Local media metadata and companion-file workstation."
+  }
+}

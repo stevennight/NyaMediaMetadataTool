@@ -3,9 +3,13 @@ package renamer
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"NyaMediaMetadataTool/internal/config"
@@ -49,6 +53,8 @@ type historyFile struct {
 	Batches []HistoryBatch `json:"batches"`
 }
 
+var historyLocks sync.Map
+
 func HistoryPath(cfg config.Config) string {
 	dir := filepath.Dir(cfg.Database.Path)
 	if dir == "." || dir == "" {
@@ -58,6 +64,8 @@ func HistoryPath(cfg config.Config) string {
 }
 
 func ListHistory(path string, limit int) ([]HistoryBatch, error) {
+	unlock := lockHistory(path)
+	defer unlock()
 	history, err := readHistory(path)
 	if err != nil {
 		return nil, err
@@ -71,6 +79,8 @@ func ListHistory(path string, limit int) ([]HistoryBatch, error) {
 }
 
 func UndoHistoryBatch(path string, id string) (HistoryBatch, error) {
+	unlock := lockHistory(path)
+	defer unlock()
 	history, err := readHistory(path)
 	if err != nil {
 		return HistoryBatch{}, err
@@ -94,24 +104,23 @@ func UndoHistoryBatch(path string, id string) (HistoryBatch, error) {
 		return HistoryBatch{}, errors.New("rename history batch is not fully undoable")
 	}
 	moves := flattenMoves(batch)
-	for i := len(moves) - 1; i >= 0; i-- {
-		move := moves[i]
-		if err := os.MkdirAll(filepath.Dir(move.From), 0o755); err != nil {
-			return HistoryBatch{}, err
-		}
-		if err := os.Rename(move.To, move.From); err != nil {
-			return HistoryBatch{}, err
-		}
+	if err := reverseRenameMoves(moves); err != nil {
+		return HistoryBatch{}, err
 	}
 	history.Batches[index].Undone = true
 	history.Batches[index].UndoneAt = time.Now().Format(time.RFC3339)
 	if err := writeHistory(path, history); err != nil {
-		return HistoryBatch{}, err
+		if restoreErr := restoreRenameMoves(moves); restoreErr != nil {
+			return HistoryBatch{}, fmt.Errorf("save undo history: %v; restore renamed files: %w", err, restoreErr)
+		}
+		return HistoryBatch{}, fmt.Errorf("save undo history: %w", err)
 	}
 	return history.Batches[index], nil
 }
 
 func CheckHistoryBatchUndo(path string, id string) (UndoCheckResult, error) {
+	unlock := lockHistory(path)
+	defer unlock()
 	history, err := readHistory(path)
 	if err != nil {
 		return UndoCheckResult{}, err
@@ -149,7 +158,7 @@ func checkBatchUndoable(batch HistoryBatch) UndoCheckResult {
 	return result
 }
 
-func appendHistoryBatch(path string, batch HistoryBatch) error {
+func appendHistoryBatchLocked(path string, batch HistoryBatch) error {
 	if len(batch.Items) == 0 {
 		return nil
 	}
@@ -177,14 +186,106 @@ func readHistory(path string) (historyFile, error) {
 }
 
 func writeHistory(path string, history historyFile) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(history, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	data = append(data, '\n')
+	temporary, err := os.CreateTemp(dir, ".rename-history-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	installed := false
+	defer func() {
+		_ = temporary.Close()
+		if !installed {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	installed = true
+	if directory, err := os.Open(dir); err == nil {
+		_ = directory.Sync()
+		_ = directory.Close()
+	}
+	return nil
+}
+
+func lockHistory(path string) func() {
+	key, err := filepath.Abs(path)
+	if err != nil {
+		key = filepath.Clean(path)
+	}
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		key = strings.ToLower(key)
+	}
+	value, _ := historyLocks.LoadOrStore(key, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
+
+func reverseRenameMoves(moves []RenameMove) error {
+	reversed := make([]RenameMove, 0, len(moves))
+	for i := len(moves) - 1; i >= 0; i-- {
+		move := moves[i]
+		if err := os.MkdirAll(filepath.Dir(move.From), 0o755); err != nil {
+			return joinMoveRollbackError(err, restoreReversedMoves(reversed))
+		}
+		if err := os.Rename(move.To, move.From); err != nil {
+			return joinMoveRollbackError(err, restoreReversedMoves(reversed))
+		}
+		reversed = append(reversed, move)
+	}
+	return nil
+}
+
+func restoreRenameMoves(moves []RenameMove) error {
+	var errs []error
+	for _, move := range moves {
+		if err := os.MkdirAll(filepath.Dir(move.To), 0o755); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := os.Rename(move.From, move.To); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func restoreReversedMoves(moves []RenameMove) error {
+	reordered := make([]RenameMove, len(moves))
+	for index := range moves {
+		reordered[len(moves)-1-index] = moves[index]
+	}
+	return restoreRenameMoves(reordered)
+}
+
+func joinMoveRollbackError(operationErr error, rollbackErr error) error {
+	if rollbackErr == nil {
+		return operationErr
+	}
+	return fmt.Errorf("rename operation: %v; rollback: %w", operationErr, rollbackErr)
 }
 
 func flattenMoves(batch HistoryBatch) []RenameMove {

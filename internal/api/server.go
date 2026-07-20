@@ -26,15 +26,32 @@ import (
 )
 
 type Server struct {
-	cfgMu      sync.RWMutex
-	cfg        config.Config
-	configPath string
-	store      *store.Store
-	tasks      TaskCanceller
-	watcher    WatchDirReloader
-	uploads    *upload.Manager
-	logger     *slog.Logger
-	mux        *http.ServeMux
+	cfgMu        sync.RWMutex
+	cfg          config.Config
+	configPath   string
+	store        *store.Store
+	tasks        TaskCanceller
+	watcher      WatchDirReloader
+	uploads      *upload.Manager
+	logger       *slog.Logger
+	mux          *http.ServeMux
+	serviceCtx   context.Context
+	lifecycleMu  sync.Mutex
+	requestWG    sync.WaitGroup
+	backgroundWG sync.WaitGroup
+	drainOnce    sync.Once
+	drained      chan struct{}
+	inFlight     int
+	mutations    int
+	background   int
+	closing      bool
+}
+
+type Activity struct {
+	InFlight        int  `json:"inFlight"`
+	ActiveMutations int  `json:"activeMutations"`
+	Background      int  `json:"background"`
+	Closing         bool `json:"closing"`
 }
 
 type TaskCanceller interface {
@@ -46,6 +63,17 @@ type WatchDirReloader interface {
 }
 
 func NewServer(cfg config.Config, configPath string, store *store.Store, tasks TaskCanceller, watcher WatchDirReloader, logger *slog.Logger, uploadManagers ...*upload.Manager) http.Handler {
+	return newServer(context.Background(), cfg, configPath, store, tasks, watcher, logger, uploadManagers...)
+}
+
+func NewServerWithContext(serviceCtx context.Context, cfg config.Config, configPath string, store *store.Store, tasks TaskCanceller, watcher WatchDirReloader, logger *slog.Logger, uploadManagers ...*upload.Manager) *Server {
+	return newServer(serviceCtx, cfg, configPath, store, tasks, watcher, logger, uploadManagers...)
+}
+
+func newServer(serviceCtx context.Context, cfg config.Config, configPath string, store *store.Store, tasks TaskCanceller, watcher WatchDirReloader, logger *slog.Logger, uploadManagers ...*upload.Manager) *Server {
+	if serviceCtx == nil {
+		serviceCtx = context.Background()
+	}
 	var uploads *upload.Manager
 	if len(uploadManagers) > 0 {
 		uploads = uploadManagers[0]
@@ -59,13 +87,131 @@ func NewServer(cfg config.Config, configPath string, store *store.Store, tasks T
 		uploads:    uploads,
 		logger:     logger,
 		mux:        http.NewServeMux(),
+		serviceCtx: serviceCtx,
+		drained:    make(chan struct{}),
 	}
 	server.routes()
 	return server
 }
 
+func (s *Server) BeginClose() {
+	s.lifecycleMu.Lock()
+	s.closing = true
+	s.lifecycleMu.Unlock()
+}
+
+func (s *Server) Close(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.BeginClose()
+	s.drainOnce.Do(func() {
+		go func() {
+			s.requestWG.Wait()
+			s.backgroundWG.Wait()
+			close(s.drained)
+		}()
+	})
+	select {
+	case <-s.drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// WaitBackground is retained for callers that used the original shutdown API.
+// It now drains both accepted HTTP requests and background API work.
+func (s *Server) WaitBackground(ctx context.Context) error {
+	return s.Close(ctx)
+}
+
+func (s *Server) Activity() Activity {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return Activity{
+		InFlight:        s.inFlight,
+		ActiveMutations: s.mutations,
+		Background:      s.background,
+		Closing:         s.closing,
+	}
+}
+
+func (s *Server) InFlight() int {
+	return s.Activity().InFlight
+}
+
+func (s *Server) ActiveMutations() int {
+	return s.Activity().ActiveMutations
+}
+
+func (s *Server) runBackground(run func(context.Context)) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.closing {
+		return false
+	}
+	s.backgroundWG.Add(1)
+	s.background++
+	go func() {
+		defer func() {
+			s.lifecycleMu.Lock()
+			s.background--
+			s.lifecycleMu.Unlock()
+			s.backgroundWG.Done()
+		}()
+		run(s.serviceCtx)
+	}()
+	return true
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	if r.URL.Path != "/api" && !strings.HasPrefix(r.URL.Path, "/api/") {
+		s.mux.ServeHTTP(w, r)
+		return
+	}
+
+	mutation := isMutationMethod(r.Method)
+	s.lifecycleMu.Lock()
+	if s.closing {
+		s.lifecycleMu.Unlock()
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service is shutting down"})
+		return
+	}
+	s.requestWG.Add(1)
+	s.inFlight++
+	if mutation {
+		s.mutations++
+	}
+	s.lifecycleMu.Unlock()
+
+	defer func() {
+		s.lifecycleMu.Lock()
+		s.inFlight--
+		if mutation {
+			s.mutations--
+		}
+		s.lifecycleMu.Unlock()
+		s.requestWG.Done()
+	}()
+
+	requestCtx, cancel := context.WithCancel(r.Context())
+	stopServiceCancellation := context.AfterFunc(s.serviceCtx, cancel)
+	defer func() {
+		stopServiceCancellation()
+		cancel()
+	}()
+	s.mux.ServeHTTP(w, r.WithContext(requestCtx))
+}
+
+func isMutationMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) routes() {
@@ -788,11 +934,14 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		go func() {
-			if err := bootstrap.ScanPath(context.Background(), cfg, s.store, s.logger, input.Path, options); err != nil {
+		if !s.runBackground(func(ctx context.Context) {
+			if err := bootstrap.ScanPath(ctx, cfg, s.store, s.logger, input.Path, options); err != nil && !errors.Is(err, context.Canceled) {
 				s.logger.Warn("manual path rescan failed", "path", input.Path, "error", err)
 			}
-		}()
+		}) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service is shutting down"})
+			return
+		}
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "count": 1})
 		return
 	}
@@ -824,14 +973,17 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	go func() {
+	if !s.runBackground(func(ctx context.Context) {
 		for _, dir := range dirs {
 			cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: true, WatchEnabled: dir.WatchEnabled, ScanOnStart: true}
-			if err := bootstrap.ScanWatchDir(context.Background(), cfg, s.store, s.logger, cfgDir, options); err != nil {
+			if err := bootstrap.ScanWatchDir(ctx, cfg, s.store, s.logger, cfgDir, options); err != nil && !errors.Is(err, context.Canceled) {
 				s.logger.Warn("manual rescan failed", "path", dir.Path, "error", err)
 			}
 		}
-	}()
+	}) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service is shutting down"})
+		return
+	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "count": len(dirs)})
 }

@@ -1329,6 +1329,21 @@ WHERE status = ?
 	return tx.Commit()
 }
 
+func (s *Store) CountUploadTargetsByStatuses(ctx context.Context, statuses ...string) (int, error) {
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(statuses))
+	args := make([]any, len(statuses))
+	for index, status := range statuses {
+		placeholders[index] = "?"
+		args[index] = status
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM upload_batch_targets WHERE status IN (%s)`, strings.Join(placeholders, ",")), args...).Scan(&count)
+	return count, err
+}
+
 const uploadProviderSelect = `
 SELECT id, name, type, enabled, remote_root, user_agent, collision_policy,
        EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = upload_providers.id AND s.secret_key = 'cookie' AND s.secret_value <> ''),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -60,6 +61,21 @@ type TaskListResult struct {
 func (s *Store) ListTasks(ctx context.Context, limit int) ([]Task, error) {
 	result, err := s.ListTasksFiltered(ctx, TaskListFilters{Page: 1, PageSize: limit})
 	return result.Items, err
+}
+
+func (s *Store) CountTasksByStatuses(ctx context.Context, statuses ...string) (int, error) {
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(statuses))
+	args := make([]any, len(statuses))
+	for index, status := range statuses {
+		placeholders[index] = "?"
+		args[index] = status
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM tasks WHERE status IN (%s)`, strings.Join(placeholders, ",")), args...).Scan(&count)
+	return count, err
 }
 
 func (s *Store) ListTasksFiltered(ctx context.Context, filters TaskListFilters) (TaskListResult, error) {

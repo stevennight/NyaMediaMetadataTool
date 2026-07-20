@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Nya Media
+Comment=Manage local media metadata and companion files
+Exec=NyaMediaMetadataTool
+Icon=nya-media
+Terminal=false
+Categories=AudioVideo;Utility;
+Keywords=media;metadata;Emby;NFO;
+StartupNotify=true
+StartupWMClass=nya-media

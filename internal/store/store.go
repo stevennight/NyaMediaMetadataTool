@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,8 +33,21 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := restrictDatabasePermissions(path); err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	return store, nil
+}
+
+func restrictDatabasePermissions(path string) error {
+	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(candidate, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("restrict database permissions for %q: %w", candidate, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error {

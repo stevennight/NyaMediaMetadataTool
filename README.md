@@ -1,8 +1,8 @@
 # NyaMediaMetadataTool
 
-面向本地媒体库的元数据与伴生文件生成工具。项目当前以 Go 常驻服务为核心，提供内嵌 Web 管理端，用于监控媒体目录、生成 Emby 友好的本地伴生文件、查看任务日志，并提供剧集重命名与核对工具。
+面向本地媒体库的元数据与伴生文件生成工具。当前主入口是基于 Wails 的跨平台桌面客户端，用于监控媒体目录、生成 Emby 友好的本地伴生文件、查看任务日志，并提供剧集重命名、上传与核对工具。桌面端将 React 工作台和 Go 服务运行在同一进程内，生产模式不会额外监听本机 HTTP 端口。
 
-当前主线不是下载器，也不是 Emby 插件；它更像一个落盘后的媒体整理与产物生成服务，可以和 AniRss、qBittorrent、Emby 等现有链路并行工作。
+项目仍保留命令行服务与浏览器管理方式，便于无桌面环境的主机、远程部署和自动化场景复用同一套核心能力。它不是下载器，也不是 Emby 插件；更适合作为下载落盘后的媒体整理与产物生成工作站，与 AniRss、qBittorrent、Emby 等现有链路并行工作。
 
 ## 当前能力
 
@@ -12,19 +12,26 @@
 - 网盘发布：元数据完成后按番剧变更窗口合并上传批次；一个目标可设置默认路由并为指定媒体目录覆盖远端目录、碰撞策略和文件类型，批次按目标独立重试、校验、记录文件清单，并在目标完成后写入可租约消费的 outbox 事件。首个 Provider 为 `115cookie`，`115open`、123 云盘和百度网盘已保留运行时注册与凭据契约。
 - 元数据增强：支持 TMDB 查询、缓存、语言/地区配置、备用语言、代理，以及可选 fanart.tv 图片来源。
 - 图片接管：默认关闭；开启后可生成 `poster.jpg`、`fanart.jpg`、`clearlogo.png`、`clearart.png` 和季度海报。
-- Web 管理端：提供仪表盘、设置、媒体目录、任务、上传、重命名、剧集核对等页面。
+- 桌面工作台：提供仪表盘、首次运行检查、设置、媒体目录、任务、上传、重命名、剧集核对等页面，并集成原生路径选择、文件定位、系统通知和退出保护。
 - 批量重命名：支持预览、手动修正、模板占位符、TMDB 匹配、附属文件随动重命名、历史回滚。
-- 剧集核对：Web 端支持本地缺集/伴生文件检查、Emby API 对比、本地与远端 SFTP 文件对齐检查。
+- 剧集核对：支持本地缺集/伴生文件检查、Emby API 对比、本地与远端 SFTP 文件对齐检查。
 - 辅助工具：保留 `bifunpack` BIF 解包命令，用于调试 BIF 生成结果。
 
 ## 项目结构
 
 ```text
+main.go          Wails 桌面入口
+desktop_app.go   原生桌面能力桥接
+build/           三平台应用图标与打包元数据
+.github/workflows/desktop-build.yml
+                 Windows、macOS、Linux 原生构建 CI
 cmd/
-  nyammd/        主服务入口
+  nyammd/        兼容的 CLI/Web 服务入口
   bifunpack/     BIF 图片解包 CLI
 internal/
   api/           HTTP API 与静态前端入口
+  appcore/       桌面与 CLI 共用的后台生命周期
+  appdata/       桌面数据目录与初始化
   bootstrap/     目录扫描与任务入队
   config/        YAML 配置
   episodeparse/  文件名季集解析
@@ -45,41 +52,106 @@ docs/
 
 ## 运行要求
 
-- Go 1.23+
-- Node.js 与 npm，仅在修改或重新构建前端时需要
-- 外部媒体工具：
-  - `ffmpeg`
-  - `ffprobe`
-  - `mkvextract`
-  - `mediainfo`
+- Go 1.25+
+- Node.js 与 npm，用于桌面开发和正式打包
+- Wails CLI 2.13.x；建议与 `go.mod` 中的 Wails 版本一致
+- 对应平台的 Wails 原生依赖；使用 `wails doctor` 检查
+- 外部媒体工具：`ffmpeg`、`ffprobe`、`mkvextract`、`mediainfo`
 
-外部工具路径可在 `config.yaml` 或 Web 设置页中配置。服务启动后可以在 Web 端执行工具可用性检查。
+外部工具路径可以在桌面端“设置”中通过原生文件选择器配置，也可以直接编辑 `config.yaml`。应用启动后可在设置页执行工具可用性检查。
 
-## 快速开始
+## 桌面开发
 
-复制示例配置：
+安装与项目版本一致的 Wails CLI，并检查本机依赖：
+
+```powershell
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+wails doctor
+```
+
+安装前端依赖后启动桌面开发模式：
+
+```powershell
+Set-Location web
+npm ci
+Set-Location ..
+wails dev
+```
+
+`wails dev` 会启动 Vite 热更新和 Wails 窗口。桌面端首次启动会在系统应用数据目录创建默认配置、SQLite 数据库和日志目录。
+
+## 正式打包
+
+Wails 2 不支持在一个主机上完整交叉打包三种桌面平台。发布构建应分别在 Windows、macOS 和 Linux 原生环境执行；产物写入 `build/bin/`。
+
+Windows x64 可执行文件：
+
+```powershell
+wails build -clean -platform windows/amd64 -ldflags "-X main.version=0.1.0"
+```
+
+安装 NSIS 后可同时生成当前用户范围的安装包：
+
+```powershell
+wails build -clean -platform windows/amd64 -nsis -installscope user -ldflags "-X main.version=0.1.0"
+```
+
+macOS 通用应用包，需要在 macOS 主机执行：
+
+```bash
+wails build -clean -platform darwin/universal -ldflags "-X main.version=0.1.0"
+```
+
+Linux x64 二进制，需要在安装了 GTK/WebKitGTK 开发依赖的 Linux 主机执行：
+
+```bash
+wails build -clean -platform linux/amd64 -tags webkit2_41 -ldflags "-X main.version=0.1.0"
+```
+
+上述 Linux 示例面向提供 WebKitGTK 4.1 的新发行版；仍提供 WebKitGTK 4.0 的系统可以去掉 `-tags webkit2_41` 并安装对应开发包。`build/linux/nya-media.desktop` 是发行包使用的桌面入口元数据，打包时将 `build/appicon.png` 安装为主题图标 `nya-media`。
+
+`.github/workflows/desktop-build.yml` 会在三种原生 GitHub Runner 上执行 Go 测试、前端构建和 Wails 打包，并上传 14 天保留的未签名产物。正式对外分发前还需要在受保护的发布流水线中配置代码签名；macOS 发行版还需要公证。版本发布时同步修改 workflow、`wails.json` 中的 `info.productVersion` 和上述 `main.version` 注入值。
+
+## 桌面数据目录
+
+桌面端将状态放在当前用户的系统数据目录，不依赖启动时的工作目录：
+
+- Windows：`%LOCALAPPDATA%\NyaMediaMetadataTool`
+- macOS：`~/Library/Application Support/NyaMediaMetadataTool`
+- Linux：`${XDG_DATA_HOME:-~/.local/share}/nya-media-metadata-tool`
+
+目录内包含 `config.yaml`、`nyamedia.db` 和 `logs/`。Windows 的 WebView2 用户数据也位于该目录下。`NYAMMD_DATA_DIR` 可以覆盖根目录，适合便携运行、隔离测试或受控部署；请勿让多个运行中的实例共享同一个覆盖目录。
+
+首次启动且目标 `config.yaml` 与 `nyamedia.db` 都不存在时，桌面端会在启动工作目录和可执行文件目录中查找旧 CLI 数据。识别到旧 `config.yaml` 后会保留未知字段与注释、改写数据库路径，并通过 SQLite 一致性快照导入数据库；旧文件不会被修改。目标目录中任一文件已经存在时会跳过整次迁移。使用任意自定义 `-config` 路径的旧实例无法被自动发现，需要先把配置放到上述候选目录或手动迁移。
+
+SQLite 数据库包含任务、目录、上传目标和本地凭据。应用会在支持 POSIX 权限的平台把配置、数据库及其 WAL 文件收紧为仅当前用户可读写（`0600`）；仍应保护备份和同步目录的访问权限。应用运行中备份请使用 SQLite 一致性快照，不要只复制一个正在写入的 `.db` 文件。当前版本不会把凭据同步到系统钥匙串。
+
+## 外部工具策略
+
+桌面安装包不捆绑 `ffmpeg`、`ffprobe`、MKVToolNix 的 `mkvextract` 或 MediaInfo。这样可以避免显著增大安装包，也允许用户选择符合自身许可证、编解码器和硬件加速需求的构建。建议通过系统包管理器安装，或在设置页为每个工具选择明确的可执行文件路径。
+
+应用首次创建配置时会尝试从 `PATH` 自动识别这些工具。缺失的工具不会影响工作台启动，但依赖它的字幕、媒体探测、BIF 或 NFO 处理会不可用或失败；开始扫描前应在设置页完成工具检查。
+
+## CLI 与 Web 兼容入口
+
+无桌面环境时仍可复制示例配置并启动原有服务：
 
 ```powershell
 Copy-Item config.example.yaml config.yaml
-```
-
-启动服务：
-
-```powershell
 go run ./cmd/nyammd -config config.yaml
 ```
 
-访问 Web 管理端：
+默认浏览器入口：
 
 ```text
 http://127.0.0.1:18880
 ```
 
-如果修改了前端，需要先构建前端，再启动或构建 Go 服务：
+CLI 使用显式传入的配置文件和其中的数据库路径，不会改用桌面端系统数据目录。不要让 CLI 与桌面客户端同时指向同一 SQLite 数据库或重命名历史文件；桌面单实例锁不覆盖另一个 CLI 进程。需要更新内嵌前端时先执行：
 
 ```powershell
 Set-Location web
-npm install
+npm ci
 npm run build
 Set-Location ..
 go run ./cmd/nyammd -config config.yaml
@@ -91,17 +163,19 @@ go run ./cmd/nyammd -config config.yaml
 go test ./...
 Set-Location web
 npm run build
+Set-Location ..
+wails build -clean -platform windows/amd64
 ```
 
 ## 配置说明
 
 示例配置见 `config.example.yaml`。主要配置块如下：
 
-- `server`：服务监听地址和时区，默认 `127.0.0.1:18880`、`Asia/Shanghai`。
-- `database`：SQLite 数据库路径，默认 `data/nyamedia.db`。
+- `server`：CLI/Web 服务监听地址和时区，默认 `127.0.0.1:18880`、`Asia/Shanghai`；桌面生产模式不开放该监听端口。
+- `database`：SQLite 数据库路径。CLI 示例默认为 `data/nyamedia.db`；桌面端生成指向系统应用数据目录的绝对路径。
 - `tools`：`ffmpeg`、`ffprobe`、`mkvextract`、`mediainfo` 路径。
 - `processing`：视频扩展名、并发数、文件稳定检测、BIF 参数、处理策略和产物开关。
-- `upload`：是否自动发布、上传目标并发、番剧变更合并窗口、自动重试次数和默认发布文件类型。至少选择一种默认文件类型；网盘目标、目录路由与凭据保存在 SQLite，由 Web 端的“上传”页面管理；Cookie 不会写入 `config.yaml` 或 `GET /api/config` 响应。
+- `upload`：是否自动发布、上传目标并发、番剧变更合并窗口、自动重试次数和默认发布文件类型。至少选择一种默认文件类型；网盘目标、目录路由与凭据保存在 SQLite，由工作台的“上传”页面管理；Cookie 不会写入 `config.yaml` 或 `GET /api/config` 响应。
 - `renaming`：重命名预览并发数。
 - `scraping`：TMDB、fanart.tv、语言、地区、备用语言、代理等刮削配置。
 
@@ -156,9 +230,9 @@ seasonXX-poster.jpg 或季度目录内 poster.jpg
 - 单集缩略图优先使用 TMDB still，缺失时回退到视频 50% 位置抽帧。
 - 剧集/季度 NFO 与图片会按扫描批次做作用域去重，避免同一轮扫描中重复生成。
 
-## Web 功能
+## 工作台功能
 
-Web 管理端当前包含这些页面：
+桌面客户端与 CLI 的浏览器管理端共用以下页面；桌面环境会额外启用原生文件与通知能力：
 
 - 仪表盘：查看服务健康、工具状态、最近任务与最近产物。
 - 设置：编辑服务、工具、处理策略、TMDB/fanart.tv 等配置。
@@ -184,11 +258,11 @@ Web 管理端当前包含这些页面：
 - `{season:00}`、`{episode:000}` 这类补零格式
 - `{if:releaseGroup| - {releaseGroup}|}` 条件片段
 
-重命名会同步处理同名前缀的常见附属文件，例如 `.nfo`、字幕、`.json`、`.bif`、图片等。执行记录会写入历史，可在 Web 端检查并回滚。
+重命名会同步处理同名前缀的常见附属文件，例如 `.nfo`、字幕、`.json`、`.bif`、图片等。执行记录会写入历史，可在工作台检查并回滚。
 
 ## 剧集核对
 
-剧集核对的主要入口在 Web 管理端的 `剧集核对` 页面，包含三个能力：
+剧集核对的主要入口在工作台的 `剧集核对` 页面，包含三个能力：
 
 - `剧集缺漏`：扫描本地剧集目录，结合 `tvshow.nfo` 或手动选择的 TMDB 剧集 ID 判断缺集，并检查单集/季度/剧集伴生文件。
 - `Emby 与本地核对`：通过 Emby API 对比本地 NFO、图片状态、provider id、文件名等信息。

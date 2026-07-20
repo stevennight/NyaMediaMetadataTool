@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -398,6 +400,8 @@ func PreviewSingle(ctx context.Context, cfg config.Config, input PreviewItemRequ
 }
 
 func Apply(historyPath string, input ApplyRequest) (ApplyResult, error) {
+	unlock := lockHistory(historyPath)
+	defer unlock()
 	batch := HistoryBatch{ID: strconv.FormatInt(timeNowUnixNano(), 36), CreatedAt: nowRFC3339()}
 	result := ApplyResult{BatchID: batch.ID, Items: make([]PreviewItem, 0, len(input.Items))}
 	for _, entry := range input.Items {
@@ -407,8 +411,12 @@ func Apply(historyPath string, input ApplyRequest) (ApplyResult, error) {
 			batch.Items = append(batch.Items, HistoryItem{Path: entry.Path, NewPath: item.NewPath, Status: item.Status, Message: item.Message, Moves: moves})
 		}
 	}
-	if err := appendHistoryBatch(historyPath, batch); err != nil {
-		return result, err
+	if err := appendHistoryBatchLocked(historyPath, batch); err != nil {
+		moves := flattenMoves(batch)
+		if rollbackErr := reverseRenameMoves(moves); rollbackErr != nil {
+			return result, fmt.Errorf("save rename history: %v; rollback renamed files: %w", err, rollbackErr)
+		}
+		return result, fmt.Errorf("save rename history: %w", err)
 	}
 	return result, nil
 }
@@ -1257,7 +1265,13 @@ func samePath(a string, b string) bool {
 	absA, errA := filepath.Abs(a)
 	absB, errB := filepath.Abs(b)
 	if errA == nil && errB == nil {
-		return strings.EqualFold(absA, absB)
+		if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+			return strings.EqualFold(absA, absB)
+		}
+		return absA == absB
 	}
-	return strings.EqualFold(a, b)
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }

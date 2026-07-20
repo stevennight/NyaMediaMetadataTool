@@ -200,11 +200,22 @@ func (m *Manager) Run(ctx context.Context) error {
 	if workers <= 0 {
 		workers = 1
 	}
+	var wg sync.WaitGroup
 	for index := 0; index < workers; index++ {
-		go m.worker(ctx)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.worker(ctx)
+		}()
 	}
-	go m.sealer(ctx)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		m.sealer(ctx)
+	}()
 	<-ctx.Done()
+	m.CancelRunningTargets()
+	wg.Wait()
 	return nil
 }
 

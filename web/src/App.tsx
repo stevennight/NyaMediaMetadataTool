@@ -15,11 +15,13 @@ import {
   LayoutDashboard,
   ListTodo,
   Monitor,
+  Moon,
   RefreshCw,
   Save,
   SearchCheck,
   Settings,
   SlidersHorizontal,
+  Sun,
   Tags,
   UploadCloud,
   WandSparkles,
@@ -28,6 +30,8 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { getRuntimeInfo, notifyDesktop, pickDesktopDirectory, pickDesktopFile, previewDesktopRename, revealDesktopPath } from './desktop';
 import type { DesktopRuntimeInfo } from './desktop';
+import { applyThemeMode, readThemeMode } from './theme';
+import type { ThemeMode } from './theme';
 
 type Health = {
   status: string;
@@ -487,6 +491,12 @@ const settingsTabOptions: Array<{ value: SettingsTab; label: string }> = [
   { value: 'sources', label: '数据源' }
 ];
 
+const themeOptions: Array<{ value: ThemeMode; label: string; icon: LucideIcon }> = [
+  { value: 'system', label: '跟随系统', icon: Monitor },
+  { value: 'light', label: '浅色', icon: Sun },
+  { value: 'dark', label: '深色', icon: Moon }
+];
+
 function pageFromPath(pathname: string): PageKey {
   switch (pathname) {
     case '/settings':
@@ -809,6 +819,7 @@ export function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [savedConfig, setSavedConfig] = useState<AppConfig | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<DesktopRuntimeInfo | null>(null);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const [initialLoading, setInitialLoading] = useState(true);
   const [connectionOnline, setConnectionOnline] = useState(false);
   const [healthCheckedAt, setHealthCheckedAt] = useState<Date | null>(null);
@@ -969,6 +980,8 @@ export function App() {
     uploadCookieProvider && 'upload-cookie', (newUploadProviderOpen || uploadProviderModal) && 'upload-provider', selectedTask && 'task-detail',
     recentArtifactsOpen && 'artifacts'
   ].filter(Boolean).join('|');
+
+  useEffect(() => applyThemeMode(themeMode), [themeMode]);
 
   useEffect(() => {
     if (!notice) return;
@@ -2709,6 +2722,7 @@ export function App() {
                   >{option.label}</button>)}
                 </div>
                 <section id="settings-panel-basic" className={`settings-section ${settingsTab === 'basic' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-basic" hidden={settingsTab !== 'basic'}>
+                  <ThemeSelector value={themeMode} onChange={setThemeMode} />
                   <label>显示时区<input list="timezone-options" value={config.server.timezone} onChange={(event) => updateConfig((draft) => { draft.server.timezone = event.target.value; })} placeholder="Asia/Shanghai" /></label>
                   <datalist id="timezone-options">
                     {timeZoneOptions.map((timezone) => <option key={timezone} value={timezone} />)}
@@ -3641,6 +3655,32 @@ function TabButton(props: { active: boolean; label: string; icon: LucideIcon; ba
       <span className="tab-button-label">{props.label}</span>
       {props.badge ? <span className={`nav-badge ${props.badgeTone ?? 'default'}`}>{props.badge}</span> : null}
     </button>
+  );
+}
+
+function ThemeSelector(props: { value: ThemeMode; onChange: (value: ThemeMode) => void }) {
+  return (
+    <fieldset className="theme-preference">
+      <legend>界面主题</legend>
+      <div className="theme-options">
+        {themeOptions.map((option) => {
+          const Icon = option.icon;
+          return (
+            <label className="theme-option" key={option.value} title={option.label}>
+              <input
+                type="radio"
+                name="theme-mode"
+                value={option.value}
+                checked={props.value === option.value}
+                onChange={() => props.onChange(option.value)}
+              />
+              <Icon size={16} aria-hidden="true" />
+              <span>{option.label}</span>
+            </label>
+          );
+        })}
+      </div>
+    </fieldset>
   );
 }
 

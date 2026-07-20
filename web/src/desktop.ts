@@ -21,6 +21,10 @@ type DesktopBridge = {
 
 type DesktopRuntimeBridge = {
   EventsOn: (eventName: string, callback: (data: unknown) => void) => () => void;
+  WindowSetSystemDefaultTheme?: () => void;
+  WindowSetLightTheme?: () => void;
+  WindowSetDarkTheme?: () => void;
+  WindowSetBackgroundColour?: (red: number, green: number, blue: number, alpha: number) => void;
 };
 
 export type DesktopRenamePreviewRequest = {
@@ -54,6 +58,18 @@ declare global {
 
 function bridge(): DesktopBridge | null {
   return window.go?.main?.DesktopApp ?? null;
+}
+
+export function setDesktopWindowTheme(mode: 'system' | 'light' | 'dark', resolved: 'light' | 'dark') {
+  const runtime = window.runtime;
+  if (!runtime) return;
+
+  if (mode === 'system') runtime.WindowSetSystemDefaultTheme?.();
+  else if (resolved === 'dark') runtime.WindowSetDarkTheme?.();
+  else runtime.WindowSetLightTheme?.();
+
+  const background = resolved === 'dark' ? [15, 20, 28] : [244, 246, 248];
+  runtime.WindowSetBackgroundColour?.(background[0], background[1], background[2], 255);
 }
 
 export async function getRuntimeInfo(): Promise<DesktopRuntimeInfo> {

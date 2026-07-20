@@ -50,6 +50,7 @@ func runDesktop() error {
 		MinWidth:          900,
 		MinHeight:         640,
 		BackgroundColour:  options.NewRGB(246, 247, 249),
+		StartHidden:       true,
 		HideWindowOnClose: false,
 		AssetServer: &assetserver.Options{
 			Assets:  web.Assets(),

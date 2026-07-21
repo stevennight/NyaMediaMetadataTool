@@ -11,12 +11,21 @@ import (
 	"sync"
 	"time"
 
-	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/pipeline"
 	"NyaMediaMetadataTool/internal/store"
 )
 
 const schedulerInterval = 2 * time.Second
+
+type Options struct {
+	Concurrency int
+	QuietPeriod time.Duration
+	MaxAttempts int
+}
+
+func DefaultOptions() Options {
+	return Options{Concurrency: 1, QuietPeriod: 2 * time.Minute, MaxAttempts: 3}
+}
 
 // RemoteEntry is a provider-neutral view used for validation and future
 // destination directory pickers.
@@ -45,7 +54,7 @@ type Provider interface {
 type ProviderFactory func(ctx context.Context, target store.UploadBatchTarget) (Provider, error)
 
 type Manager struct {
-	cfg        config.UploadConfig
+	options    Options
 	store      *store.Store
 	logger     *slog.Logger
 	factory    ProviderFactory
@@ -59,9 +68,22 @@ type Manager struct {
 	authFlows map[string]*cookie115AuthFlow
 }
 
-func New(cfg config.UploadConfig, st *store.Store, logger *slog.Logger) *Manager {
+func New(st *store.Store, logger *slog.Logger) *Manager {
+	return newManager(DefaultOptions(), st, logger, nil)
+}
+
+func NewWithOptions(options Options, st *store.Store, logger *slog.Logger) *Manager {
+	return newManager(options, st, logger, nil)
+}
+
+func NewWithFactory(options Options, st *store.Store, logger *slog.Logger, factory ProviderFactory) *Manager {
+	return newManager(options, st, logger, factory)
+}
+
+func newManager(options Options, st *store.Store, logger *slog.Logger, factory ProviderFactory) *Manager {
+	options = normalizeOptions(options)
 	manager := &Manager{
-		cfg:       cfg,
+		options:   options,
 		store:     st,
 		logger:    logger,
 		active:    make(map[int64]context.CancelFunc),
@@ -70,16 +92,25 @@ func New(cfg config.UploadConfig, st *store.Store, logger *slog.Logger) *Manager
 		providers: providerDescriptorMap(),
 	}
 	manager.registerBuiltInProviders()
-	manager.factory = manager.defaultProviderFactory
+	if factory == nil {
+		factory = manager.defaultProviderFactory
+	}
+	manager.factory = factory
 	return manager
 }
 
-func NewWithFactory(cfg config.UploadConfig, st *store.Store, logger *slog.Logger, factory ProviderFactory) *Manager {
-	manager := New(cfg, st, logger)
-	if factory != nil {
-		manager.factory = factory
+func normalizeOptions(options Options) Options {
+	defaults := DefaultOptions()
+	if options.Concurrency <= 0 {
+		options.Concurrency = defaults.Concurrency
 	}
-	return manager
+	if options.QuietPeriod <= 0 {
+		options.QuietPeriod = defaults.QuietPeriod
+	}
+	if options.MaxAttempts <= 0 {
+		options.MaxAttempts = defaults.MaxAttempts
+	}
+	return options
 }
 
 func (m *Manager) RegisterProvider(providerType string, builder ProviderBuilder) {
@@ -107,9 +138,13 @@ func (m *Manager) RegisterProviderDescriptor(descriptor ProviderDescriptor, buil
 	if len(descriptor.SecretKeys) == 0 {
 		descriptor.SecretKeys = append([]string{}, existing.SecretKeys...)
 	}
+	if len(descriptor.AuthDevices) == 0 {
+		descriptor.AuthDevices = append([]AuthDeviceDescriptor{}, existing.AuthDevices...)
+	}
 	descriptor.Type = providerType
 	descriptor.Implemented = true
 	descriptor.SecretKeys = append([]string{}, descriptor.SecretKeys...)
+	descriptor.AuthDevices = append([]AuthDeviceDescriptor{}, descriptor.AuthDevices...)
 	m.providers[providerType] = descriptor
 	m.providerMu.Unlock()
 }
@@ -140,43 +175,46 @@ func (m *Manager) ProviderDescriptor(providerType string) (ProviderDescriptor, b
 	defer m.providerMu.RUnlock()
 	descriptor, ok := m.providers[normalizeProviderType(providerType)]
 	descriptor.SecretKeys = append([]string{}, descriptor.SecretKeys...)
+	descriptor.AuthDevices = append([]AuthDeviceDescriptor{}, descriptor.AuthDevices...)
 	return descriptor, ok
-}
-
-func (m *Manager) Enabled() bool {
-	return m.cfg.Enabled
 }
 
 // RecordMediaProcessed is the handoff from the metadata pipeline. It only
 // collects stable source and generated artifacts; network work happens later.
 func (m *Manager) RecordMediaProcessed(ctx context.Context, task store.Task, media store.MediaFile) error {
-	if !m.cfg.Enabled {
+	dir, err := m.store.FindWatchDirForPath(ctx, media.Path)
+	if errors.Is(err, store.ErrWatchDirNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("find media watch directory: %w", err)
+	}
+	hasEnabledConfig := false
+	for _, uploadConfig := range dir.UploadConfigs {
+		if uploadConfig.Enabled {
+			hasEnabledConfig = true
+			break
+		}
+	}
+	if !hasEnabledConfig {
 		return nil
 	}
 	artifacts, err := m.store.ListArtifactsByTask(ctx, task.ID)
 	if err != nil {
 		return fmt.Errorf("list task artifacts: %w", err)
 	}
-	var watchDirID *int64
-	if dir, findErr := m.store.FindWatchDirForPath(ctx, media.Path); findErr == nil {
-		watchDirID = &dir.ID
-	}
 	seriesPath := pipeline.SeriesDirectory(media.Path)
-	// Collect all known candidates first. The store applies the global profile
-	// or a target-specific route profile when it creates transfers, so a route
-	// can intentionally widen or narrow the global selection.
-	files, err := collectCandidates(media.Path, seriesPath, artifacts, nil)
+	files, err := collectCandidates(media.Path, seriesPath, dir.Path, artifacts)
 	if err != nil {
 		return err
 	}
-	seriesKey := normalizeSeriesKey(watchDirID, seriesPath)
+	seriesKey := normalizeSeriesKey(&dir.ID, seriesPath)
 	batch, created, err := m.store.CollectUploadBatch(ctx, store.UploadCollectionInput{
-		WatchDirID:          watchDirID,
-		SeriesKey:           seriesKey,
-		SeriesPath:          seriesPath,
-		QuietPeriod:         m.cfg.QuietPeriod,
-		DefaultIncludeTypes: m.cfg.IncludeTypes,
-		Files:               files,
+		WatchDirID:  &dir.ID,
+		SeriesKey:   seriesKey,
+		SeriesPath:  seriesPath,
+		QuietPeriod: m.options.QuietPeriod,
+		Files:       files,
 	})
 	if err != nil {
 		return fmt.Errorf("collect upload batch: %w", err)
@@ -192,11 +230,7 @@ func (m *Manager) RecordMediaProcessed(ctx context.Context, task store.Task, med
 }
 
 func (m *Manager) Run(ctx context.Context) error {
-	if !m.cfg.Enabled {
-		<-ctx.Done()
-		return nil
-	}
-	workers := m.cfg.Concurrency
+	workers := m.options.Concurrency
 	if workers <= 0 {
 		workers = 1
 	}
@@ -256,7 +290,7 @@ func (m *Manager) sealer(ctx context.Context) {
 	ticker := time.NewTicker(schedulerInterval)
 	defer ticker.Stop()
 	for {
-		if _, err := m.store.SealDueUploadBatches(ctx, time.Now(), m.cfg.QuietPeriod); err != nil && !errors.Is(err, context.Canceled) {
+		if _, err := m.store.SealDueUploadBatches(ctx, time.Now(), m.options.QuietPeriod); err != nil && !errors.Is(err, context.Canceled) {
 			m.logger.Warn("seal upload batches failed", "error", err)
 		}
 		select {
@@ -305,7 +339,7 @@ func (m *Manager) worker(ctx context.Context) {
 			continue
 		}
 		m.logger.Warn("upload target failed", "targetID", target.ID, "provider", target.ProviderName, "error", err)
-		if target.Attempts < m.cfg.MaxAttempts {
+		if target.Attempts < m.options.MaxAttempts {
 			delay := retryDelay(target.Attempts)
 			if retryErr := m.store.RescheduleUploadTarget(ctx, target.ID, err.Error(), time.Now().Add(delay)); retryErr != nil {
 				m.logger.Warn("reschedule upload target failed", "targetID", target.ID, "error", retryErr)
@@ -376,9 +410,9 @@ func targetFromProvider(provider store.UploadProvider) store.UploadBatchTarget {
 		ProviderID:      provider.ID,
 		ProviderName:    provider.Name,
 		ProviderType:    provider.Type,
-		RemoteRoot:      provider.RemoteRoot,
 		UserAgent:       provider.UserAgent,
-		CollisionPolicy: provider.CollisionPolicy,
+		RemoteRoot:      "/",
+		CollisionPolicy: "fail",
 	}
 }
 
@@ -392,14 +426,14 @@ func retryDelay(attempt int) time.Duration {
 	return time.Duration(attempt*attempt) * 5 * time.Second
 }
 
-func collectCandidates(mediaPath string, seriesPath string, artifacts []store.Artifact, includeTypes []string) ([]store.UploadCandidate, error) {
+func collectCandidates(mediaPath string, seriesPath string, watchRoot string, artifacts []store.Artifact) ([]store.UploadCandidate, error) {
 	candidates := make(map[string]store.UploadCandidate)
 	add := func(localPath string, fileType string) error {
-		if !uploadTypeAllowed(includeTypes, fileType) {
-			return nil
-		}
 		localPath = filepath.Clean(localPath)
 		if !isWithinPath(localPath, seriesPath) {
+			return nil
+		}
+		if !isWithinPath(localPath, watchRoot) {
 			return nil
 		}
 		info, err := os.Stat(localPath)
@@ -409,7 +443,7 @@ func collectCandidates(mediaPath string, seriesPath string, artifacts []store.Ar
 		if info.IsDir() || !info.Mode().IsRegular() {
 			return nil
 		}
-		relative, err := filepath.Rel(seriesPath, localPath)
+		relative, err := filepath.Rel(watchRoot, localPath)
 		if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || relative == ".." {
 			return fmt.Errorf("cannot create upload relative path for %s", localPath)
 		}

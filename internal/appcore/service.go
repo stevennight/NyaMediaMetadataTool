@@ -67,8 +67,12 @@ func Start(parent context.Context, configPath string, logger *slog.Logger) (*Ser
 	}()
 
 	ctx := context.Background()
-	if err := db.Migrate(ctx); err != nil {
+	if err := db.Migrate(ctx, cfg.LegacyUpload); err != nil {
 		return nil, fmt.Errorf("migrate database: %w", err)
+	}
+	uploadRuntime, err := db.GetUploadRuntimeOptions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load upload runtime options: %w", err)
 	}
 	if err := db.ResetRunningTasks(ctx); err != nil {
 		return nil, fmt.Errorf("reset running tasks: %w", err)
@@ -87,7 +91,11 @@ func Start(parent context.Context, configPath string, logger *slog.Logger) (*Ser
 
 	serviceCtx, cancel := context.WithCancel(parent)
 	watcherService := watcher.New(cfg, db, logger)
-	uploadManager := upload.New(cfg.Upload, db, logger)
+	uploadManager := upload.NewWithOptions(upload.Options{
+		Concurrency: uploadRuntime.Concurrency,
+		QuietPeriod: uploadRuntime.QuietPeriod,
+		MaxAttempts: uploadRuntime.MaxAttempts,
+	}, db, logger)
 	taskRunner := runner.New(cfg, db, logger, uploadManager)
 
 	service := &Service{

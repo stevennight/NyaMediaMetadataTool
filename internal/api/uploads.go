@@ -187,6 +187,7 @@ func (s *Server) handleCreateUploadProvider(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	input.AuthDevice = ""
 	created, err := s.store.CreateUploadProvider(r.Context(), input)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -311,7 +312,8 @@ func (s *Server) handleUploadProviderCookie(w http.ResponseWriter, r *http.Reque
 	switch r.Method {
 	case http.MethodPut:
 		var input struct {
-			Cookie string `json:"cookie"`
+			Cookie     string `json:"cookie"`
+			AuthDevice string `json:"authDevice"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			writeError(w, http.StatusBadRequest, err)
@@ -321,7 +323,11 @@ func (s *Server) handleUploadProviderCookie(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusBadRequest, errors.New("cookie is required"))
 			return
 		}
-		if err := s.store.SetUploadProviderSecret(r.Context(), providerID, "cookie", input.Cookie); err != nil {
+		if !upload.IsSupported115CookieDevice(input.AuthDevice) {
+			writeError(w, http.StatusBadRequest, errors.New("a supported 115 Cookie authDevice is required"))
+			return
+		}
+		if err := s.store.SetUploadProviderCookie(r.Context(), providerID, input.Cookie, input.AuthDevice); err != nil {
 			writeUploadStoreError(w, err)
 			return
 		}
@@ -351,6 +357,10 @@ func (s *Server) handleUploadProviderSecret(w http.ResponseWriter, r *http.Reque
 	descriptor, found := s.uploadProviderDescriptor(provider.Type)
 	if !found || !providerSecretKeyAllowed(descriptor, key) {
 		writeError(w, http.StatusBadRequest, errors.New("credential key is not supported by this provider"))
+		return
+	}
+	if provider.Type == store.UploadProviderType115Cookie && key == "cookie" && (r.Method == http.MethodPut || r.Method == http.MethodDelete) {
+		writeError(w, http.StatusBadRequest, store.ErrUploadProviderCookieOnly)
 		return
 	}
 	switch r.Method {
@@ -399,12 +409,12 @@ func (s *Server) handleUploadProviderDirectory(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusServiceUnavailable, errors.New("upload manager is unavailable"))
 		return
 	}
-	provider, err := s.store.GetUploadProvider(r.Context(), providerID)
+	_, err := s.store.GetUploadProvider(r.Context(), providerID)
 	if err != nil {
 		writeUploadStoreError(w, err)
 		return
 	}
-	remotePath, err := uploadProviderBrowsePath(provider.RemoteRoot, r.URL.Query().Get("path"))
+	remotePath, err := uploadProviderBrowsePath(r.URL.Query().Get("path"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -433,7 +443,7 @@ func (s *Server) handleUploadProviderCookieAuth(w http.ResponseWriter, r *http.R
 		}
 		status, err := s.uploads.StartCookie115Auth(r.Context(), providerID, input.Terminal)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, status)
@@ -491,18 +501,28 @@ func splitUploadProviderPath(value string) []string {
 	return strings.Split(rest, "/")
 }
 
-func uploadProviderBrowsePath(root string, relative string) (string, error) {
-	relative = strings.TrimSpace(strings.ReplaceAll(relative, "\\", "/"))
-	if relative == "" || relative == "/" {
-		return pathpkg.Clean("/" + strings.TrimPrefix(root, "/")), nil
+func uploadProviderBrowsePath(value string) (string, error) {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+	if value == "" || value == "/" {
+		return "/", nil
 	}
-	if strings.HasPrefix(relative, "/") || strings.HasPrefix(relative, "../") || relative == ".." || strings.Contains(relative, "/../") {
-		return "", errors.New("path must stay below the configured remote root")
+	for _, segment := range strings.Split(value, "/") {
+		if segment == ".." {
+			return "", errors.New("path must not contain parent traversal")
+		}
 	}
-	return pathpkg.Join(pathpkg.Clean("/"+strings.TrimPrefix(root, "/")), relative), nil
+	return pathpkg.Clean("/" + strings.TrimPrefix(value, "/")), nil
 }
 
 func writeUploadStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrUploadProviderInUse) || errors.Is(err, store.ErrUploadProviderTypeImmutable) {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if errors.Is(err, store.ErrUploadTargetNotRetryable) {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
 	if errors.Is(err, store.ErrUploadProviderNotFound) || errors.Is(err, store.ErrUploadBatchNotFound) || errors.Is(err, store.ErrUploadTargetNotFound) {
 		writeError(w, http.StatusNotFound, err)
 		return

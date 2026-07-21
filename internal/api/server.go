@@ -817,6 +817,10 @@ func (s *Server) handleCreateWatchDir(w http.ResponseWriter, r *http.Request) {
 	normalizeWatchDirProcessing(&input, s.snapshotConfig().Processing.OutputConfig())
 	created, err := s.store.CreateWatchDir(r.Context(), input)
 	if err != nil {
+		if errors.Is(err, store.ErrUploadProviderNotFound) || errors.Is(err, store.ErrInvalidUploadConfig) {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -848,6 +852,10 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, store.ErrWatchDirNotFound) {
 			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		if errors.Is(err, store.ErrUploadProviderNotFound) || errors.Is(err, store.ErrInvalidUploadConfig) {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err)

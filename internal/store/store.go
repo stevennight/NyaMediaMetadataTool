@@ -3,16 +3,26 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
+
+	"NyaMediaMetadataTool/internal/config"
 
 	_ "modernc.org/sqlite"
 )
 
 type Store struct {
 	db *sql.DB
+}
+
+type UploadRuntimeOptions struct {
+	Concurrency int
+	QuietPeriod time.Duration
+	MaxAttempts int
 }
 
 func Open(path string) (*Store, error) {
@@ -69,7 +79,11 @@ func (s *Store) configure(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) Migrate(ctx context.Context) error {
+func (s *Store) Migrate(ctx context.Context, legacyUploads ...*config.LegacyUploadConfig) error {
+	var legacyUpload *config.LegacyUploadConfig
+	if len(legacyUploads) > 0 {
+		legacyUpload = legacyUploads[0]
+	}
 	_, err := s.db.ExecContext(ctx, schema)
 	if err != nil {
 		return err
@@ -98,7 +112,13 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureUploadColumns(ctx); err != nil {
 		return err
 	}
-	return s.ensureUploadScopedRouteFallbacks(ctx)
+	if err := s.migrateUploadRoutesToWatchDirs(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateLegacyUploadSettings(ctx, legacyUpload); err != nil {
+		return err
+	}
+	return s.cancelLegacyUploadWork(ctx)
 }
 
 func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
@@ -161,7 +181,9 @@ func (s *Store) ensureUploadColumns(ctx context.Context) error {
 		alter  string
 		update string
 	}{
+		{"upload_providers", "auth_device", `ALTER TABLE upload_providers ADD COLUMN auth_device TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_batch_targets", "include_types", `ALTER TABLE upload_batch_targets ADD COLUMN include_types TEXT NOT NULL DEFAULT ''`, ""},
+		{"upload_batch_targets", "retryable", `ALTER TABLE upload_batch_targets ADD COLUMN retryable INTEGER NOT NULL DEFAULT 1`, ""},
 		{"upload_events", "attempts", `ALTER TABLE upload_events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`, ""},
 		{"upload_events", "available_at", `ALTER TABLE upload_events ADD COLUMN available_at TEXT NOT NULL DEFAULT ''`, `UPDATE upload_events SET available_at = created_at WHERE available_at = ''`},
 		{"upload_events", "lease_id", `ALTER TABLE upload_events ADD COLUMN lease_id TEXT NOT NULL DEFAULT ''`, ""},
@@ -194,27 +216,197 @@ func (s *Store) ensureUploadColumns(ctx context.Context) error {
 	return nil
 }
 
-// Scoped-only upload targets created before the global fallback sentinel was
-// introduced need one disabled global route. Without it, deleting their last
-// watch directory would leave no routes and accidentally reactivate legacy
-// all-directory behavior.
-func (s *Store) ensureUploadScopedRouteFallbacks(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
-INSERT OR IGNORE INTO upload_provider_routes (provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types, updated_at)
-SELECT p.id, NULL, 0, p.remote_root, p.collision_policy, '', CURRENT_TIMESTAMP
+func (s *Store) migrateUploadRoutesToWatchDirs(ctx context.Context) error {
+	const migration = "upload-routes-to-watch-dirs-v1"
+	var applied int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, migration).Scan(&applied)
+	if err != nil || applied > 0 {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Materialize the legacy provider-wide fallback for every directory that
+	// does not already have a scoped override. Providers without routes used
+	// their provider defaults globally, so they are expanded in the same way.
+	if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO upload_provider_routes
+  (provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types, updated_at)
+SELECT p.id, wd.id, 1,
+       COALESCE(global_route.remote_root, p.remote_root),
+       COALESCE(global_route.collision_policy, p.collision_policy),
+       COALESCE(global_route.include_types, ''),
+       CURRENT_TIMESTAMP
 FROM upload_providers p
-WHERE EXISTS (
-  SELECT 1
-  FROM upload_provider_routes scoped
-  WHERE scoped.provider_id = p.id AND scoped.watch_dir_id IS NOT NULL
-)
-AND NOT EXISTS (
-  SELECT 1
-  FROM upload_provider_routes global
-  WHERE global.provider_id = p.id AND global.watch_dir_id IS NULL
-)
-`)
-	return err
+CROSS JOIN watch_dirs wd
+LEFT JOIN upload_provider_routes scoped
+  ON scoped.provider_id = p.id AND scoped.watch_dir_id = wd.id
+LEFT JOIN upload_provider_routes global_route
+  ON global_route.provider_id = p.id AND global_route.watch_dir_id IS NULL
+WHERE scoped.id IS NULL
+  AND (
+    (global_route.id IS NOT NULL AND global_route.enabled = 1)
+    OR (
+      global_route.id IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM upload_provider_routes any_route WHERE any_route.provider_id = p.id
+      )
+    )
+  )
+`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_routes WHERE watch_dir_id IS NULL`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_upload_provider_routes_global`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (name) VALUES (?)`, migration); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) migrateLegacyUploadSettings(ctx context.Context, legacy *config.LegacyUploadConfig) error {
+	const migration = "legacy-upload-settings-to-sqlite-v1"
+	var applied int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, migration).Scan(&applied)
+	if err != nil || applied > 0 {
+		return err
+	}
+
+	includeTypes := append([]string{}, uploadFileTypes...)
+	options := UploadRuntimeOptions{Concurrency: 1, QuietPeriod: 2 * time.Minute, MaxAttempts: 3}
+	if legacy != nil {
+		includeTypes = normalizeStoredUploadTypes(legacy.IncludeTypes)
+		if len(includeTypes) == 0 {
+			includeTypes = append([]string{}, uploadFileTypes...)
+		}
+		options = UploadRuntimeOptions{
+			Concurrency: legacy.Concurrency,
+			QuietPeriod: legacy.QuietPeriod,
+			MaxAttempts: legacy.MaxAttempts,
+		}
+	}
+	options = normalizeUploadRuntimeOptions(options)
+	encodedTypes, err := json.Marshal(includeTypes)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if legacy != nil {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE upload_runtime_options
+SET concurrency = ?, quiet_period_ns = ?, max_attempts = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = 1
+`, options.Concurrency, int64(options.QuietPeriod), options.MaxAttempts); err != nil {
+			return err
+		}
+	}
+	// Before directory-scoped upload existed, a missing upload block had the
+	// same behavior as enabled=false. Preserve that safe default during upgrade.
+	if legacy == nil || !legacy.Enabled {
+		if _, err := tx.ExecContext(ctx, `UPDATE upload_provider_routes SET enabled = 0, updated_at = CURRENT_TIMESTAMP`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE upload_provider_routes
+SET include_types = ?, updated_at = CURRENT_TIMESTAMP
+WHERE TRIM(include_types) IN ('', '[]', 'null')
+`, string(encodedTypes)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (name) VALUES (?)`, migration); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) cancelLegacyUploadWork(ctx context.Context) error {
+	const migration = "cancel-legacy-upload-work-v1"
+	var applied int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, migration).Scan(&applied)
+	if err != nil || applied > 0 {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+UPDATE upload_batch_targets
+SET retryable = 0, updated_at = CURRENT_TIMESTAMP
+WHERE status <> ?
+`, UploadTargetCompleted); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE upload_transfers
+SET status = ?, error_summary = CASE WHEN error_summary = '' THEN 'canceled during directory upload migration' ELSE error_summary END,
+    finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+WHERE status IN (?, ?)
+`, UploadTransferCanceled, UploadTransferPending, UploadTransferRunning); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE upload_batch_targets
+SET status = ?, error_summary = CASE WHEN error_summary = '' THEN 'canceled during directory upload migration' ELSE error_summary END,
+    finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+WHERE status IN (?, ?, ?)
+`, UploadTargetCanceled, UploadTargetWaiting, UploadTargetPending, UploadTargetRunning); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE upload_batches
+SET status = ?, updated_at = CURRENT_TIMESTAMP
+WHERE status IN (?, ?, ?)
+`, UploadBatchCanceled, UploadBatchCollecting, UploadBatchPending, UploadBatchRunning); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (name) VALUES (?)`, migration); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) GetUploadRuntimeOptions(ctx context.Context) (UploadRuntimeOptions, error) {
+	var options UploadRuntimeOptions
+	var quietPeriodNS int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT concurrency, quiet_period_ns, max_attempts
+FROM upload_runtime_options
+WHERE id = 1
+`).Scan(&options.Concurrency, &quietPeriodNS, &options.MaxAttempts)
+	if err != nil {
+		return UploadRuntimeOptions{}, err
+	}
+	options.QuietPeriod = time.Duration(quietPeriodNS)
+	return normalizeUploadRuntimeOptions(options), nil
+}
+
+func normalizeUploadRuntimeOptions(options UploadRuntimeOptions) UploadRuntimeOptions {
+	if options.Concurrency <= 0 {
+		options.Concurrency = 1
+	}
+	if options.QuietPeriod <= 0 {
+		options.QuietPeriod = 2 * time.Minute
+	}
+	if options.MaxAttempts <= 0 {
+		options.MaxAttempts = 3
+	}
+	return options
 }
 
 func (s *Store) ensureTaskColumn(ctx context.Context, column string, statement string) error {
@@ -264,6 +456,22 @@ func (s *Store) Ping(ctx context.Context) error {
 }
 
 const schema = `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  name TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS upload_runtime_options (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  concurrency INTEGER NOT NULL,
+  quiet_period_ns INTEGER NOT NULL,
+  max_attempts INTEGER NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO upload_runtime_options (id, concurrency, quiet_period_ns, max_attempts)
+VALUES (1, 1, 120000000000, 3);
+
 CREATE TABLE IF NOT EXISTS watch_dirs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   path TEXT NOT NULL UNIQUE,
@@ -359,6 +567,7 @@ CREATE TABLE IF NOT EXISTS upload_providers (
   remote_root TEXT NOT NULL DEFAULT '/',
   user_agent TEXT NOT NULL DEFAULT '',
   collision_policy TEXT NOT NULL DEFAULT 'replace',
+  auth_device TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -377,7 +586,7 @@ CREATE TABLE IF NOT EXISTS upload_provider_secrets (
 CREATE TABLE IF NOT EXISTS upload_provider_routes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   provider_id INTEGER NOT NULL,
-  watch_dir_id INTEGER,
+  watch_dir_id INTEGER NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,
   remote_root TEXT NOT NULL DEFAULT '/',
   collision_policy TEXT NOT NULL DEFAULT 'fail',
@@ -391,11 +600,22 @@ CREATE TABLE IF NOT EXISTS upload_provider_routes (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_provider_routes_watch
   ON upload_provider_routes(provider_id, watch_dir_id)
   WHERE watch_dir_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_provider_routes_global
-  ON upload_provider_routes(provider_id)
-  WHERE watch_dir_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_upload_provider_routes_watch_enabled
   ON upload_provider_routes(watch_dir_id, enabled);
+
+CREATE TRIGGER IF NOT EXISTS trg_upload_provider_routes_watch_insert
+BEFORE INSERT ON upload_provider_routes
+WHEN NEW.watch_dir_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'upload configuration requires a watch directory');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_upload_provider_routes_watch_update
+BEFORE UPDATE OF watch_dir_id ON upload_provider_routes
+WHEN NEW.watch_dir_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'upload configuration requires a watch directory');
+END;
 
 CREATE TABLE IF NOT EXISTS upload_batches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -437,6 +657,7 @@ CREATE TABLE IF NOT EXISTS upload_batch_targets (
   user_agent TEXT NOT NULL DEFAULT '',
   collision_policy TEXT NOT NULL DEFAULT 'fail',
   include_types TEXT NOT NULL DEFAULT '',
+  retryable INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   error_summary TEXT NOT NULL DEFAULT '',

@@ -24,6 +24,7 @@ type WatchDir struct {
 	ScanOnStart         bool                          `json:"scanOnStart"`
 	UseGlobalProcessing bool                          `json:"useGlobalProcessing"`
 	Processing          config.OutputProcessingConfig `json:"processing"`
+	UploadConfigs       []UploadProviderRoute         `json:"uploadConfigs"`
 }
 
 func (s *Store) ListWatchDirs(ctx context.Context) ([]WatchDir, error) {
@@ -59,7 +60,19 @@ ORDER BY path
 		}
 		dirs = append(dirs, dir)
 	}
-	return dirs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range dirs {
+		dirs[index].UploadConfigs, err = s.ListWatchDirUploadConfigs(ctx, dirs[index].ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return dirs, nil
 }
 
 func (s *Store) CreateWatchDir(ctx context.Context, dir WatchDir) (WatchDir, error) {
@@ -69,7 +82,12 @@ func (s *Store) CreateWatchDir(ctx context.Context, dir WatchDir) (WatchDir, err
 	if err != nil {
 		return WatchDir{}, err
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WatchDir{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
 INSERT INTO watch_dirs (path, recursive, enabled, watch_enabled, scan_on_start, use_global_processing, processing_config, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 `, dir.Path, boolToInt(dir.Recursive), boolToInt(dir.Enabled), boolToInt(dir.WatchEnabled), boolToInt(dir.ScanOnStart), boolToInt(dir.UseGlobalProcessing), processingJSON)
@@ -81,7 +99,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		return WatchDir{}, err
 	}
 	dir.ID = id
-	return dir, nil
+	if err := replaceWatchDirUploadConfigsTx(ctx, tx, dir.ID, dir.UploadConfigs); err != nil {
+		return WatchDir{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return WatchDir{}, err
+	}
+	return s.GetWatchDir(ctx, dir.ID)
 }
 
 func (s *Store) UpdateWatchDir(ctx context.Context, dir WatchDir) (WatchDir, error) {
@@ -91,7 +115,12 @@ func (s *Store) UpdateWatchDir(ctx context.Context, dir WatchDir) (WatchDir, err
 	if err != nil {
 		return WatchDir{}, err
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WatchDir{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
 UPDATE watch_dirs
 SET path = ?, recursive = ?, enabled = ?, watch_enabled = ?, scan_on_start = ?, use_global_processing = ?, processing_config = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
@@ -106,7 +135,15 @@ WHERE id = ?
 	if affected == 0 {
 		return WatchDir{}, ErrWatchDirNotFound
 	}
-	return dir, nil
+	if dir.UploadConfigs != nil {
+		if err := replaceWatchDirUploadConfigsTx(ctx, tx, dir.ID, dir.UploadConfigs); err != nil {
+			return WatchDir{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return WatchDir{}, err
+	}
+	return s.GetWatchDir(ctx, dir.ID)
 }
 
 func (s *Store) DisableWatchDirScanOnStart(ctx context.Context) error {
@@ -158,6 +195,10 @@ WHERE id = ?
 	dir.ScanOnStart = scanOnStart == 1
 	dir.UseGlobalProcessing = useGlobalProcessing == 1
 	if err := decodeWatchDirProcessing(processingJSON, &dir.Processing); err != nil {
+		return WatchDir{}, err
+	}
+	dir.UploadConfigs, err = s.ListWatchDirUploadConfigs(ctx, dir.ID)
+	if err != nil {
 		return WatchDir{}, err
 	}
 	return dir, nil

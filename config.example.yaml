@@ -43,29 +43,6 @@ processing:
   enableBif: true
   enableImageTakeover: false
 
-upload:
-  # Upload remains disabled until at least one destination is configured in the Web UI.
-  enabled: false
-  concurrency: 1
-  # Coalesce completed episode changes for the same show before publishing.
-  quietPeriod: 2m
-  maxAttempts: 3
-  # File types published with each completed media task. A target route can override this profile.
-  includeTypes:
-    - video
-    - mediainfo
-    - subtitle
-    - nfo
-    - thumb
-    - tvshow-nfo
-    - season-nfo
-    - bif
-    - poster
-    - fanart
-    - clearlogo
-    - clearart
-    - season-poster
-
 renaming:
   concurrency: 3
 

@@ -51,15 +51,24 @@ const (
 )
 
 var (
-	ErrUploadProviderNotFound = errors.New("upload provider not found")
-	ErrUploadBatchNotFound    = errors.New("upload batch not found")
-	ErrUploadTargetNotFound   = errors.New("upload target not found")
-	ErrNoPendingUploadTarget  = errors.New("no pending upload target")
+	ErrUploadProviderNotFound      = errors.New("upload provider not found")
+	ErrUploadProviderInUse         = errors.New("upload provider has upload history")
+	ErrUploadProviderTypeImmutable = errors.New("upload provider type cannot be changed")
+	ErrUploadProviderCookieOnly    = errors.New("115 Cookie credentials must use the dedicated Cookie API")
+	ErrInvalidUploadConfig         = errors.New("invalid upload configuration")
+	ErrUploadBatchNotFound         = errors.New("upload batch not found")
+	ErrUploadTargetNotFound        = errors.New("upload target not found")
+	ErrUploadTargetNotRetryable    = errors.New("upload target is not retryable")
+	ErrNoPendingUploadTarget       = errors.New("no pending upload target")
 )
 
 var uploadFileTypes = []string{
 	"video", "mediainfo", "subtitle", "nfo", "thumb", "tvshow-nfo", "season-nfo",
 	"bif", "poster", "fanart", "clearlogo", "clearart", "season-poster",
+}
+
+var uploadProviderAuthDevices = map[string]struct{}{
+	"web": {}, "android": {}, "ios": {}, "tv": {}, "alipaymini": {}, "wechatmini": {}, "qandroid": {},
 }
 
 var uploadFileTypeSet = func() map[string]struct{} {
@@ -70,25 +79,22 @@ var uploadFileTypeSet = func() map[string]struct{} {
 	return result
 }()
 
-// UploadProvider is a configured destination. Secrets are deliberately not
-// included in this type so API list responses cannot expose credentials.
+// UploadProvider is one configured account instance. Secrets are deliberately
+// excluded so API list responses cannot expose credentials.
 type UploadProvider struct {
-	ID              int64                 `json:"id"`
-	Name            string                `json:"name"`
-	Type            string                `json:"type"`
-	Enabled         bool                  `json:"enabled"`
-	RemoteRoot      string                `json:"remoteRoot"`
-	UserAgent       string                `json:"userAgent"`
-	CollisionPolicy string                `json:"collisionPolicy"`
-	HasCookie       bool                  `json:"hasCookie"`
-	Routes          []UploadProviderRoute `json:"routes,omitempty"`
-	CreatedAt       string                `json:"createdAt"`
-	UpdatedAt       string                `json:"updatedAt"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Enabled    bool   `json:"enabled"`
+	UserAgent  string `json:"userAgent"`
+	HasCookie  bool   `json:"hasCookie"`
+	AuthDevice string `json:"authDevice"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
 }
 
-// UploadProviderRoute binds a destination to a watch directory. A nil
-// WatchDirID is the provider-wide fallback route. Providers without any
-// routes retain the legacy global behavior using their default fields.
+// UploadProviderRoute is one upload step configured on a watch directory.
+// WatchDirID is always populated; nil is accepted only while decoding a draft.
 type UploadProviderRoute struct {
 	ID              int64    `json:"id"`
 	ProviderID      int64    `json:"providerId"`
@@ -139,6 +145,7 @@ type UploadBatchTarget struct {
 	UserAgent       string   `json:"userAgent"`
 	CollisionPolicy string   `json:"collisionPolicy"`
 	IncludeTypes    []string `json:"includeTypes"`
+	Retryable       bool     `json:"retryable"`
 	Status          string   `json:"status"`
 	Attempts        int      `json:"attempts"`
 	ErrorSummary    string   `json:"errorSummary"`
@@ -222,38 +229,26 @@ type UploadCandidate struct {
 }
 
 type UploadCollectionInput struct {
-	WatchDirID          *int64
-	SeriesKey           string
-	SeriesPath          string
-	QuietPeriod         time.Duration
-	DefaultIncludeTypes []string
-	Files               []UploadCandidate
+	WatchDirID  *int64
+	SeriesKey   string
+	SeriesPath  string
+	QuietPeriod time.Duration
+	Files       []UploadCandidate
 }
 
 func (s *Store) CreateUploadProvider(ctx context.Context, provider UploadProvider) (UploadProvider, error) {
 	if err := normalizeUploadProvider(&provider); err != nil {
 		return UploadProvider{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return UploadProvider{}, err
-	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `
-INSERT INTO upload_providers (name, type, enabled, remote_root, user_agent, collision_policy, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-`, provider.Name, provider.Type, boolToInt(provider.Enabled), provider.RemoteRoot, provider.UserAgent, provider.CollisionPolicy)
+	result, err := s.db.ExecContext(ctx, `
+INSERT INTO upload_providers (name, type, enabled, user_agent, auth_device, updated_at)
+VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+`, provider.Name, provider.Type, boolToInt(provider.Enabled), provider.UserAgent, provider.AuthDevice)
 	if err != nil {
 		return UploadProvider{}, err
 	}
 	provider.ID, err = result.LastInsertId()
 	if err != nil {
-		return UploadProvider{}, err
-	}
-	if err := replaceUploadProviderRoutesTx(ctx, tx, provider, provider.Routes); err != nil {
-		return UploadProvider{}, err
-	}
-	if err := tx.Commit(); err != nil {
 		return UploadProvider{}, err
 	}
 	return s.GetUploadProvider(ctx, provider.ID)
@@ -277,14 +272,6 @@ func (s *Store) ListUploadProviders(ctx context.Context) ([]UploadProvider, erro
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	for index := range items {
-		if err := s.loadUploadProviderRoutes(ctx, &items[index]); err != nil {
-			return nil, err
-		}
-	}
 	return items, nil
 }
 
@@ -293,9 +280,6 @@ func (s *Store) GetUploadProvider(ctx context.Context, id int64) (UploadProvider
 	if errors.Is(err, sql.ErrNoRows) {
 		return UploadProvider{}, ErrUploadProviderNotFound
 	}
-	if err == nil {
-		err = s.loadUploadProviderRoutes(ctx, &provider)
-	}
 	return provider, err
 }
 
@@ -303,6 +287,9 @@ func (s *Store) UpdateUploadProvider(ctx context.Context, provider UploadProvide
 	if provider.ID <= 0 {
 		return UploadProvider{}, ErrUploadProviderNotFound
 	}
+	// Authentication metadata belongs to the dedicated Cookie flow. Ignoring a
+	// stale form value here prevents a concurrent authorization from being lost.
+	provider.AuthDevice = ""
 	if err := normalizeUploadProvider(&provider); err != nil {
 		return UploadProvider{}, err
 	}
@@ -313,9 +300,12 @@ func (s *Store) UpdateUploadProvider(ctx context.Context, provider UploadProvide
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `
 UPDATE upload_providers
-SET name = ?, type = ?, enabled = ?, remote_root = ?, user_agent = ?, collision_policy = ?, updated_at = CURRENT_TIMESTAMP
-WHERE id = ?
-`, provider.Name, provider.Type, boolToInt(provider.Enabled), provider.RemoteRoot, provider.UserAgent, provider.CollisionPolicy, provider.ID)
+SET name = ?,
+    enabled = ?,
+    user_agent = ?,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND type = ?
+`, provider.Name, boolToInt(provider.Enabled), provider.UserAgent, provider.ID, provider.Type)
 	if err != nil {
 		return UploadProvider{}, err
 	}
@@ -324,15 +314,14 @@ WHERE id = ?
 		return UploadProvider{}, err
 	}
 	if affected == 0 {
-		return UploadProvider{}, ErrUploadProviderNotFound
-	}
-	// A missing routes field means an older client is only updating the target
-	// itself. Preserve its existing routing rather than silently widening or
-	// clearing scope. An explicit empty slice still retains legacy all-dir
-	// behavior for callers that intentionally send it.
-	if provider.Routes != nil {
-		if err := replaceUploadProviderRoutesTx(ctx, tx, provider, provider.Routes); err != nil {
+		var storedType string
+		if err := tx.QueryRowContext(ctx, `SELECT type FROM upload_providers WHERE id = ?`, provider.ID).Scan(&storedType); errors.Is(err, sql.ErrNoRows) {
+			return UploadProvider{}, ErrUploadProviderNotFound
+		} else if err != nil {
 			return UploadProvider{}, err
+		}
+		if storedType != provider.Type {
+			return UploadProvider{}, ErrUploadProviderTypeImmutable
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -342,7 +331,19 @@ WHERE id = ?
 }
 
 func (s *Store) DeleteUploadProvider(ctx context.Context, id int64) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM upload_providers WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var historyCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_batch_targets WHERE provider_id = ?`, id).Scan(&historyCount); err != nil {
+		return err
+	}
+	if historyCount > 0 {
+		return ErrUploadProviderInUse
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM upload_providers WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -353,25 +354,16 @@ func (s *Store) DeleteUploadProvider(ctx context.Context, id int64) error {
 	if affected == 0 {
 		return ErrUploadProviderNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
-func (s *Store) loadUploadProviderRoutes(ctx context.Context, provider *UploadProvider) error {
-	routes, err := s.listUploadProviderRoutes(ctx, provider.ID)
-	if err != nil {
-		return err
-	}
-	provider.Routes = routes
-	return nil
-}
-
-func (s *Store) listUploadProviderRoutes(ctx context.Context, providerID int64) ([]UploadProviderRoute, error) {
+func (s *Store) ListWatchDirUploadConfigs(ctx context.Context, watchDirID int64) ([]UploadProviderRoute, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types, created_at, updated_at
 FROM upload_provider_routes
-WHERE provider_id = ?
-ORDER BY CASE WHEN watch_dir_id IS NULL THEN 0 ELSE 1 END, watch_dir_id
-`, providerID)
+WHERE watch_dir_id = ?
+ORDER BY id
+`, watchDirID)
 	if err != nil {
 		return nil, err
 	}
@@ -387,59 +379,42 @@ ORDER BY CASE WHEN watch_dir_id IS NULL THEN 0 ELSE 1 END, watch_dir_id
 	return routes, rows.Err()
 }
 
-func replaceUploadProviderRoutesTx(ctx context.Context, tx *sql.Tx, provider UploadProvider, routes []UploadProviderRoute) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_routes WHERE provider_id = ?`, provider.ID); err != nil {
+func replaceWatchDirUploadConfigsTx(ctx context.Context, tx *sql.Tx, watchDirID int64, routes []UploadProviderRoute) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_routes WHERE watch_dir_id = ?`, watchDirID); err != nil {
 		return err
 	}
-	seen := make(map[string]struct{}, len(routes))
-	hasGlobalRoute := false
+	seen := make(map[int64]struct{}, len(routes))
 	for _, route := range routes {
-		route.ProviderID = provider.ID
-		if err := validateStoredUploadTypes(route.IncludeTypes); err != nil {
+		if route.ProviderID <= 0 {
+			return fmt.Errorf("%w: provider id is required", ErrInvalidUploadConfig)
+		}
+		if _, ok := seen[route.ProviderID]; ok {
+			return fmt.Errorf("%w: duplicate provider %d for watch directory", ErrInvalidUploadConfig, route.ProviderID)
+		}
+		seen[route.ProviderID] = struct{}{}
+		var providerExists int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM upload_providers WHERE id = ?`, route.ProviderID).Scan(&providerExists); errors.Is(err, sql.ErrNoRows) {
+			return ErrUploadProviderNotFound
+		} else if err != nil {
 			return err
 		}
-		if strings.TrimSpace(route.RemoteRoot) == "" {
-			route.RemoteRoot = provider.RemoteRoot
-		}
-		if strings.TrimSpace(route.CollisionPolicy) == "" {
-			route.CollisionPolicy = provider.CollisionPolicy
+		if err := validateStoredUploadTypes(route.IncludeTypes); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidUploadConfig, err)
 		}
 		route.RemoteRoot = normalizeRemoteRoot(route.RemoteRoot)
 		route.CollisionPolicy = normalizeCollisionPolicy(route.CollisionPolicy)
 		route.IncludeTypes = normalizeStoredUploadTypes(route.IncludeTypes)
-		key := "global"
-		if route.WatchDirID != nil {
-			key = fmt.Sprintf("watch-%d", *route.WatchDirID)
-		} else {
-			hasGlobalRoute = true
+		if len(route.IncludeTypes) == 0 {
+			return fmt.Errorf("%w: at least one include type is required", ErrInvalidUploadConfig)
 		}
-		if _, ok := seen[key]; ok {
-			return fmt.Errorf("duplicate upload route %s", key)
-		}
-		seen[key] = struct{}{}
 		encodedTypes, err := json.Marshal(route.IncludeTypes)
 		if err != nil {
 			return err
 		}
-		var watchDirID any
-		if route.WatchDirID != nil {
-			watchDirID = *route.WatchDirID
-		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO upload_provider_routes (provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-`, provider.ID, watchDirID, boolToInt(route.Enabled), route.RemoteRoot, route.CollisionPolicy, string(encodedTypes)); err != nil {
-			return err
-		}
-	}
-	// A disabled global route is a durable sentinel for "selected directories
-	// only". It preserves that scope if a selected watch directory is later
-	// deleted and its scoped route cascades away.
-	if len(routes) > 0 && !hasGlobalRoute {
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO upload_provider_routes (provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types, updated_at)
-VALUES (?, NULL, 0, ?, ?, '', CURRENT_TIMESTAMP)
-`, provider.ID, provider.RemoteRoot, provider.CollisionPolicy); err != nil {
+`, route.ProviderID, watchDirID, boolToInt(route.Enabled), route.RemoteRoot, route.CollisionPolicy, string(encodedTypes)); err != nil {
 			return err
 		}
 	}
@@ -451,16 +426,64 @@ func (s *Store) SetUploadProviderSecret(ctx context.Context, providerID int64, k
 	if providerID <= 0 || key == "" {
 		return errors.New("provider id and secret key are required")
 	}
-	_, err := s.GetUploadProvider(ctx, providerID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	defer tx.Rollback()
+	var providerType string
+	if err := tx.QueryRowContext(ctx, `SELECT type FROM upload_providers WHERE id = ?`, providerID).Scan(&providerType); errors.Is(err, sql.ErrNoRows) {
+		return ErrUploadProviderNotFound
+	} else if err != nil {
+		return err
+	}
+	if providerType == UploadProviderType115Cookie && strings.EqualFold(key, "cookie") {
+		return ErrUploadProviderCookieOnly
+	}
+	if _, err = tx.ExecContext(ctx, `
 INSERT INTO upload_provider_secrets (provider_id, secret_key, secret_value, updated_at)
 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
 ON CONFLICT(provider_id, secret_key) DO UPDATE SET secret_value = excluded.secret_value, updated_at = CURRENT_TIMESTAMP
-`, providerID, key, value)
-	return err
+`, providerID, key, value); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) SetUploadProviderCookie(ctx context.Context, providerID int64, cookie string, authDevice string) error {
+	cookie = strings.TrimSpace(cookie)
+	authDevice, err := normalizeUploadProviderAuthDevice(authDevice)
+	if err != nil {
+		return err
+	}
+	if providerID <= 0 || cookie == "" {
+		return errors.New("provider id and cookie are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var providerType string
+	if err := tx.QueryRowContext(ctx, `SELECT type FROM upload_providers WHERE id = ?`, providerID).Scan(&providerType); errors.Is(err, sql.ErrNoRows) {
+		return ErrUploadProviderNotFound
+	} else if err != nil {
+		return err
+	}
+	if providerType != UploadProviderType115Cookie {
+		return errors.New("provider does not use 115 Cookie authentication")
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO upload_provider_secrets (provider_id, secret_key, secret_value, updated_at)
+VALUES (?, 'cookie', ?, CURRENT_TIMESTAMP)
+ON CONFLICT(provider_id, secret_key) DO UPDATE SET secret_value = excluded.secret_value, updated_at = CURRENT_TIMESTAMP
+`, providerID, cookie); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET auth_device = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, authDevice, providerID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) GetUploadProviderSecret(ctx context.Context, providerID int64, key string) (string, error) {
@@ -477,8 +500,21 @@ WHERE provider_id = ? AND secret_key = ?
 }
 
 func (s *Store) DeleteUploadProviderSecret(ctx context.Context, providerID int64, key string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM upload_provider_secrets WHERE provider_id = ? AND secret_key = ?`, providerID, strings.TrimSpace(key))
-	return err
+	key = strings.TrimSpace(key)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_secrets WHERE provider_id = ? AND secret_key = ?`, providerID, key); err != nil {
+		return err
+	}
+	if key == "cookie" {
+		if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET auth_device = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // CollectUploadBatch coalesces files for the same show until the batch is
@@ -486,6 +522,9 @@ func (s *Store) DeleteUploadProviderSecret(ctx context.Context, providerID int64
 func (s *Store) CollectUploadBatch(ctx context.Context, input UploadCollectionInput) (UploadBatch, bool, error) {
 	if strings.TrimSpace(input.SeriesKey) == "" || strings.TrimSpace(input.SeriesPath) == "" {
 		return UploadBatch{}, false, errors.New("series key and series path are required")
+	}
+	if input.WatchDirID == nil || *input.WatchDirID <= 0 {
+		return UploadBatch{}, false, nil
 	}
 	if len(input.Files) == 0 {
 		return UploadBatch{}, false, nil
@@ -500,7 +539,7 @@ func (s *Store) CollectUploadBatch(ctx context.Context, input UploadCollectionIn
 	}
 	defer tx.Rollback()
 
-	providers, err := listEnabledUploadProvidersTx(ctx, tx, input.WatchDirID)
+	configuredTargets, err := listEnabledWatchDirUploadTargetsTx(ctx, tx, *input.WatchDirID)
 	if err != nil {
 		return UploadBatch{}, false, err
 	}
@@ -510,17 +549,16 @@ func (s *Store) CollectUploadBatch(ctx context.Context, input UploadCollectionIn
 		collisionPolicy string
 		includeTypes    []string
 	}
-	selectedProviders := make([]selectedProvider, 0, len(providers))
-	for _, provider := range providers {
-		remoteRoot, collisionPolicy, includeTypes, enabled := providerRouteSnapshot(provider, input.DefaultIncludeTypes, input.WatchDirID)
-		if !enabled || !hasAllowedUploadCandidate(input.Files, includeTypes) {
+	selectedProviders := make([]selectedProvider, 0, len(configuredTargets))
+	for _, configured := range configuredTargets {
+		if !hasAllowedUploadCandidate(input.Files, configured.route.IncludeTypes) {
 			continue
 		}
 		selectedProviders = append(selectedProviders, selectedProvider{
-			provider:        provider,
-			remoteRoot:      remoteRoot,
-			collisionPolicy: collisionPolicy,
-			includeTypes:    includeTypes,
+			provider:        configured.provider,
+			remoteRoot:      configured.route.RemoteRoot,
+			collisionPolicy: configured.route.CollisionPolicy,
+			includeTypes:    configured.route.IncludeTypes,
 		})
 	}
 
@@ -529,10 +567,10 @@ func (s *Store) CollectUploadBatch(ctx context.Context, input UploadCollectionIn
 	err = tx.QueryRowContext(ctx, `
 SELECT id
 FROM upload_batches
-WHERE series_key = ? AND status = ?
+WHERE watch_dir_id = ? AND series_key = ? AND status = ?
 ORDER BY id DESC
 LIMIT 1
-`, input.SeriesKey, UploadBatchCollecting).Scan(&batchID)
+`, *input.WatchDirID, input.SeriesKey, UploadBatchCollecting).Scan(&batchID)
 	if err == nil {
 		existing = true
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -548,7 +586,7 @@ LIMIT 1
 	readyAt := formatStoreTime(time.Now().UTC().Add(input.QuietPeriod))
 	if !existing {
 		var revision int
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(revision), 0) + 1 FROM upload_batches WHERE series_key = ?`, input.SeriesKey).Scan(&revision); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(revision), 0) + 1 FROM upload_batches WHERE watch_dir_id = ? AND series_key = ?`, *input.WatchDirID, input.SeriesKey).Scan(&revision); err != nil {
 			return UploadBatch{}, false, err
 		}
 		var watchDirID any
@@ -911,12 +949,16 @@ func (s *Store) RetryUploadTarget(ctx context.Context, targetID int64) error {
 	}
 	defer tx.Rollback()
 	var batchID int64
-	err = tx.QueryRowContext(ctx, `SELECT batch_id FROM upload_batch_targets WHERE id = ?`, targetID).Scan(&batchID)
+	var retryable int
+	err = tx.QueryRowContext(ctx, `SELECT batch_id, retryable FROM upload_batch_targets WHERE id = ?`, targetID).Scan(&batchID, &retryable)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrUploadTargetNotFound
 	}
 	if err != nil {
 		return err
+	}
+	if retryable == 0 {
+		return ErrUploadTargetNotRetryable
 	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE upload_batch_targets
@@ -931,7 +973,7 @@ WHERE id = ? AND status IN (?, ?)
 		return err
 	}
 	if affected == 0 {
-		return errors.New("upload target is not retryable")
+		return ErrUploadTargetNotRetryable
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE upload_transfers
@@ -1345,9 +1387,9 @@ func (s *Store) CountUploadTargetsByStatuses(ctx context.Context, statuses ...st
 }
 
 const uploadProviderSelect = `
-SELECT id, name, type, enabled, remote_root, user_agent, collision_policy,
+SELECT id, name, type, enabled, user_agent,
        EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = upload_providers.id AND s.secret_key = 'cookie' AND s.secret_value <> ''),
-       created_at, updated_at
+       auth_device, created_at, updated_at
 FROM upload_providers`
 
 const uploadBatchSelect = `
@@ -1361,7 +1403,7 @@ FROM upload_batches b`
 
 const uploadBatchTargetSelect = `
 SELECT t.id, t.batch_id, t.provider_id, t.provider_name, t.provider_type, t.remote_root, t.user_agent, t.collision_policy, t.include_types,
-       t.status, t.attempts, t.error_summary, t.available_at, COALESCE(t.started_at, ''), COALESCE(t.finished_at, ''), t.created_at, t.updated_at
+       t.retryable, t.status, t.attempts, t.error_summary, t.available_at, COALESCE(t.started_at, ''), COALESCE(t.finished_at, ''), t.created_at, t.updated_at
 FROM upload_batch_targets t
 JOIN upload_batches b ON b.id = t.batch_id`
 
@@ -1380,7 +1422,7 @@ func scanUploadProvider(scanner uploadProviderScanner) (UploadProvider, error) {
 	var item UploadProvider
 	var enabled int
 	var hasCookie int
-	err := scanner.Scan(&item.ID, &item.Name, &item.Type, &enabled, &item.RemoteRoot, &item.UserAgent, &item.CollisionPolicy, &hasCookie, &item.CreatedAt, &item.UpdatedAt)
+	err := scanner.Scan(&item.ID, &item.Name, &item.Type, &enabled, &item.UserAgent, &hasCookie, &item.AuthDevice, &item.CreatedAt, &item.UpdatedAt)
 	item.Enabled = enabled == 1
 	item.HasCookie = hasCookie == 1
 	return item, err
@@ -1427,8 +1469,10 @@ type uploadTargetScanner interface {
 func scanUploadBatchTarget(scanner uploadTargetScanner) (UploadBatchTarget, error) {
 	var item UploadBatchTarget
 	var encodedTypes string
-	err := scanner.Scan(&item.ID, &item.BatchID, &item.ProviderID, &item.ProviderName, &item.ProviderType, &item.RemoteRoot, &item.UserAgent, &item.CollisionPolicy, &encodedTypes, &item.Status, &item.Attempts, &item.ErrorSummary, &item.AvailableAt, &item.StartedAt, &item.FinishedAt, &item.CreatedAt, &item.UpdatedAt)
+	var retryable int
+	err := scanner.Scan(&item.ID, &item.BatchID, &item.ProviderID, &item.ProviderName, &item.ProviderType, &item.RemoteRoot, &item.UserAgent, &item.CollisionPolicy, &encodedTypes, &retryable, &item.Status, &item.Attempts, &item.ErrorSummary, &item.AvailableAt, &item.StartedAt, &item.FinishedAt, &item.CreatedAt, &item.UpdatedAt)
 	item.IncludeTypes = decodeStoredUploadTypes(encodedTypes)
+	item.Retryable = retryable == 1
 	return item, err
 }
 
@@ -1445,13 +1489,32 @@ func scanUploadTransfer(scanner uploadTransferScanner) (UploadTransfer, error) {
 func normalizeUploadProvider(provider *UploadProvider) error {
 	provider.Name = strings.TrimSpace(provider.Name)
 	provider.Type = strings.ToLower(strings.TrimSpace(provider.Type))
-	provider.RemoteRoot = normalizeRemoteRoot(provider.RemoteRoot)
 	provider.UserAgent = strings.TrimSpace(provider.UserAgent)
-	provider.CollisionPolicy = normalizeCollisionPolicy(provider.CollisionPolicy)
 	if provider.Name == "" || provider.Type == "" {
 		return errors.New("provider name and type are required")
 	}
+	if provider.Type != UploadProviderType115Cookie {
+		provider.AuthDevice = ""
+		return nil
+	}
+	if strings.TrimSpace(provider.AuthDevice) == "" {
+		provider.AuthDevice = ""
+		return nil
+	}
+	authDevice, err := normalizeUploadProviderAuthDevice(provider.AuthDevice)
+	if err != nil {
+		return err
+	}
+	provider.AuthDevice = authDevice
 	return nil
+}
+
+func normalizeUploadProviderAuthDevice(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if _, ok := uploadProviderAuthDevices[value]; !ok {
+		return "", fmt.Errorf("unsupported 115 Cookie auth device %q", value)
+	}
+	return value, nil
 }
 
 func normalizeStoredUploadTypes(values []string) []string {
@@ -1539,97 +1602,54 @@ func validateUploadCandidate(candidate UploadCandidate) error {
 	return nil
 }
 
-func listEnabledUploadProvidersTx(ctx context.Context, tx *sql.Tx, watchDirID *int64) ([]UploadProvider, error) {
-	rows, err := tx.QueryContext(ctx, uploadProviderSelect+` WHERE enabled = 1 ORDER BY id ASC`)
+type configuredUploadTarget struct {
+	provider UploadProvider
+	route    UploadProviderRoute
+}
+
+func listEnabledWatchDirUploadTargetsTx(ctx context.Context, tx *sql.Tx, watchDirID int64) ([]configuredUploadTarget, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT p.id, p.name, p.type, p.enabled, p.user_agent,
+       EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = p.id AND s.secret_key = 'cookie' AND s.secret_value <> ''),
+       p.created_at, p.updated_at,
+       r.id, r.provider_id, r.watch_dir_id, r.enabled, r.remote_root, r.collision_policy, r.include_types, r.created_at, r.updated_at
+FROM upload_provider_routes r
+JOIN upload_providers p ON p.id = r.provider_id
+WHERE r.watch_dir_id = ? AND r.enabled = 1 AND p.enabled = 1
+ORDER BY r.id
+`, watchDirID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]UploadProvider, 0)
+	items := make([]configuredUploadTarget, 0)
 	for rows.Next() {
-		item, err := scanUploadProvider(rows)
-		if err != nil {
+		var item configuredUploadTarget
+		var providerEnabled int
+		var hasCookie int
+		var routeWatchDirID sql.NullInt64
+		var routeEnabled int
+		var encodedTypes string
+		if err := rows.Scan(
+			&item.provider.ID, &item.provider.Name, &item.provider.Type, &providerEnabled, &item.provider.UserAgent,
+			&hasCookie, &item.provider.CreatedAt, &item.provider.UpdatedAt,
+			&item.route.ID, &item.route.ProviderID, &routeWatchDirID, &routeEnabled, &item.route.RemoteRoot,
+			&item.route.CollisionPolicy, &encodedTypes, &item.route.CreatedAt, &item.route.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
+		item.provider.Enabled = providerEnabled == 1
+		item.provider.HasCookie = hasCookie == 1
+		item.route.Enabled = routeEnabled == 1
+		if routeWatchDirID.Valid {
+			item.route.WatchDirID = &routeWatchDirID.Int64
+		}
+		item.route.RemoteRoot = normalizeRemoteRoot(item.route.RemoteRoot)
+		item.route.CollisionPolicy = normalizeCollisionPolicy(item.route.CollisionPolicy)
+		item.route.IncludeTypes = decodeStoredUploadTypes(encodedTypes)
 		items = append(items, item)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	filtered := make([]UploadProvider, 0, len(items))
-	for index := range items {
-		routes, err := listUploadProviderRoutesTx(ctx, tx, items[index].ID)
-		if err != nil {
-			return nil, err
-		}
-		items[index].Routes = routes
-		if _, _, _, enabled := providerRouteSnapshot(items[index], nil, watchDirID); enabled {
-			filtered = append(filtered, items[index])
-		}
-	}
-	return filtered, nil
-}
-
-func listUploadProviderRoutesTx(ctx context.Context, tx *sql.Tx, providerID int64) ([]UploadProviderRoute, error) {
-	rows, err := tx.QueryContext(ctx, `
-SELECT id, provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types, created_at, updated_at
-FROM upload_provider_routes
-WHERE provider_id = ?
-ORDER BY CASE WHEN watch_dir_id IS NULL THEN 0 ELSE 1 END, watch_dir_id
-`, providerID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	routes := make([]UploadProviderRoute, 0)
-	for rows.Next() {
-		route, err := scanUploadProviderRoute(rows)
-		if err != nil {
-			return nil, err
-		}
-		routes = append(routes, route)
-	}
-	return routes, rows.Err()
-}
-
-func providerRouteSnapshot(provider UploadProvider, defaultIncludeTypes []string, watchDirID *int64) (string, string, []string, bool) {
-	remoteRoot := provider.RemoteRoot
-	collisionPolicy := provider.CollisionPolicy
-	includeTypes := normalizeStoredUploadTypes(defaultIncludeTypes)
-	if len(provider.Routes) == 0 {
-		return normalizeRemoteRoot(remoteRoot), normalizeCollisionPolicy(collisionPolicy), includeTypes, provider.Enabled
-	}
-	var selected *UploadProviderRoute
-	var global *UploadProviderRoute
-	for index := range provider.Routes {
-		route := &provider.Routes[index]
-		if route.WatchDirID == nil {
-			global = route
-			continue
-		}
-		if watchDirID != nil && *route.WatchDirID == *watchDirID {
-			selected = route
-			break
-		}
-	}
-	if selected == nil {
-		selected = global
-	}
-	if selected == nil {
-		if len(provider.Routes) > 0 {
-			return normalizeRemoteRoot(remoteRoot), normalizeCollisionPolicy(collisionPolicy), includeTypes, false
-		}
-		return normalizeRemoteRoot(remoteRoot), normalizeCollisionPolicy(collisionPolicy), includeTypes, provider.Enabled
-	}
-	remoteRoot = selected.RemoteRoot
-	collisionPolicy = selected.CollisionPolicy
-	if len(selected.IncludeTypes) > 0 {
-		includeTypes = normalizeStoredUploadTypes(selected.IncludeTypes)
-	}
-	return normalizeRemoteRoot(remoteRoot), normalizeCollisionPolicy(collisionPolicy), includeTypes, provider.Enabled && selected.Enabled
+	return items, rows.Err()
 }
 
 func uploadTypeAllowed(includeTypes []string, fileType string) bool {

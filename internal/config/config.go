@@ -20,10 +20,20 @@ type Config struct {
 	Database   DatabaseConfig   `json:"database" yaml:"database"`
 	Tools      ToolsConfig      `json:"tools" yaml:"tools"`
 	Processing ProcessingConfig `json:"processing" yaml:"processing"`
-	Upload     UploadConfig     `json:"upload" yaml:"upload"`
 	Renaming   RenamingConfig   `json:"renaming" yaml:"renaming"`
 	Scraping   ScrapingConfig   `json:"scraping" yaml:"scraping"`
 	WatchDirs  []WatchDir       `json:"-" yaml:"-"`
+	// LegacyUpload is populated only while reading the removed top-level
+	// upload block. It is consumed by the SQLite migration and never emitted.
+	LegacyUpload *LegacyUploadConfig `json:"-" yaml:"-"`
+}
+
+type LegacyUploadConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	Concurrency  int           `yaml:"concurrency"`
+	QuietPeriod  time.Duration `yaml:"quietPeriod"`
+	MaxAttempts  int           `yaml:"maxAttempts"`
+	IncludeTypes []string      `yaml:"includeTypes"`
 }
 
 type ServerConfig struct {
@@ -69,16 +79,6 @@ type OutputProcessingConfig struct {
 	EnableNFO           bool   `json:"enableNfo"`
 	EnableBIF           bool   `json:"enableBif"`
 	EnableImageTakeover bool   `json:"enableImageTakeover"`
-}
-
-// UploadConfig controls the local publication queue. Provider accounts and
-// credentials are intentionally stored separately in SQLite.
-type UploadConfig struct {
-	Enabled      bool          `json:"enabled" yaml:"enabled"`
-	Concurrency  int           `json:"concurrency" yaml:"concurrency"`
-	QuietPeriod  time.Duration `json:"quietPeriod" yaml:"quietPeriod"`
-	MaxAttempts  int           `json:"maxAttempts" yaml:"maxAttempts"`
-	IncludeTypes []string      `json:"includeTypes" yaml:"includeTypes"`
 }
 
 func (c ProcessingConfig) OutputConfig() OutputProcessingConfig {
@@ -153,8 +153,65 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
+	var legacy struct {
+		Upload *LegacyUploadConfig `yaml:"upload"`
+	}
+	if err := yaml.Unmarshal(data, &legacy); err != nil {
+		return Config{}, err
+	}
+	if legacy.Upload != nil {
+		normalizeLegacyUpload(legacy.Upload)
+		cfg.LegacyUpload = legacy.Upload
+	}
 	cfg.applyDefaults()
 	return cfg, nil
+}
+
+func normalizeLegacyUpload(upload *LegacyUploadConfig) {
+	if upload.Concurrency <= 0 {
+		upload.Concurrency = 1
+	}
+	if upload.QuietPeriod <= 0 {
+		upload.QuietPeriod = 2 * time.Minute
+	}
+	if upload.MaxAttempts <= 0 {
+		upload.MaxAttempts = 3
+	}
+	upload.IncludeTypes = normalizeLegacyUploadTypes(upload.IncludeTypes)
+}
+
+func normalizeLegacyUploadTypes(values []string) []string {
+	all := []string{
+		"video", "mediainfo", "subtitle", "nfo", "thumb", "tvshow-nfo", "season-nfo",
+		"bif", "poster", "fanart", "clearlogo", "clearart", "season-poster",
+	}
+	if len(values) == 0 {
+		return all
+	}
+	allowed := make(map[string]struct{}, len(all))
+	for _, value := range all {
+		allowed[value] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "all" {
+			return all
+		}
+		if _, ok := allowed[value]; !ok {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return all
+	}
+	return result
 }
 
 func Save(path string, cfg Config) error {
@@ -194,16 +251,6 @@ func (c *Config) applyDefaults() {
 	if c.Processing.Concurrency <= 0 {
 		c.Processing.Concurrency = 2
 	}
-	if c.Upload.Concurrency <= 0 {
-		c.Upload.Concurrency = 1
-	}
-	if c.Upload.QuietPeriod <= 0 {
-		c.Upload.QuietPeriod = 2 * time.Minute
-	}
-	if c.Upload.MaxAttempts <= 0 {
-		c.Upload.MaxAttempts = 3
-	}
-	c.Upload.IncludeTypes = normalizeUploadIncludeTypes(c.Upload.IncludeTypes)
 	if c.Renaming.Concurrency <= 0 {
 		c.Renaming.Concurrency = 3
 	}
@@ -260,51 +307,6 @@ func (c *Config) applyDefaults() {
 	if c.Scraping.FanartBaseURL == "" {
 		c.Scraping.FanartBaseURL = "https://webservice.fanart.tv"
 	}
-}
-
-func normalizeUploadIncludeTypes(values []string) []string {
-	if len(values) == 0 {
-		return []string{
-			"video",
-			"mediainfo",
-			"subtitle",
-			"nfo",
-			"thumb",
-			"tvshow-nfo",
-			"season-nfo",
-			"bif",
-			"poster",
-			"fanart",
-			"clearlogo",
-			"clearart",
-			"season-poster",
-		}
-	}
-	allowed := map[string]struct{}{
-		"video": {}, "mediainfo": {}, "subtitle": {}, "nfo": {}, "thumb": {},
-		"tvshow-nfo": {}, "season-nfo": {}, "bif": {}, "poster": {}, "fanart": {},
-		"clearlogo": {}, "clearart": {}, "season-poster": {},
-	}
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.ToLower(strings.TrimSpace(value))
-		if value == "all" {
-			return normalizeUploadIncludeTypes(nil)
-		}
-		if _, ok := allowed[value]; !ok {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		result = append(result, value)
-	}
-	if len(result) == 0 {
-		return normalizeUploadIncludeTypes(nil)
-	}
-	return result
 }
 
 func normalizeImageSources(values []string) []string {

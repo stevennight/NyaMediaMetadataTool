@@ -16,6 +16,7 @@ import {
   ListTodo,
   Monitor,
   Moon,
+  Plus,
   RefreshCw,
   Save,
   SearchCheck,
@@ -23,6 +24,7 @@ import {
   SlidersHorizontal,
   Sun,
   Tags,
+  Trash2,
   UploadCloud,
   WandSparkles,
   X
@@ -60,13 +62,6 @@ type AppConfig = {
     enableBif: boolean;
     enableImageTakeover: boolean;
   };
-  upload: {
-    enabled: boolean;
-    concurrency: number;
-    quietPeriod: number;
-    maxAttempts: number;
-    includeTypes: string[];
-  };
   renaming: {
     concurrency: number;
   };
@@ -102,7 +97,7 @@ type OutputProcessingConfig = {
   enableImageTakeover: boolean;
 };
 
-type WatchDir = { id: number; path: string; recursive: boolean; enabled: boolean; watchEnabled: boolean; scanOnStart: boolean; useGlobalProcessing: boolean; processing: OutputProcessingConfig };
+type WatchDir = { id: number; path: string; recursive: boolean; enabled: boolean; watchEnabled: boolean; scanOnStart: boolean; useGlobalProcessing: boolean; processing: OutputProcessingConfig; uploadConfigs: UploadProviderRoute[] };
 
 type ToolStatus = {
   name: string;
@@ -162,14 +157,14 @@ type UploadProvider = {
   name: string;
   type: string;
   enabled: boolean;
-  remoteRoot: string;
   userAgent: string;
-  collisionPolicy: 'replace' | 'skip' | 'fail';
   hasCookie: boolean;
-  routes: UploadProviderRoute[];
+  authDevice: string;
   createdAt: string;
   updatedAt: string;
 };
+
+type UploadCollisionPolicy = 'replace' | 'skip' | 'fail';
 
 type UploadProviderRoute = {
   id?: number;
@@ -177,7 +172,7 @@ type UploadProviderRoute = {
   watchDirId?: number;
   enabled: boolean;
   remoteRoot: string;
-  collisionPolicy: 'replace' | 'skip' | 'fail';
+  collisionPolicy: UploadCollisionPolicy;
   includeTypes: string[];
 };
 
@@ -186,7 +181,10 @@ type UploadProviderDescriptor = {
   name: string;
   implemented: boolean;
   secretKeys: string[];
+  authDevices?: UploadAuthDevice[];
 };
+
+type UploadAuthDevice = { code: string; name: string };
 
 type UploadSummary = {
   collecting: number;
@@ -229,6 +227,7 @@ type UploadBatchTarget = {
   providerName: string;
   providerType: string;
   remoteRoot: string;
+  retryable: boolean;
   status: string;
   attempts: number;
   errorSummary: string;
@@ -419,7 +418,7 @@ type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
 type SelectOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'uploads' | 'rename' | 'audit';
-type SettingsTab = 'basic' | 'processing' | 'uploads' | 'scraping' | 'sources';
+type SettingsTab = 'basic' | 'processing' | 'scraping' | 'sources';
 
 function defaultOutputProcessing(): OutputProcessingConfig {
   return {
@@ -486,7 +485,6 @@ const automationPages: PageKey[] = ['watchDirs', 'tasks', 'uploads'];
 const settingsTabOptions: Array<{ value: SettingsTab; label: string }> = [
   { value: 'basic', label: '基础' },
   { value: 'processing', label: '处理' },
-  { value: 'uploads', label: '上传' },
   { value: 'scraping', label: '刮削' },
   { value: 'sources', label: '数据源' }
 ];
@@ -602,6 +600,31 @@ const uploadStatusFilters: { value: UploadStatusFilter; label: string }[] = [
   { value: 'failed', label: 'Failed' },
   { value: 'canceled', label: 'Canceled' }
 ];
+
+const fallback115AuthDevices: UploadAuthDevice[] = [
+  { code: 'web', name: '网页端' },
+  { code: 'android', name: 'Android' },
+  { code: 'ios', name: 'iOS' },
+  { code: 'tv', name: '电视端' },
+  { code: 'alipaymini', name: '支付宝小程序' },
+  { code: 'wechatmini', name: '微信小程序' },
+  { code: 'qandroid', name: '115组织 Android' }
+];
+
+function uploadAuthDevices(providerType: string, descriptors: UploadProviderDescriptor[]) {
+  const configured = descriptors.find((descriptor) => descriptor.type === providerType)?.authDevices;
+  return configured?.length ? configured : (providerType === '115cookie' ? fallback115AuthDevices : []);
+}
+
+function preferredUploadAuthDevice(providerType: string, descriptors: UploadProviderDescriptor[]) {
+  const devices = uploadAuthDevices(providerType, descriptors);
+  return devices.some((device) => device.code === 'web') ? 'web' : devices[0]?.code ?? '';
+}
+
+function uploadAuthDeviceName(code: string, providerType: string, descriptors: UploadProviderDescriptor[]) {
+  if (!code) return '未记录';
+  return uploadAuthDevices(providerType, descriptors).find((device) => device.code === code)?.name ?? code;
+}
 const taskListRefreshIntervalMs = 5000;
 const taskDetailRefreshIntervalMs = 5000;
 const uploadListRefreshIntervalMs = 5000;
@@ -847,6 +870,7 @@ export function App() {
   const [newUploadProviderOpen, setNewUploadProviderOpen] = useState(false);
   const [uploadCookieProvider, setUploadCookieProvider] = useState<UploadProvider | null>(null);
   const [uploadCookieValue, setUploadCookieValue] = useState('');
+  const [uploadCookieDevice, setUploadCookieDevice] = useState('web');
   const [cookieAuth, setCookieAuth] = useState<CookieAuthStatus | null>(null);
   const [savingUploadProvider, setSavingUploadProvider] = useState(false);
   const [checkingUploadProviderID, setCheckingUploadProviderID] = useState<number | null>(null);
@@ -898,12 +922,15 @@ export function App() {
   const [newWatchDirWatchEnabled, setNewWatchDirWatchEnabled] = useState(true);
   const [newWatchDirUseGlobalProcessing, setNewWatchDirUseGlobalProcessing] = useState(true);
   const [newWatchDirProcessing, setNewWatchDirProcessing] = useState<OutputProcessingConfig>(() => defaultOutputProcessing());
+  const [newWatchDirUploadConfigs, setNewWatchDirUploadConfigs] = useState<UploadProviderRoute[]>([]);
+  const [savingWatchDir, setSavingWatchDir] = useState(false);
   const [addWatchDirOpen, setAddWatchDirOpen] = useState(false);
   const [editingWatchDir, setEditingWatchDir] = useState<WatchDir | null>(null);
   const [editingWatchDirPath, setEditingWatchDirPath] = useState('');
   const [editingWatchDirWatchEnabled, setEditingWatchDirWatchEnabled] = useState(true);
   const [editingWatchDirUseGlobalProcessing, setEditingWatchDirUseGlobalProcessing] = useState(true);
   const [editingWatchDirProcessing, setEditingWatchDirProcessing] = useState<OutputProcessingConfig>(() => defaultOutputProcessing());
+  const [editingWatchDirUploadConfigs, setEditingWatchDirUploadConfigs] = useState<UploadProviderRoute[]>([]);
   const [rescanOpen, setRescanOpen] = useState(false);
   const [rescanScope, setRescanScope] = useState<RescanScope>('all');
   const [rescanTarget, setRescanTarget] = useState('');
@@ -960,8 +987,8 @@ export function App() {
   const observedUploadStatusesRef = useRef(new Map<number, string>());
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const lastTaskSelectionIndexRef = useRef<number | null>(null);
-  const modalBusyRef = useRef({ applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey });
-  modalBusyRef.current = { applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey };
+  const modalBusyRef = useRef({ applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey, savingWatchDir });
+  modalBusyRef.current = { applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey, savingWatchDir };
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
   const renameBatchConcurrency = previewWorkerCount(config?.renaming?.concurrency ?? 3);
   const renameErrorCount = renamePreview.filter((item) => item.status === 'error' || item.conflict).length;
@@ -992,13 +1019,15 @@ export function App() {
   useEffect(() => {
     async function load() {
       try {
-        const [healthResponse, configResponse, toolsResponse, tasksResponse, dirsResponse, artifactsResponse, desktopRuntime] = await Promise.all([
+        const [healthResponse, configResponse, toolsResponse, tasksResponse, dirsResponse, artifactsResponse, providersResponse, providerTypesResponse, desktopRuntime] = await Promise.all([
           fetch('/api/health'),
           fetch('/api/config'),
           fetch('/api/tools/status'),
           fetch(`/api/tasks?page=1&pageSize=${taskPageSize}`),
           fetch('/api/watch-dirs'),
           fetch('/api/artifacts?limit=10'),
+          fetch('/api/upload/providers'),
+          fetch('/api/upload/provider-types'),
           getRuntimeInfo()
         ]);
         const loadedHealth = await healthResponse.json() as Health;
@@ -1013,6 +1042,8 @@ export function App() {
         applyTaskList(await tasksResponse.json());
         setWatchDirs(asArray<WatchDir>(await dirsResponse.json()));
         setArtifacts(asArray<Artifact>(await artifactsResponse.json()));
+        setUploadProviders(asArray<UploadProvider>(await providersResponse.json()));
+        setUploadProviderTypes(asArray<UploadProviderDescriptor>(await providerTypesResponse.json()));
         await loadRenameHistory();
         await loadEmbyAPIKeys();
       } catch (err) {
@@ -1115,12 +1146,12 @@ export function App() {
       else if (auditTmdbMatchOpen) setAuditTmdbMatchOpen(false);
       else if (tmdbMatchOpen) setTmdbMatchOpen(false);
       else if (batchEpisodeOpen && !modalBusyRef.current.applyingBatchEpisode) setBatchEpisodeOpen(false);
-      else if (editingWatchDir) setEditingWatchDir(null);
-      else if (addWatchDirOpen) setAddWatchDirOpen(false);
-      else if (rescanOpen && !modalBusyRef.current.rescanning) setRescanOpen(false);
-      else if (selectedUploadBatch) setSelectedUploadBatch(null);
       else if (uploadCookieProvider && !modalBusyRef.current.savingUploadProvider) { setUploadCookieProvider(null); setCookieAuth(null); setUploadCookieValue(''); }
       else if ((newUploadProviderOpen || uploadProviderModal) && !modalBusyRef.current.savingUploadProvider) { setNewUploadProviderOpen(false); setUploadProviderModal(null); }
+      else if (editingWatchDir && !modalBusyRef.current.savingWatchDir) setEditingWatchDir(null);
+      else if (addWatchDirOpen && !modalBusyRef.current.savingWatchDir) setAddWatchDirOpen(false);
+      else if (rescanOpen && !modalBusyRef.current.rescanning) setRescanOpen(false);
+      else if (selectedUploadBatch) setSelectedUploadBatch(null);
       else if (selectedTask) setSelectedTask(null);
       else if (recentArtifactsOpen) setRecentArtifactsOpen(false);
     }
@@ -1316,6 +1347,12 @@ export function App() {
     setUploadProviders(asArray<UploadProvider>(await response.json()));
   }
 
+  async function loadWatchDirs() {
+    const response = await fetch('/api/watch-dirs');
+    if (!response.ok) throw new Error(await response.text());
+    setWatchDirs(asArray<WatchDir>(await response.json()));
+  }
+
   async function loadUploadProviderTypes() {
     const response = await fetch('/api/upload/provider-types');
     if (!response.ok) throw new Error(await response.text());
@@ -1404,22 +1441,36 @@ export function App() {
         body: JSON.stringify(provider)
       });
       if (!response.ok) throw new Error(await response.text());
+      const saved = await response.json() as UploadProvider;
       setUploadProviderModal(null);
       setNewUploadProviderOpen(false);
-      setNotice(isNew ? '上传目标已添加。请配置 Cookie 后启用自动上传。' : '上传目标已保存。');
-      await refreshUploads();
+      setNotice(isNew ? 'Provider 已添加。' : 'Provider 已保存。');
+      await Promise.all([loadUploadProviders(), loadUploadProviderTypes()]);
+      if (isNew && saved.type === '115cookie' && !saved.hasCookie) {
+        setUploadCookieProvider(saved);
+        setUploadCookieValue('');
+        setUploadCookieDevice(saved.authDevice || preferredUploadAuthDevice(saved.type, uploadProviderTypes));
+        setCookieAuth(null);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存上传目标失败');
+      setError(err instanceof Error ? err.message : '保存 Provider 失败');
     } finally {
       setSavingUploadProvider(false);
     }
   }
 
+  function openUploadCookieAuthorization(provider: UploadProvider) {
+    setUploadCookieProvider(provider);
+    setUploadCookieValue('');
+    setUploadCookieDevice(provider.authDevice || preferredUploadAuthDevice(provider.type, uploadProviderTypes));
+    setCookieAuth(null);
+  }
+
   function deleteUploadProvider(provider: UploadProvider) {
     requestConfirmation({
       title: `删除“${provider.name}”？`,
-      message: '该上传目标将停止接收新批次。已有上传历史会阻止删除，通常更建议先禁用目标。',
-      confirmLabel: '删除上传目标',
+      message: '引用该 Provider 的目录上传配置会一并移除。已有上传历史会阻止删除，通常更建议先停用 Provider。',
+      confirmLabel: '删除 Provider',
       tone: 'danger',
       onConfirm: () => performDeleteUploadProvider(provider)
     });
@@ -1428,11 +1479,12 @@ export function App() {
   async function performDeleteUploadProvider(provider: UploadProvider) {
     try {
       const response = await fetch(`/api/upload/providers/${provider.id}`, { method: 'DELETE' });
+      if (response.status === 409) throw new Error('该 Provider 已有关联的上传历史，不能删除。请编辑并停用它。');
       if (!response.ok) throw new Error(await response.text());
-      setNotice('上传目标已删除。');
-      await refreshUploads();
+      setNotice('Provider 已删除，关联的目录上传配置已移除。');
+      await Promise.all([refreshUploads(), loadWatchDirs()]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除上传目标失败');
+      setError(err instanceof Error ? err.message : '删除 Provider 失败');
     }
   }
 
@@ -1443,12 +1495,14 @@ export function App() {
       const response = await fetch(`/api/upload/providers/${uploadCookieProvider.id}/cookie`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookie: uploadCookieValue.trim() })
+        body: JSON.stringify({ cookie: uploadCookieValue.trim(), authDevice: uploadCookieDevice })
       });
       if (!response.ok) throw new Error(await response.text());
+      const saved = await response.json() as UploadProvider;
+      setUploadCookieProvider(saved);
       setUploadCookieValue('');
       setCookieAuth(null);
-      setNotice('115 Cookie 已保存。');
+      setNotice(`115 Cookie 已保存，授权设备：${uploadAuthDeviceName(saved.authDevice, saved.type, uploadProviderTypes)}。`);
       await loadUploadProviders();
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存 115 Cookie 失败');
@@ -1457,14 +1511,14 @@ export function App() {
     }
   }
 
-  async function startCookieAuth(terminal = 'tv') {
+  async function startCookieAuth() {
     if (!uploadCookieProvider) return;
     setSavingUploadProvider(true);
     try {
       const response = await fetch(`/api/upload/providers/${uploadCookieProvider.id}/auth/115cookie`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ terminal })
+        body: JSON.stringify({ terminal: uploadCookieDevice })
       });
       if (!response.ok) throw new Error(await response.text());
       setCookieAuth(await response.json() as CookieAuthStatus);
@@ -1573,23 +1627,33 @@ export function App() {
 
   useEffect(() => {
     if (!cookieAuth || !uploadCookieProvider || ['authorized', 'expired', 'cancelled', 'error'].includes(cookieAuth.state)) return;
+    let active = true;
     const providerID = uploadCookieProvider.id;
     const sessionID = cookieAuth.sessionId;
-    const interval = window.setInterval(async () => {
+    let timer: number | undefined;
+    async function pollAuthorization() {
       try {
         const response = await fetch(`/api/upload/providers/${providerID}/auth/115cookie?sessionId=${encodeURIComponent(sessionID)}`);
         if (!response.ok) throw new Error(await response.text());
         const next = await response.json() as CookieAuthStatus;
+        if (!active) return;
         setCookieAuth(next);
         if (next.state === 'authorized') {
-          setNotice('115 Cookie 授权成功。');
+          setUploadCookieProvider((current) => current && current.id === providerID ? { ...current, hasCookie: true, authDevice: next.terminal } : current);
+          setNotice(`115 Cookie 授权成功，设备：${uploadAuthDeviceName(next.terminal, '115cookie', uploadProviderTypes)}。`);
           await loadUploadProviders();
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : '查询二维码授权状态失败');
+        if (active) setError(err instanceof Error ? err.message : '查询二维码授权状态失败');
+      } finally {
+        if (active) timer = window.setTimeout(() => void pollAuthorization(), 2000);
       }
-    }, 2000);
-    return () => window.clearInterval(interval);
+    }
+    timer = window.setTimeout(() => void pollAuthorization(), 2000);
+    return () => {
+      active = false;
+      if (timer != null) window.clearTimeout(timer);
+    };
   }, [cookieAuth?.sessionId, cookieAuth?.state, uploadCookieProvider?.id]);
 
   useEffect(() => {
@@ -2076,25 +2140,35 @@ export function App() {
   }
 
   async function addWatchDir() {
-    if (!newWatchDir.trim()) return;
+    if (!newWatchDir.trim() || modalBusyRef.current.savingWatchDir) return;
+    modalBusyRef.current.savingWatchDir = true;
+    setSavingWatchDir(true);
     setError('');
-    const response = await fetch('/api/watch-dirs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, watchEnabled: newWatchDirWatchEnabled, scanOnStart: false, useGlobalProcessing: newWatchDirUseGlobalProcessing, processing: newWatchDirProcessing })
-    });
-    if (!response.ok) {
-      setError(await response.text());
-      return;
+    try {
+      const response = await fetch('/api/watch-dirs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, watchEnabled: newWatchDirWatchEnabled, scanOnStart: false, useGlobalProcessing: newWatchDirUseGlobalProcessing, processing: newWatchDirProcessing, uploadConfigs: newWatchDirUploadConfigs })
+      });
+      if (!response.ok) {
+        setError(await response.text());
+        return;
+      }
+      const created = await response.json();
+      setWatchDirs((items) => [...items, created]);
+      setNewWatchDir('');
+      setNewWatchDirWatchEnabled(true);
+      setNewWatchDirUseGlobalProcessing(true);
+      setNewWatchDirProcessing(outputProcessingFromConfig(config));
+      setNewWatchDirUploadConfigs([]);
+      setAddWatchDirOpen(false);
+      setNotice('媒体目录已添加，自动监听配置已热更新。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '添加媒体目录失败');
+    } finally {
+      modalBusyRef.current.savingWatchDir = false;
+      setSavingWatchDir(false);
     }
-    const created = await response.json();
-    setWatchDirs((items) => [...items, created]);
-    setNewWatchDir('');
-    setNewWatchDirWatchEnabled(true);
-    setNewWatchDirUseGlobalProcessing(true);
-    setNewWatchDirProcessing(outputProcessingFromConfig(config));
-    setAddWatchDirOpen(false);
-    setNotice('媒体目录已添加，自动监听配置已热更新。');
   }
 
   function openEditWatchDir(dir: WatchDir) {
@@ -2103,20 +2177,29 @@ export function App() {
     setEditingWatchDirWatchEnabled(dir.watchEnabled);
     setEditingWatchDirUseGlobalProcessing(dir.useGlobalProcessing);
     setEditingWatchDirProcessing(dir.processing?.strategy ? dir.processing : outputProcessingFromConfig(config));
+    setEditingWatchDirUploadConfigs(structuredClone(dir.uploadConfigs ?? []));
   }
 
   async function submitEditWatchDir() {
-    if (!editingWatchDir || !editingWatchDirPath.trim()) return;
-    const updated = await updateWatchDir(editingWatchDir, {
-      path: editingWatchDirPath.trim(),
-      watchEnabled: editingWatchDirWatchEnabled,
-      scanOnStart: false,
-      useGlobalProcessing: editingWatchDirUseGlobalProcessing,
-      processing: editingWatchDirProcessing
-    });
-    if (!updated) return;
-    setEditingWatchDir(null);
-    setEditingWatchDirPath('');
+    if (!editingWatchDir || !editingWatchDirPath.trim() || modalBusyRef.current.savingWatchDir) return;
+    modalBusyRef.current.savingWatchDir = true;
+    setSavingWatchDir(true);
+    try {
+      const updated = await updateWatchDir(editingWatchDir, {
+        path: editingWatchDirPath.trim(),
+        watchEnabled: editingWatchDirWatchEnabled,
+        scanOnStart: false,
+        useGlobalProcessing: editingWatchDirUseGlobalProcessing,
+        processing: editingWatchDirProcessing,
+        uploadConfigs: editingWatchDirUploadConfigs
+      });
+      if (!updated) return;
+      setEditingWatchDir(null);
+      setEditingWatchDirPath('');
+    } finally {
+      modalBusyRef.current.savingWatchDir = false;
+      setSavingWatchDir(false);
+    }
   }
 
   async function updateWatchDir(dir: WatchDir, patch: Partial<WatchDir>) {
@@ -2146,6 +2229,15 @@ export function App() {
       tone: 'danger',
       onConfirm: () => performDeleteWatchDir(id)
     });
+  }
+
+  function openAddWatchDirModal() {
+    setNewWatchDir('');
+    setNewWatchDirWatchEnabled(true);
+    setNewWatchDirUseGlobalProcessing(true);
+    setNewWatchDirProcessing(outputProcessingFromConfig(config));
+    setNewWatchDirUploadConfigs([]);
+    setAddWatchDirOpen(true);
   }
 
   async function performDeleteWatchDir(id: number) {
@@ -2506,10 +2598,6 @@ export function App() {
 
   async function saveConfig() {
     if (!config) return;
-    if ((config.upload.includeTypes ?? []).length === 0) {
-      setError('请至少选择一种发布文件类型，或关闭自动上传。');
-      return;
-    }
     setSavingConfig(true);
     setError('');
     setNotice('');
@@ -2659,7 +2747,7 @@ export function App() {
               </div>
               <div className="setup-rows">
                 <SetupRow icon={FileCheck2} title="媒体工具" detail={coreToolsReady ? 'ffmpeg 与 ffprobe 已可用' : '需要配置 ffmpeg 与 ffprobe'} complete={coreToolsReady} actionLabel={coreToolsReady ? undefined : '配置工具'} onAction={() => { setSettingsTab('basic'); navigate('settings'); }} />
-                <SetupRow icon={FolderCog} title="媒体目录" detail={watchDirs.length ? `已添加 ${watchDirs.length} 个目录` : '尚未添加自动扫描目录'} complete={watchDirs.length > 0} actionLabel={watchDirs.length ? undefined : '添加目录'} onAction={() => { setNewWatchDirProcessing(outputProcessingFromConfig(config)); setAddWatchDirOpen(true); }} />
+                <SetupRow icon={FolderCog} title="媒体目录" detail={watchDirs.length ? `已添加 ${watchDirs.length} 个目录` : '尚未添加自动扫描目录'} complete={watchDirs.length > 0} actionLabel={watchDirs.length ? undefined : '添加目录'} onAction={openAddWatchDirModal} />
                 <SetupRow icon={WandSparkles} title="元数据来源" detail={config?.scraping.enableTmdb ? 'TMDB 刮削已开启' : '可选：配置 TMDB 以补全剧集资料'} complete={Boolean(config?.scraping.enableTmdb)} optional actionLabel={config?.scraping.enableTmdb ? undefined : '查看设置'} onAction={() => { setSettingsTab('scraping'); navigate('settings'); }} />
               </div>
             </section>
@@ -2704,7 +2792,7 @@ export function App() {
 
         {activePage === 'settings' && (
         <section className="page-grid settings-grid">
-            <Card title="设置" action={<div className="inline-actions"><button className="secondary icon-text-button" type="button" onClick={discardConfigChanges} disabled={!configDirty || savingConfig}><RefreshCw size={16} />放弃修改</button><button className="icon-text-button" onClick={saveConfig} disabled={savingConfig || !configDirty || !config || (config.upload.includeTypes ?? []).length === 0}><Save size={16} />{savingConfig ? '保存中' : '保存配置'}</button></div>}>
+            <Card title="设置" action={<div className="inline-actions"><button className="secondary icon-text-button" type="button" onClick={discardConfigChanges} disabled={!configDirty || savingConfig}><RefreshCw size={16} />放弃修改</button><button className="icon-text-button" onClick={saveConfig} disabled={savingConfig || !configDirty || !config}><Save size={16} />{savingConfig ? '保存中' : '保存配置'}</button></div>}>
             {config ? (
               <div className="config-form settings-form">
                 <div className="settings-tabs" role="tablist" aria-label="设置分类" aria-orientation="horizontal">
@@ -2745,16 +2833,6 @@ export function App() {
                   <label>BIF 间隔秒<input type="number" value={config.processing.bifInterval} onChange={(event) => updateConfig((draft) => { draft.processing.bifInterval = Number(event.target.value); })} /></label>
                   <SelectField label="BIF 加速" value={config.processing.bifHwAccel || 'cpu'} options={bifHwAccelOptions} onChange={(value) => updateConfig((draft) => { draft.processing.bifHwAccel = value; })} />
                 </section>
-                <section id="settings-panel-uploads" className={`settings-section settings-section-wide ${settingsTab === 'uploads' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-uploads" hidden={settingsTab !== 'uploads'}>
-                  <SettingsGroup title="上传调度">
-                    <Toggle label="元数据完成后自动创建上传批次" checked={config.upload.enabled} onChange={(value) => updateConfig((draft) => { draft.upload.enabled = value; })} />
-                    <label>上传目标并发<input type="number" min="1" max="8" value={config.upload.concurrency} onChange={(event) => updateConfig((draft) => { draft.upload.concurrency = Number(event.target.value); })} /></label>
-                    <label>番剧变更合并秒数<input type="number" min="1" value={Math.max(1, Math.round((config.upload.quietPeriod ?? 120000000000) / 1_000_000_000))} onChange={(event) => updateConfig((draft) => { draft.upload.quietPeriod = Math.max(1, Number(event.target.value) || 1) * 1_000_000_000; })} /><small>同一番剧在这个安静窗口内只生成一个上传批次。</small></label>
-                    <label>失败自动重试次数<input type="number" min="1" max="10" value={config.upload.maxAttempts} onChange={(event) => updateConfig((draft) => { draft.upload.maxAttempts = Number(event.target.value); })} /></label>
-                    <fieldset className="upload-type-fieldset"><legend>发布文件类型</legend><div className="upload-type-grid">{uploadTypeOptions.map((option) => <label className="checkbox-label" key={option.value}><input type="checkbox" checked={(config.upload.includeTypes ?? []).includes(option.value)} onChange={(event) => updateConfig((draft) => { const current = new Set(draft.upload.includeTypes ?? []); if (event.target.checked) current.add(option.value); else current.delete(option.value); draft.upload.includeTypes = Array.from(current); })} />{option.label}</label>)}</div>{(config.upload.includeTypes ?? []).length === 0 && <small className="upload-selection-warning">至少选择一种文件类型，自动上传才可保存。</small>}</fieldset>
-                    <p className="settings-note">网盘账号、Cookie 和目标目录在“上传”页面管理。一个批次会为每个启用目标保留独立状态，后续通知可按目标分别消费。</p>
-                  </SettingsGroup>
-                </section>
                 <section id="settings-panel-scraping" className={`settings-section settings-section-wide ${settingsTab === 'scraping' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-scraping" hidden={settingsTab !== 'scraping'}>
                   <SettingsGroup title="刮削内容">
                     <Toggle label="TMDB 刮削" checked={config.scraping.enableTmdb} onChange={(value) => updateConfig((draft) => { draft.scraping.enableTmdb = value; })} />
@@ -2794,20 +2872,28 @@ export function App() {
 
         {activePage === 'watchDirs' && (
         <section className="page-grid">
-          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary" onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '扫描中' : '扫描生成'}</button><button onClick={() => { setNewWatchDirProcessing(outputProcessingFromConfig(config)); setAddWatchDirOpen(true); }}>添加媒体目录</button></div>}>
-            {watchDirs.length ? watchDirs.map((dir) => (
-              <div className="dir-item" key={dir.id}>
-                <div>
-                  <strong>{dir.path}</strong>
-                  <small>{dir.watchEnabled ? '自动监听' : '不监听'} · {dir.useGlobalProcessing ? '跟随全局处理设置' : '独立处理设置'}</small>
+          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary" onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '扫描中' : '扫描生成'}</button><button onClick={openAddWatchDirModal}>添加媒体目录</button></div>}>
+            {watchDirs.length ? watchDirs.map((dir) => {
+              const uploadCount = (dir.uploadConfigs ?? []).filter((item) => item.enabled).length;
+              const uploadIssueCount = (dir.uploadConfigs ?? []).filter((item) => {
+                if (!item.enabled) return false;
+                const provider = uploadProviders.find((candidate) => candidate.id === item.providerId);
+                return !provider || !provider.enabled || (provider.type === '115cookie' && !provider.hasCookie);
+              }).length;
+              return (
+                <div className="dir-item" key={dir.id}>
+                  <div>
+                    <strong>{dir.path}</strong>
+                    <small>{dir.watchEnabled ? '自动监听' : '不监听'} · {dir.useGlobalProcessing ? '跟随全局生成设置' : '独立生成设置'} · {uploadCount ? `${uploadCount} 个上传配置${uploadIssueCount ? `，${uploadIssueCount} 个需处理` : ''}` : '不上传'}</small>
+                  </div>
+                  <div className="inline-actions">
+                    <button className="secondary" onClick={() => openEditWatchDir(dir)}>编辑</button>
+                    <button onClick={() => openRescanDialog('dir', dir.path)} disabled={rescanning}>扫描生成</button>
+                    <button className="danger" onClick={() => deleteWatchDir(dir.id)}>删除</button>
+                  </div>
                 </div>
-                <div className="inline-actions">
-                  <button className="secondary" onClick={() => openEditWatchDir(dir)}>编辑</button>
-                  <button onClick={() => openRescanDialog('dir', dir.path)} disabled={rescanning}>扫描生成</button>
-                  <button className="danger" onClick={() => deleteWatchDir(dir.id)}>删除</button>
-                </div>
-              </div>
-            )) : <p className="muted">尚未配置媒体目录。</p>}
+              );
+            }) : <p className="muted">尚未配置媒体目录。</p>}
           </Card>
         </section>
       )}
@@ -3202,21 +3288,26 @@ export function App() {
             </div>
           </Card>
 
-          <Card title="上传目标" action={<button type="button" onClick={() => setNewUploadProviderOpen(true)}>添加目标</button>}>
+          <Card title="Provider 账号" action={<button className="icon-text-button" type="button" onClick={() => setNewUploadProviderOpen(true)}><Plus size={16} />添加 Provider</button>}>
             <div className="task-table-wrap">
               <table className="task-table upload-provider-table">
-                <thead><tr><th>名称</th><th>类型</th><th>远端根目录</th><th>授权</th><th>状态</th><th>操作</th></tr></thead>
+                <thead><tr><th>名称</th><th>类型</th><th>授权</th><th>授权设备</th><th>目录配置</th><th>状态</th><th>操作</th></tr></thead>
                 <tbody>
-                  {uploadProviders.length ? uploadProviders.map((provider) => (
-                    <tr key={provider.id}>
-                      <td><strong>{provider.name}</strong></td>
-                      <td>{provider.type}</td>
-                      <td className="path-cell">{provider.remoteRoot}</td>
-                      <td>{provider.type === '115cookie' ? <span className={provider.hasCookie ? 'pill ok' : 'pill warn'}>{provider.hasCookie ? 'Cookie 已配置' : '未授权'}</span> : '-'}</td>
-                      <td><span className={provider.enabled ? 'pill ok' : 'pill ignored'}>{provider.enabled ? '启用' : '停用'}</span></td>
-                      <td><div className="inline-actions"><button className="secondary" type="button" onClick={() => setUploadProviderModal(provider)}>编辑</button>{provider.type === '115cookie' && <button className="secondary" type="button" onClick={() => { setUploadCookieProvider(provider); setUploadCookieValue(''); setCookieAuth(null); }}>授权</button>}<button className="secondary" type="button" disabled={checkingUploadProviderID === provider.id || !provider.hasCookie} onClick={() => void checkUploadProvider(provider)}>{checkingUploadProviderID === provider.id ? '检查中' : '检查'}</button><button className="danger" type="button" onClick={() => void deleteUploadProvider(provider)}>删除</button></div></td>
-                    </tr>
-                  )) : <tr><td colSpan={6} className="empty-cell">尚未配置上传目标。</td></tr>}
+                  {uploadProviders.length ? uploadProviders.map((provider) => {
+                    const directoryCount = watchDirs.filter((dir) => (dir.uploadConfigs ?? []).some((item) => item.providerId === provider.id)).length;
+                    const needsAuthorization = provider.type === '115cookie' && !provider.hasCookie;
+                    return (
+                      <tr key={provider.id}>
+                        <td><strong>{provider.name}</strong></td>
+                        <td>{uploadProviderTypes.find((item) => item.type === provider.type)?.name ?? provider.type}</td>
+                        <td>{provider.type === '115cookie' ? <span className={provider.hasCookie ? 'pill ok' : 'pill warn'}>{provider.hasCookie ? '已授权' : '未授权'}</span> : <span className="pill ignored">按类型配置</span>}</td>
+                        <td>{provider.type === '115cookie' && provider.hasCookie ? uploadAuthDeviceName(provider.authDevice, provider.type, uploadProviderTypes) : '-'}</td>
+                        <td>{directoryCount ? `${directoryCount} 个媒体目录` : '未使用'}</td>
+                        <td><span className={provider.enabled ? 'pill ok' : 'pill ignored'}>{provider.enabled ? '可用' : '停用'}</span></td>
+                        <td><div className="inline-actions"><button className="secondary" type="button" onClick={() => setUploadProviderModal(provider)}>编辑</button>{provider.type === '115cookie' && <button className="secondary" type="button" onClick={() => openUploadCookieAuthorization(provider)}>{provider.hasCookie ? '重新授权' : '授权'}</button>}<button className="secondary" type="button" disabled={checkingUploadProviderID === provider.id || needsAuthorization} onClick={() => void checkUploadProvider(provider)}>{checkingUploadProviderID === provider.id ? '检查中' : '检查连接'}</button><button className="danger" type="button" onClick={() => void deleteUploadProvider(provider)}>删除</button></div></td>
+                      </tr>
+                    );
+                  }) : <tr><td colSpan={7} className="empty-cell">尚未添加 Provider。先添加并授权账号，再到媒体目录中配置上传步骤。</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -3323,12 +3414,12 @@ export function App() {
         </section>
       )}
         </div>
-      {(newUploadProviderOpen || uploadProviderModal) && <UploadProviderModal provider={uploadProviderModal ?? undefined} providerTypes={uploadProviderTypes} watchDirs={watchDirs} saving={savingUploadProvider} onClose={() => { setNewUploadProviderOpen(false); setUploadProviderModal(null); }} onSubmit={(provider) => void saveUploadProvider(provider)} />}
-      {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onCookieChange={setUploadCookieValue} onClose={() => { setUploadCookieProvider(null); setCookieAuth(null); setUploadCookieValue(''); }} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
       {selectedUploadBatch && <UploadBatchDetailModal detail={selectedUploadBatch} timezone={displayTimezone} actionTargetID={uploadTargetActionID} onClose={() => setSelectedUploadBatch(null)} onRetry={(target) => void actOnUploadTarget(target, 'retry')} onCancel={(target) => void actOnUploadTarget(target, 'cancel')} />}
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} watchDirId={rescanWatchDirId} useCustomProcessing={rescanUseCustomProcessing} processing={rescanProcessing} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={(value) => { setRescanScope(value); setRescanTarget(''); setRescanWatchDirId(''); }} onTargetChange={setRescanTarget} onWatchDirIdChange={(value) => { setRescanWatchDirId(value); setRescanTarget(''); }} onUseCustomProcessingChange={(value) => { setRescanUseCustomProcessing(value); if (value) setRescanProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setRescanProcessing((value) => ({ ...value, ...patch }))} onBrowsePath={() => { const rootPath = rescanScope === 'dir' ? watchDirs.find((dir) => String(dir.id) === rescanWatchDirId)?.path ?? '' : ''; void browseDirectory({ title: '选择扫描路径', value: rescanTarget || rootPath, rootPath: rootPath || undefined, onSelect: setRescanTarget }); }} onSubmit={() => void rescan()} />}
-      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
-      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
+      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" saving={savingWatchDir} path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} uploadConfigs={newWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setNewWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
+      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" saving={savingWatchDir} path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} uploadConfigs={editingWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setEditingWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
+      {(newUploadProviderOpen || uploadProviderModal) && <UploadProviderModal provider={uploadProviderModal ?? undefined} providerTypes={uploadProviderTypes} saving={savingUploadProvider} onClose={() => { setNewUploadProviderOpen(false); setUploadProviderModal(null); }} onSubmit={(provider) => void saveUploadProvider(provider)} />}
+      {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} devices={uploadAuthDevices(uploadCookieProvider.type, uploadProviderTypes)} device={uploadCookieDevice} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onDeviceChange={setUploadCookieDevice} onCookieChange={setUploadCookieValue} onClose={() => { setUploadCookieProvider(null); setCookieAuth(null); setUploadCookieValue(''); }} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
       {auditTmdbMatchOpen && <TmdbMatchModal title="选择核对剧集" description="选择后会将 TMDB ID 用于剧集缺漏判断。" applyLabel="选择剧集" query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={null} applyProgress={0} applyTotal={0} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={applyTmdbShowToAudit} onClose={() => setAuditTmdbMatchOpen(false)} />}
@@ -3351,35 +3442,22 @@ function newUploadProviderDraft(): UploadProvider {
     id: 0,
     name: '',
     type: '115cookie',
-    enabled: false,
-    remoteRoot: '/',
+    enabled: true,
     userAgent: '',
-    collisionPolicy: 'fail',
     hasCookie: false,
-    routes: [],
+    authDevice: '',
     createdAt: '',
     updatedAt: ''
   };
 }
 
-function uploadProviderDraft(provider?: UploadProvider): UploadProvider {
-  if (!provider) return newUploadProviderDraft();
-  const globalRoute = provider.routes.find((route) => route.watchDirId == null);
-  if (!globalRoute) return provider;
+function newDirectoryUploadConfig(providerId: number): UploadProviderRoute {
   return {
-    ...provider,
-    remoteRoot: globalRoute.remoteRoot || provider.remoteRoot,
-    collisionPolicy: globalRoute.collisionPolicy || provider.collisionPolicy
-  };
-}
-
-function newUploadRoute(draft: UploadProvider, watchDirId?: number): UploadProviderRoute {
-  return {
-    watchDirId,
+    providerId,
     enabled: true,
-    remoteRoot: draft.remoteRoot || '/',
-    collisionPolicy: draft.collisionPolicy || 'fail',
-    includeTypes: []
+    remoteRoot: '/',
+    collisionPolicy: 'fail',
+    includeTypes: uploadTypeOptions.map((option) => option.value)
   };
 }
 
@@ -3390,119 +3468,137 @@ function nextUploadTypeSelection(current: string[], value: string, checked: bool
   return Array.from(types);
 }
 
-function UploadRouteProfile(props: { route: UploadProviderRoute; includeDestination?: boolean; onChange: (patch: Partial<UploadProviderRoute>) => void }) {
+function UploadRouteProfile(props: { route: UploadProviderRoute; onChange: (patch: Partial<UploadProviderRoute>) => void }) {
   return (
     <div className="upload-route-profile">
-      {props.includeDestination !== false && <><label>远端根目录<input value={props.route.remoteRoot} onChange={(event) => props.onChange({ remoteRoot: event.target.value })} placeholder="/Anime" required /></label><label>碰撞策略<select value={props.route.collisionPolicy} onChange={(event) => props.onChange({ collisionPolicy: event.target.value as UploadProvider['collisionPolicy'] })}><option value="replace">替换同名不同大小文件</option><option value="skip">跳过同名不同大小文件</option><option value="fail">作为冲突失败</option></select></label></>}
-      <fieldset className="upload-route-type-fieldset">
-        <legend>文件类型覆盖</legend>
-        <div className="upload-type-grid">
-          {uploadTypeOptions.map((option) => <label className="checkbox-label" key={option.value}><input type="checkbox" checked={(props.route.includeTypes ?? []).includes(option.value)} onChange={(event) => props.onChange({ includeTypes: nextUploadTypeSelection(props.route.includeTypes ?? [], option.value, event.target.checked) })} />{option.label}</label>)}
-        </div>
-        <small>不选择时沿用“上传调度”中的默认文件类型。</small>
-      </fieldset>
+      <label>远端根目录<input value={props.route.remoteRoot} onChange={(event) => props.onChange({ remoteRoot: event.target.value })} placeholder="/Anime" required /><small>当前媒体目录的根目录映射到这里；暂不支持单独映射本地子目录。</small></label><label>碰撞策略<select value={props.route.collisionPolicy} onChange={(event) => props.onChange({ collisionPolicy: event.target.value as UploadCollisionPolicy })}><option value="replace">替换同名不同大小文件</option><option value="skip">跳过同名不同大小文件</option><option value="fail">作为冲突失败</option></select></label>
+      <details className="upload-content-details">
+        <summary>上传内容 <span>{props.route.includeTypes?.length ?? 0} / {uploadTypeOptions.length}</span></summary>
+        <fieldset className="upload-route-type-fieldset">
+          <legend>文件类型</legend>
+          <div className="upload-type-grid">
+            {uploadTypeOptions.map((option) => <label className="checkbox-label" key={option.value}><input type="checkbox" checked={(props.route.includeTypes ?? []).includes(option.value)} onChange={(event) => props.onChange({ includeTypes: nextUploadTypeSelection(props.route.includeTypes ?? [], option.value, event.target.checked) })} />{option.label}</label>)}
+          </div>
+          <small>只上传所选类型；至少选择一项。</small>
+        </fieldset>
+      </details>
     </div>
   );
 }
 
-function UploadProviderModal(props: { provider?: UploadProvider; providerTypes: UploadProviderDescriptor[]; watchDirs: WatchDir[]; saving: boolean; onClose: () => void; onSubmit: (provider: UploadProvider) => void }) {
-  const [draft, setDraft] = useState<UploadProvider>(() => uploadProviderDraft(props.provider));
-  const initialGlobalRoute = draft.routes.find((route) => route.watchDirId == null);
-  const [hasGlobalRoute, setHasGlobalRoute] = useState(() => initialGlobalRoute ? initialGlobalRoute.enabled : draft.routes.length === 0);
+function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; providers: UploadProvider[]; onChange: (configs: UploadProviderRoute[]) => void; onAddProvider: () => void; onAuthorizeProvider: (provider: UploadProvider) => void }) {
+  const selectedProviderIDs = new Set(props.configs.flatMap((config) => config.providerId == null ? [] : [config.providerId]));
+  const availableProviders = props.providers.filter((provider) => !selectedProviderIDs.has(provider.id));
+
+  function addConfig() {
+    const provider = availableProviders.find((item) => item.enabled) ?? availableProviders[0];
+    if (!provider) return;
+    props.onChange([...props.configs, newDirectoryUploadConfig(provider.id)]);
+  }
+
+  function updateConfig(index: number, patch: Partial<UploadProviderRoute>) {
+    props.onChange(props.configs.map((config, currentIndex) => currentIndex === index ? { ...config, ...patch } : config));
+  }
+
+  return (
+    <section className="directory-upload-step" aria-labelledby="directory-upload-step-title">
+      <div className="directory-upload-step-header">
+        <div><strong id="directory-upload-step-title"><CloudUpload size={16} aria-hidden="true" />上传</strong><small>{props.configs.length ? `${props.configs.length} 个目录级配置` : '未配置，不会上传'}</small></div>
+        <div className="directory-upload-step-actions">
+          <button className="secondary icon-text-button" type="button" onClick={props.onAddProvider}><Plus size={16} />添加 Provider</button>
+          <button className="secondary icon-text-button" type="button" onClick={addConfig} disabled={!availableProviders.length}><Plus size={16} />添加配置</button>
+        </div>
+      </div>
+      {!props.providers.length && <div className="directory-upload-empty-action"><p className="settings-note">尚未添加 Provider。添加并授权账号后，即可为当前目录配置上传。</p></div>}
+      {props.providers.length > 0 && !props.configs.length && <p className="settings-note">上传是当前媒体目录的独立处理步骤；添加配置后，处理完成的文件会发送到指定 Provider。</p>}
+      {props.providers.length > 0 && props.configs.length > 0 && !availableProviders.length && <p className="settings-note">所有 Provider 都已配置；同一媒体目录不能重复选择同一个 Provider。</p>}
+      <div className="directory-upload-configs">
+        {props.configs.map((config, index) => {
+          const provider = props.providers.find((item) => item.id === config.providerId);
+          const needsAuthorization = provider?.type === '115cookie' && !provider.hasCookie;
+          const providerDisabled = provider != null && !provider.enabled;
+          return (
+            <section className="directory-upload-config" key={config.id ?? `${config.providerId}-${index}`}>
+              <div className="directory-upload-config-header">
+                <label>Provider<select value={config.providerId ?? ''} onChange={(event) => updateConfig(index, { providerId: Number(event.target.value) })}>
+                  {props.providers.map((item) => <option key={item.id} value={item.id} disabled={item.id !== config.providerId && selectedProviderIDs.has(item.id)}>{item.name} · {item.type}{item.enabled ? '' : '（已停用）'}</option>)}
+                </select></label>
+                <div className="directory-upload-config-state">
+                  {needsAuthorization && <span className="pill warn">待授权</span>}
+                  {providerDisabled && <span className="pill ignored">Provider 已停用</span>}
+                  {!provider && <span className="pill bad">Provider 不存在</span>}
+                  {needsAuthorization && provider && <button className="secondary directory-upload-auth-button" type="button" onClick={() => props.onAuthorizeProvider(provider)}>授权</button>}
+                  <Toggle label="启用" checked={config.enabled} onChange={(enabled) => updateConfig(index, { enabled })} />
+                  <button className="icon-button" type="button" title="删除上传配置" aria-label="删除上传配置" onClick={() => props.onChange(props.configs.filter((_, currentIndex) => currentIndex !== index))}><Trash2 size={16} /></button>
+                </div>
+              </div>
+              <UploadRouteProfile route={config} onChange={(patch) => updateConfig(index, patch)} />
+              {needsAuthorization && <small className="upload-config-warning">该 Provider 尚未授权，启用后上传会失败。</small>}
+            </section>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function UploadProviderModal(props: { provider?: UploadProvider; providerTypes: UploadProviderDescriptor[]; saving: boolean; onClose: () => void; onSubmit: (provider: UploadProvider) => void }) {
+  const [draft, setDraft] = useState<UploadProvider>(() => props.provider ? { ...props.provider } : newUploadProviderDraft());
   const editing = draft.id > 0;
-  const globalRoute = draft.routes.find((route) => route.watchDirId == null);
-  const scopedRoutes = draft.routes.filter((route) => route.watchDirId != null);
-  const selectedWatchDirIDs = new Set(scopedRoutes.flatMap((route) => route.watchDirId == null ? [] : [route.watchDirId]));
   const descriptors = props.providerTypes.length ? props.providerTypes : [{ type: '115cookie', name: '115 Cookie', implemented: true, secretKeys: ['cookie'] }];
   const providerTypes = descriptors.some((descriptor) => descriptor.type === draft.type) ? descriptors : [...descriptors, { type: draft.type, name: draft.type, implemented: false, secretKeys: [] }];
   const selectedProviderType = providerTypes.find((descriptor) => descriptor.type === draft.type);
   const providerTypeUsable = !selectedProviderType || selectedProviderType.implemented || !draft.enabled;
-  const routeScopeValid = hasGlobalRoute || selectedWatchDirIDs.size > 0;
-
-  function setGlobalRouteEnabled(enabled: boolean) {
-    setHasGlobalRoute(enabled);
-    if (!enabled) return;
-    setDraft((current) => current.routes.some((route) => route.watchDirId == null) ? current : { ...current, routes: [newUploadRoute(current), ...current.routes] });
-  }
-
-  function toggleWatchDir(id: number) {
-    setDraft((current) => {
-      const currentRoute = current.routes.find((route) => route.watchDirId === id);
-      if (currentRoute) return { ...current, routes: current.routes.filter((route) => route.watchDirId !== id) };
-      return { ...current, routes: [...current.routes, newUploadRoute(current, id)] };
-    });
-  }
-
-  function updateScopedRoute(watchDirID: number, patch: Partial<UploadProviderRoute>) {
-    setDraft((current) => ({ ...current, routes: current.routes.map((route) => route.watchDirId === watchDirID ? { ...route, ...patch } : route) }));
-  }
-
-  function updateGlobalRoute(patch: Partial<UploadProviderRoute>) {
-    setDraft((current) => {
-      const currentGlobal = current.routes.find((route) => route.watchDirId == null);
-      const nextGlobal = { ...(currentGlobal ?? newUploadRoute(current)), ...patch, watchDirId: undefined };
-      return { ...current, routes: currentGlobal ? current.routes.map((route) => route.watchDirId == null ? nextGlobal : route) : [nextGlobal, ...current.routes] };
-    });
-  }
-
-  function routesForSubmit(): UploadProviderRoute[] {
-    const scoped = draft.routes.filter((route) => route.watchDirId != null).map((route) => ({ ...route, enabled: true }));
-    return [{ ...(globalRoute ?? newUploadRoute(draft)), watchDirId: undefined, enabled: hasGlobalRoute, remoteRoot: draft.remoteRoot, collisionPolicy: draft.collisionPolicy }, ...scoped];
-  }
-
-  const canSubmit = !props.saving && !!draft.name.trim() && !!draft.remoteRoot.trim() && routeScopeValid && providerTypeUsable;
+  const canSubmit = !props.saving && !!draft.name.trim() && providerTypeUsable;
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={props.saving ? undefined : props.onClose}>
       <section className="modal-card upload-provider-modal" role="dialog" aria-modal="true" aria-labelledby="upload-provider-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
-          <div><h2 id="upload-provider-title">{editing ? '编辑上传目标' : '添加上传目标'}</h2><small>账号授权、目录路由和上传批次独立保存，可并行配置多个网盘。</small></div>
+          <div><h2 id="upload-provider-title">{editing ? '编辑 Provider' : '添加 Provider'}</h2><small>Provider 代表一个独立账号实例；目录映射在各媒体目录中配置。</small></div>
           <IconCloseButton onClick={props.onClose} disabled={props.saving} />
         </div>
-        <form className="config-form" onSubmit={(event) => { event.preventDefault(); if (canSubmit) props.onSubmit({ ...draft, routes: routesForSubmit() }); }}>
+        <form className="config-form" onSubmit={(event) => { event.preventDefault(); if (canSubmit) props.onSubmit(draft); }}>
           <label>显示名称<input autoFocus value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：115 主归档" required /></label>
-          <label>Provider 类型<select value={draft.type} onChange={(event) => setDraft({ ...draft, type: event.target.value })}>{providerTypes.map((providerType) => <option key={providerType.type} value={providerType.type} disabled={!providerType.implemented && providerType.type !== draft.type}>{providerType.name}{providerType.implemented ? '' : '（尚未安装）'}</option>)}</select><small>{selectedProviderType?.implemented ? '已安装的 Provider 可立即配置授权。' : '此 Provider 类型已预留，但尚未安装上传实现。'}</small></label>
-          <label>{hasGlobalRoute ? '默认远端根目录' : '新目录默认远端根目录'}<input value={draft.remoteRoot} onChange={(event) => setDraft({ ...draft, remoteRoot: event.target.value })} placeholder="/Anime" required /></label>
-          <label>{hasGlobalRoute ? '默认碰撞策略' : '新目录默认碰撞策略'}<select value={draft.collisionPolicy} onChange={(event) => setDraft({ ...draft, collisionPolicy: event.target.value as UploadProvider['collisionPolicy'] })}><option value="replace">替换同名不同大小文件</option><option value="skip">跳过同名不同大小文件</option><option value="fail">作为冲突失败</option></select></label>
+          <label>Provider 类型<select value={draft.type} disabled={editing || props.saving} onChange={(event) => setDraft({ ...draft, type: event.target.value })}>{providerTypes.map((providerType) => <option key={providerType.type} value={providerType.type} disabled={!providerType.implemented && providerType.type !== draft.type}>{providerType.name}{providerType.implemented ? '' : '（尚未安装）'}</option>)}</select><small>{editing ? 'Provider 类型在创建后固定。' : (selectedProviderType?.implemented ? '已安装的 Provider 可立即配置授权。' : '此 Provider 类型已预留，但尚未安装上传实现。')}</small></label>
           <label>自定义 User-Agent（可选）<input value={draft.userAgent} onChange={(event) => setDraft({ ...draft, userAgent: event.target.value })} placeholder="Mozilla/5.0" /></label>
-          <fieldset className="upload-route-fieldset">
-            <legend>适用媒体目录</legend>
-            <Toggle label="默认应用到所有监控目录" checked={hasGlobalRoute} onChange={setGlobalRouteEnabled} />
-            <small>{hasGlobalRoute ? '下面选中的目录会覆盖默认路由；未选中的目录使用默认路由。' : '关闭默认路由后，至少选择一个目录；只有选中的目录会创建上传任务。'}</small>
-            {hasGlobalRoute && <details className="upload-route-details"><summary>默认路由的文件类型覆盖</summary><UploadRouteProfile route={{ ...(globalRoute ?? newUploadRoute(draft)), remoteRoot: draft.remoteRoot, collisionPolicy: draft.collisionPolicy }} includeDestination={false} onChange={updateGlobalRoute} /></details>}
-            <div className="upload-watch-dir-list">
-              {props.watchDirs.length ? props.watchDirs.map((watchDir) => {
-                const selected = selectedWatchDirIDs.has(watchDir.id);
-                const route = scopedRoutes.find((item) => item.watchDirId === watchDir.id);
-                return <div className="upload-watch-dir-item" key={watchDir.id}><label className="checkbox-label"><input type="checkbox" checked={selected} onChange={() => toggleWatchDir(watchDir.id)} />{watchDir.path}</label>{selected && route && <details className="upload-route-details" open><summary>{hasGlobalRoute ? '覆盖此目录的默认路由' : '此目录的上传路由'}</summary><UploadRouteProfile route={route} onChange={(patch) => updateScopedRoute(watchDir.id, patch)} /></details>}</div>;
-              }) : <small>尚未配置监控目录。</small>}
-            </div>
-            {!routeScopeValid && <small className="upload-selection-warning">请至少选择一个媒体目录，或启用默认路由。</small>}
-          </fieldset>
-          <Toggle label="为新上传批次启用此目标" checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} />
-          <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={props.onClose} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : '保存目标'}</button></div>
+          <Toggle label="启用此 Provider" checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} />
+          <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={props.onClose} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : (!editing && draft.type === '115cookie' ? '保存并授权' : '保存 Provider')}</button></div>
         </form>
       </section>
     </div>
   );
 }
 
-function UploadCookieModal(props: { provider: UploadProvider; cookie: string; auth: CookieAuthStatus | null; saving: boolean; onCookieChange: (value: string) => void; onClose: () => void; onSave: () => void; onStartAuth: () => void }) {
+function UploadCookieModal(props: { provider: UploadProvider; devices: UploadAuthDevice[]; device: string; cookie: string; auth: CookieAuthStatus | null; saving: boolean; onDeviceChange: (value: string) => void; onCookieChange: (value: string) => void; onClose: () => void; onSave: () => void; onStartAuth: () => void }) {
   const qrURL = props.auth ? `/api/upload/providers/${props.provider.id}/auth/115cookie/${encodeURIComponent(props.auth.sessionId)}/qrcode` : '';
   const terminal = props.auth && ['authorized', 'expired', 'cancelled', 'error'].includes(props.auth.state);
+  const authActive = Boolean(props.auth && !terminal);
+  const selectedDeviceName = props.devices.find((device) => device.code === props.device)?.name ?? props.device;
+  const recordedDeviceName = !props.provider.hasCookie ? '未授权' : !props.provider.authDevice ? '未记录' : (props.devices.find((device) => device.code === props.provider.authDevice)?.name ?? props.provider.authDevice);
   return (
     <div className="modal-backdrop" role="presentation" onClick={props.saving ? undefined : props.onClose}>
-      <section className="modal-card upload-cookie-modal" role="dialog" aria-modal="true" aria-labelledby="upload-cookie-title" onClick={(event) => event.stopPropagation()}>
+      <section className="modal-card upload-cookie-modal" role="dialog" aria-modal="true" aria-busy={props.saving || authActive} aria-labelledby="upload-cookie-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header"><div><h2 id="upload-cookie-title">115 Cookie 授权</h2><small>{props.provider.name}</small></div><IconCloseButton onClick={props.onClose} disabled={props.saving} /></div>
+        <div className="upload-auth-device-bar">
+          <label>授权设备
+            <select value={props.device} onChange={(event) => props.onDeviceChange(event.target.value)} disabled={props.saving || authActive}>
+              {props.devices.map((device) => <option key={device.code} value={device.code}>{device.name}</option>)}
+            </select>
+          </label>
+          <div className="upload-auth-record"><span>当前授权记录</span><strong>{recordedDeviceName}</strong></div>
+        </div>
         <div className="upload-auth-grid">
           <section className="upload-auth-panel">
             <h3>粘贴 Cookie</h3>
-            <textarea value={props.cookie} onChange={(event) => props.onCookieChange(event.target.value)} placeholder="粘贴 115 Cookie" rows={7} />
-            <button type="button" disabled={props.saving || !props.cookie.trim()} onClick={props.onSave}>{props.saving ? '保存中' : '保存 Cookie'}</button>
+            <p className="settings-note">保存设备：{selectedDeviceName}</p>
+            <textarea value={props.cookie} onChange={(event) => props.onCookieChange(event.target.value)} placeholder="粘贴 115 Cookie" rows={7} disabled={props.saving || authActive} />
+            <button type="button" disabled={props.saving || authActive || !props.cookie.trim()} onClick={props.onSave}>{props.saving ? '保存中' : '保存 Cookie'}</button>
           </section>
           <section className="upload-auth-panel">
             <h3>二维码授权</h3>
-            {props.auth ? <><img className="upload-auth-qr" src={qrURL} alt="115 登录二维码" /><p className="settings-note">{props.auth.message || props.auth.state}</p>{terminal ? <button type="button" className="secondary" onClick={props.onStartAuth}>重新获取二维码</button> : <span className="pill running">{props.auth.state}</span>}</> : <button type="button" onClick={props.onStartAuth} disabled={props.saving}>获取登录二维码</button>}
+            <p className="settings-note">本次设备：{props.auth ? (props.devices.find((device) => device.code === props.auth?.terminal)?.name ?? props.auth.terminal) : selectedDeviceName}</p>
+            {props.auth ? <><img className="upload-auth-qr" src={qrURL} alt="115 登录二维码" /><p className="settings-note">{props.auth.message || props.auth.state}</p>{terminal ? <button type="button" className="secondary" onClick={props.onStartAuth} disabled={props.saving}>重新获取二维码</button> : <span className="pill running">授权进行中</span>}</> : <button type="button" onClick={props.onStartAuth} disabled={props.saving}>获取登录二维码</button>}
           </section>
         </div>
       </section>
@@ -3520,7 +3616,7 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
           <Row label="可上传时间" value={formatStoredTime(props.detail.batch.readyAt, props.timezone)} />
           <Row label="文件 / 目标" value={`${props.detail.files.length} / ${props.detail.targets.length}`} />
         </div>
-        <section className="upload-detail-section"><h3>目标</h3><div className="task-table-wrap"><table className="task-table"><thead><tr><th>目标</th><th>状态</th><th>尝试</th><th>错误</th><th>操作</th></tr></thead><tbody>{props.detail.targets.map((target) => <tr key={target.id}><td><strong>{target.providerName}</strong><small>{target.remoteRoot}</small></td><td><span className={uploadStatusPillClass(target.status)}>{target.status}</span></td><td>{target.attempts}</td><td className="path-cell">{target.errorSummary || '-'}</td><td><div className="inline-actions">{['failed', 'canceled'].includes(target.status) && <button className="secondary" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onRetry(target)}>{props.actionTargetID === target.id ? '处理中' : '重试'}</button>}{['waiting', 'pending'].includes(target.status) && <button className="danger" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onCancel(target)}>{props.actionTargetID === target.id ? '处理中' : '取消'}</button>}</div></td></tr>)}</tbody></table></div></section>
+        <section className="upload-detail-section"><h3>目标</h3><div className="task-table-wrap"><table className="task-table"><thead><tr><th>目标</th><th>状态</th><th>尝试</th><th>错误</th><th>操作</th></tr></thead><tbody>{props.detail.targets.map((target) => <tr key={target.id}><td><strong>{target.providerName}</strong><small>{target.remoteRoot}</small></td><td><span className={uploadStatusPillClass(target.status)}>{target.status}</span></td><td>{target.attempts}</td><td className="path-cell">{target.errorSummary || '-'}</td><td><div className="inline-actions">{['failed', 'canceled'].includes(target.status) && target.retryable && <button className="secondary" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onRetry(target)}>{props.actionTargetID === target.id ? '处理中' : '重试'}</button>}{['failed', 'canceled'].includes(target.status) && !target.retryable && <span className="pill ignored">不可重试</span>}{['waiting', 'pending'].includes(target.status) && <button className="danger" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onCancel(target)}>{props.actionTargetID === target.id ? '处理中' : '取消'}</button>}</div></td></tr>)}</tbody></table></div></section>
         <section className="upload-detail-section"><h3>文件</h3><div className="task-table-wrap"><table className="task-table"><thead><tr><th>相对路径</th><th>类型</th><th>大小</th><th>传输状态</th></tr></thead><tbody>{props.detail.files.map((file) => { const transfers = props.detail.transfers.filter((transfer) => transfer.batchFileId === file.id); return <tr key={file.id}><td className="path-cell">{file.relativePath}</td><td>{file.fileType}</td><td>{formatUploadBytes(file.size)}</td><td>{transfers.length ? transfers.map((transfer) => <span className={uploadStatusPillClass(transfer.status)} key={transfer.id}>{transfer.status}</span>) : '-'}</td></tr>; })}</tbody></table></div></section>
       </section>
     </div>
@@ -3666,7 +3762,7 @@ function ThemeSelector(props: { value: ThemeMode; onChange: (value: ThemeMode) =
         {themeOptions.map((option) => {
           const Icon = option.icon;
           return (
-            <label className="theme-option" key={option.value} title={option.label}>
+            <label className={`theme-option ${props.value === option.value ? 'selected' : ''}`} key={option.value} title={option.label}>
               <input
                 type="radio"
                 name="theme-mode"
@@ -3863,6 +3959,7 @@ function RescanModal(props: {
             </div>
             <Toggle label="使用一次性处理设置" checked={props.useCustomProcessing} onChange={props.onUseCustomProcessingChange} />
             {!props.useCustomProcessing && <p className="rescan-inherit-note">路径不属于媒体目录时，将继承全局处理设置。</p>}
+            <p className="rescan-inherit-note">上传按所属媒体目录的上传配置执行，不受一次性生成设置影响；不属于任何媒体目录的路径不会上传。</p>
           </section>
           {props.useCustomProcessing && (
             <section className="rescan-section rescan-custom-settings">
@@ -3900,32 +3997,41 @@ function RescanModal(props: {
 function WatchDirModal(props: {
   title: string;
   submitLabel: string;
+  saving: boolean;
   path: string;
   watchEnabled: boolean;
   useGlobalProcessing: boolean;
   processing: OutputProcessingConfig;
+  uploadConfigs: UploadProviderRoute[];
+  providers: UploadProvider[];
   onPathChange: (value: string) => void;
   onWatchEnabledChange: (value: boolean) => void;
   onUseGlobalProcessingChange: (value: boolean) => void;
   onProcessingChange: (patch: Partial<OutputProcessingConfig>) => void;
+  onUploadConfigsChange: (configs: UploadProviderRoute[]) => void;
+  onAddProvider: () => void;
+  onAuthorizeProvider: (provider: UploadProvider) => void;
   onClose: () => void;
   onBrowsePath: () => void;
   onSubmit: () => void;
 }) {
+  const uploadProviderIDs = props.uploadConfigs.map((config) => config.providerId).filter((value): value is number => value != null && value > 0);
+  const uploadConfigsValid = props.uploadConfigs.every((config) => config.providerId != null && config.providerId > 0 && config.remoteRoot.trim() && config.includeTypes.length > 0)
+    && new Set(uploadProviderIDs).size === uploadProviderIDs.length;
   return (
-    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
-      <section className="modal-card watch-dir-modal" role="dialog" aria-modal="true" aria-labelledby="watch-dir-modal-title" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop" role="presentation" onClick={props.saving ? undefined : props.onClose}>
+      <section className="modal-card watch-dir-modal" role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="watch-dir-modal-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
           <h2 id="watch-dir-modal-title">{props.title}</h2>
-          <IconCloseButton onClick={props.onClose} />
+          <IconCloseButton onClick={props.onClose} disabled={props.saving} />
         </div>
-        <div className="config-form watch-dir-modal-form">
+        <fieldset className="config-form watch-dir-modal-form" disabled={props.saving}>
           <label>
             媒体目录路径
             <div className="path-input"><input value={props.path} onChange={(event) => props.onPathChange(event.target.value)} placeholder="D:\\Media\\Anime" autoFocus /><button type="button" onClick={props.onBrowsePath}>选择</button></div>
           </label>
           <Toggle label="自动监听" checked={props.watchEnabled} onChange={props.onWatchEnabledChange} />
-          <Toggle label="跟随全局处理设置" checked={props.useGlobalProcessing} onChange={props.onUseGlobalProcessingChange} />
+          <Toggle label="跟随全局生成设置" checked={props.useGlobalProcessing} onChange={props.onUseGlobalProcessingChange} />
           {!props.useGlobalProcessing && (
             <>
               <SelectField label="处理策略" value={props.processing.strategy} options={[{ code: 'missing', name: '只补缺失' }, { code: 'force', name: '强制重建' }]} onChange={(value) => props.onProcessingChange({ strategy: value as RescanStrategy })} />
@@ -3939,11 +4045,13 @@ function WatchDirModal(props: {
               <Toggle label="接管剧集/季度图片" checked={props.processing.enableImageTakeover} onChange={(value) => props.onProcessingChange({ enableImageTakeover: value })} />
             </>
           )}
-        </div>
+          <DirectoryUploadConfigsEditor configs={props.uploadConfigs} providers={props.providers} onChange={props.onUploadConfigsChange} onAddProvider={props.onAddProvider} onAuthorizeProvider={props.onAuthorizeProvider} />
+          {!uploadConfigsValid && <small className="upload-selection-warning">每个上传配置必须选择不同的 Provider、填写远端根目录，并至少选择一种上传内容。</small>}
+        </fieldset>
         <p className="muted">保存后默认递归处理该目录。自动监听会在保存后立即热更新，无需重启服务。</p>
         <div className="inline-actions modal-actions">
-          <button className="secondary" onClick={props.onClose}>取消</button>
-          <button onClick={props.onSubmit} disabled={!props.path.trim()}>{props.submitLabel}</button>
+          <button className="secondary" onClick={props.onClose} disabled={props.saving}>取消</button>
+          <button onClick={props.onSubmit} disabled={props.saving || !props.path.trim() || !uploadConfigsValid}>{props.saving ? '保存中' : props.submitLabel}</button>
         </div>
       </section>
     </div>

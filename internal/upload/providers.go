@@ -14,10 +14,16 @@ import (
 // is installed, so configuration can be prepared without silently pretending
 // that uploads are supported.
 type ProviderDescriptor struct {
-	Type        string   `json:"type"`
-	Name        string   `json:"name"`
-	Implemented bool     `json:"implemented"`
-	SecretKeys  []string `json:"secretKeys,omitempty"`
+	Type        string                 `json:"type"`
+	Name        string                 `json:"name"`
+	Implemented bool                   `json:"implemented"`
+	SecretKeys  []string               `json:"secretKeys,omitempty"`
+	AuthDevices []AuthDeviceDescriptor `json:"authDevices,omitempty"`
+}
+
+type AuthDeviceDescriptor struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
 }
 
 var defaultProviderDescriptors = map[string]ProviderDescriptor{
@@ -26,6 +32,15 @@ var defaultProviderDescriptors = map[string]ProviderDescriptor{
 		Name:        "115 Cookie",
 		Implemented: true,
 		SecretKeys:  []string{"cookie"},
+		AuthDevices: []AuthDeviceDescriptor{
+			{Code: "web", Name: "网页端"},
+			{Code: "android", Name: "Android"},
+			{Code: "ios", Name: "iOS"},
+			{Code: "tv", Name: "电视端"},
+			{Code: "alipaymini", Name: "支付宝小程序"},
+			{Code: "wechatmini", Name: "微信小程序"},
+			{Code: "qandroid", Name: "115组织 Android"},
+		},
 	},
 	store.UploadProviderType115Open: {
 		Type:        store.UploadProviderType115Open,
@@ -55,6 +70,7 @@ func providerDescriptorMap() map[string]ProviderDescriptor {
 	result := make(map[string]ProviderDescriptor, len(defaultProviderDescriptors))
 	for providerType, descriptor := range defaultProviderDescriptors {
 		descriptor.SecretKeys = append([]string{}, descriptor.SecretKeys...)
+		descriptor.AuthDevices = append([]AuthDeviceDescriptor{}, descriptor.AuthDevices...)
 		result[providerType] = descriptor
 	}
 	return result
@@ -64,6 +80,7 @@ func sortedProviderDescriptors(descriptors map[string]ProviderDescriptor) []Prov
 	result := make([]ProviderDescriptor, 0, len(descriptors))
 	for _, descriptor := range descriptors {
 		descriptor.SecretKeys = append([]string{}, descriptor.SecretKeys...)
+		descriptor.AuthDevices = append([]AuthDeviceDescriptor{}, descriptor.AuthDevices...)
 		result = append(result, descriptor)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Type < result[j].Type })

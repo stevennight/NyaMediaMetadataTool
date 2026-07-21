@@ -1,11 +1,15 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestDefaultProcessingStrategyIsMissing(t *testing.T) {
@@ -79,9 +83,9 @@ func TestLoadFiltersUnsupportedImageSources(t *testing.T) {
 	}
 }
 
-func TestUploadDefaultsAndYAMLRoundTrip(t *testing.T) {
+func TestLegacyGlobalUploadConfigurationIsNotPersisted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("upload:\n  enabled: true\n  quietPeriod: 45s\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("upload:\n  enabled: true\n  concurrency: 4\n  quietPeriod: 45s\n  maxAttempts: 7\n  includeTypes: [video, nfo]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -89,19 +93,20 @@ func TestUploadDefaultsAndYAMLRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Upload.Enabled {
-		t.Fatal("upload should stay enabled")
+	if cfg.LegacyUpload == nil || !cfg.LegacyUpload.Enabled || cfg.LegacyUpload.Concurrency != 4 || cfg.LegacyUpload.QuietPeriod != 45*time.Second || cfg.LegacyUpload.MaxAttempts != 7 || strings.Join(cfg.LegacyUpload.IncludeTypes, ",") != "video,nfo" {
+		t.Fatalf("legacy upload configuration was not captured: %#v", cfg.LegacyUpload)
 	}
-	if cfg.Upload.QuietPeriod.String() != "45s" {
-		t.Fatalf("unexpected quiet period: %s", cfg.Upload.QuietPeriod)
+	jsonData, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if cfg.Upload.Concurrency != 1 || cfg.Upload.MaxAttempts != 3 {
-		t.Fatalf("unexpected upload defaults: %#v", cfg.Upload)
+	yamlData, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !containsString(cfg.Upload.IncludeTypes, "video") || !containsString(cfg.Upload.IncludeTypes, "nfo") {
-		t.Fatalf("upload defaults should include media and metadata: %#v", cfg.Upload.IncludeTypes)
+	if bytesContainLegacyUpload(jsonData) || bytesContainLegacyUpload(yamlData) {
+		t.Fatalf("legacy upload configuration leaked during serialization: json=%s yaml=%s", jsonData, yamlData)
 	}
-
 	if err := Save(path, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -109,19 +114,12 @@ func TestUploadDefaultsAndYAMLRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "quietPeriod: 45s") {
-		t.Fatalf("saved upload configuration is missing: %s", data)
-	}
-	if !strings.Contains(string(data), "includeTypes:") {
-		t.Fatalf("saved upload types are missing: %s", data)
+	if strings.Contains(string(data), "upload:") || strings.Contains(string(data), "quietPeriod:") {
+		t.Fatalf("legacy global upload configuration should be removed: %s", data)
 	}
 }
 
-func containsString(values []string, expected string) bool {
-	for _, value := range values {
-		if value == expected {
-			return true
-		}
-	}
-	return false
+func bytesContainLegacyUpload(data []byte) bool {
+	value := string(data)
+	return strings.Contains(value, "upload") || strings.Contains(value, "quietPeriod") || strings.Contains(value, "includeTypes")
 }

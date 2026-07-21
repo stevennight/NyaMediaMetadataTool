@@ -9,7 +9,7 @@
 - 媒体目录管理：支持多个目录、递归扫描、实时监控、手动重扫、目录级处理策略覆盖。
 - 任务队列：SQLite 记录任务、日志、产物和工具状态；支持并发处理、失败重试、取消运行中任务、重新排队和忽略失败任务。
 - 伴生文件生成：支持字幕抽取、`mediainfo.json`、BIF 预览索引、单集 NFO、剧集/季度 NFO、单集缩略图。
-- 网盘发布：元数据完成后按番剧变更窗口合并上传批次；一个目标可设置默认路由并为指定媒体目录覆盖远端目录、碰撞策略和文件类型，批次按目标独立重试、校验、记录文件清单，并在目标完成后写入可租约消费的 outbox 事件。首个 Provider 为 `115cookie`，`115open`、123 云盘和百度网盘已保留运行时注册与凭据契约。
+- 网盘发布：上传作为每个媒体目录的独立处理步骤；一个目录可配置多个 Provider 实例，并分别设置远端根目录映射、碰撞策略和文件类型。批次按配置独立重试、校验、记录文件清单，并在完成后写入可租约消费的 outbox 事件。首个 Provider 为 `115cookie`，`115open`、123 云盘和百度网盘已保留运行时注册与凭据契约。
 - 元数据增强：支持 TMDB 查询、缓存、语言/地区配置、备用语言、代理，以及可选 fanart.tv 图片来源。
 - 图片接管：默认关闭；开启后可生成 `poster.jpg`、`fanart.jpg`、`clearlogo.png`、`clearart.png` 和季度海报。
 - 桌面工作台：提供仪表盘、首次运行检查、设置、媒体目录、任务、上传、重命名、剧集核对等页面，并集成原生路径选择、文件定位、系统通知和退出保护。
@@ -124,7 +124,7 @@ wails build -clean -platform linux/amd64 -tags webkit2_41 -ldflags "-X main.vers
 
 首次启动且目标 `config.yaml` 与 `nyamedia.db` 都不存在时，桌面端会在启动工作目录和可执行文件目录中查找旧 CLI 数据。识别到旧 `config.yaml` 后会保留未知字段与注释、改写数据库路径，并通过 SQLite 一致性快照导入数据库；旧文件不会被修改。目标目录中任一文件已经存在时会跳过整次迁移。使用任意自定义 `-config` 路径的旧实例无法被自动发现，需要先把配置放到上述候选目录或手动迁移。
 
-SQLite 数据库包含任务、目录、上传目标和本地凭据。应用会在支持 POSIX 权限的平台把配置、数据库及其 WAL 文件收紧为仅当前用户可读写（`0600`）；仍应保护备份和同步目录的访问权限。应用运行中备份请使用 SQLite 一致性快照，不要只复制一个正在写入的 `.db` 文件。当前版本不会把凭据同步到系统钥匙串。
+SQLite 数据库包含任务、媒体目录、目录上传配置、Provider 账号和本地凭据。应用会在支持 POSIX 权限的平台把配置、数据库及其 WAL 文件收紧为仅当前用户可读写（`0600`）；仍应保护备份和同步目录的访问权限。应用运行中备份请使用 SQLite 一致性快照，不要只复制一个正在写入的 `.db` 文件。当前版本不会把凭据同步到系统钥匙串。
 
 ## 外部工具策略
 
@@ -175,7 +175,6 @@ wails build -clean -platform windows/amd64
 - `database`：SQLite 数据库路径。CLI 示例默认为 `data/nyamedia.db`；桌面端生成指向系统应用数据目录的绝对路径。
 - `tools`：`ffmpeg`、`ffprobe`、`mkvextract`、`mediainfo` 路径。
 - `processing`：视频扩展名、并发数、文件稳定检测、BIF 参数、处理策略和产物开关。
-- `upload`：是否自动发布、上传目标并发、番剧变更合并窗口、自动重试次数和默认发布文件类型。至少选择一种默认文件类型；网盘目标、目录路由与凭据保存在 SQLite，由工作台的“上传”页面管理；Cookie 不会写入 `config.yaml` 或 `GET /api/config` 响应。
 - `renaming`：重命名预览并发数。
 - `scraping`：TMDB、fanart.tv、语言、地区、备用语言、代理等刮削配置。
 
@@ -184,15 +183,16 @@ wails build -clean -platform windows/amd64
 - `missing`：只补缺失产物。
 - `force`：强制重建产物。
 
-监控目录保存在 SQLite 中，启动后以数据库里的媒体目录为准，而不是直接读取 YAML 中的 `watchDirs`。
+媒体目录及其上传配置保存在 SQLite 中，启动后以数据库为准，而不是直接读取 YAML。Provider 账号和凭据也保存在 SQLite；Cookie 不会写入 `config.yaml` 或 `GET /api/config` 响应。
 
 ### 网盘发布流程
 
 上传批次不是按一次整库扫描划分，而是按“监控目录 + 番剧根目录”聚合。每个媒体任务在元数据成功后把视频和已生成的伴生文件加入该番剧的 collecting 批次；新的文件会延长安静窗口。安静窗口结束且该番剧没有待处理任务时，批次才会封存并发往目标。
 
 - 一个完整扫描可产生多个番剧批次；同一番剧连续下载的多集会合并成一个批次。
-- 每个目标都有一个默认路由，可应用于所有监控目录；也可关闭默认路由，仅选择目录。选中的目录可以分别覆盖远端根目录、冲突策略和文件类型。关闭默认路由时至少要选择一个目录，删除最后一个已选目录也不会意外回退为全目录上传。
-- 新批次会快照最终生效的远端根目录、冲突策略和文件类型，之后修改目标不会改变历史批次。
+- 上传没有全局路由。每条配置严格属于一个媒体目录和一个 Provider 实例，并把该媒体目录根目录映射到远端根目录；当前不支持本地子目录单独映射。
+- 升级时，旧的全局路由会一次性展开为现有媒体目录的显式配置，并保留旧启用状态和文件范围。为避免沿用旧版压平的远端路径，尚未完成的旧上传批次会标记为取消，可在升级后重新扫描生成。
+- 新批次会快照目录上传配置中的 Provider、远端根目录、冲突策略和文件类型，之后修改配置不会改变历史批次。
 - 每个目标完成后产生一个 `upload_target_verified` outbox 事件。事件包含 Provider、远端根目录、番剧 key、revision 和文件清单，供 NyaMedia 或其他通知消费者按目标独立消费。
 - 第一版不会自动删除本地或远端文件。默认碰撞策略为 `fail`，避免同名不同大小文件被静默覆盖；只有明确选择 `replace` 才会替换远端同名文件。
 
@@ -200,7 +200,7 @@ wails build -clean -platform windows/amd64
 
 `upload.Manager.RegisterProviderDescriptor` 是新增网盘实现的注册入口：它同时注册上传 Builder、显示名称和所需凭据键。`GET /api/upload/provider-types` 始终反映运行时已安装的 Provider，因此前端会自动启用新类型，而不是维护一份独立的硬编码列表。
 
-未安装的预留 Provider（当前为 `115open`、`123pan`、`baidupan`）可以被识别但不能启用，不会进入上传重试队列。通用凭据接口为 `PUT/DELETE /api/upload/providers/{id}/secrets/{key}`；只允许 Provider descriptor 声明的键，且不提供读取接口。`115cookie` 仍保留专用 Cookie 与二维码授权流程。
+未安装的预留 Provider（当前为 `115open`、`123pan`、`baidupan`）可以被识别但不能启用，不会进入上传重试队列。通用凭据接口为 `PUT/DELETE /api/upload/providers/{id}/secrets/{key}`；只允许 Provider descriptor 声明的键，且不提供读取接口。`115cookie` 仍保留专用 Cookie 与二维码授权流程，支持选择网页端、Android、iOS、电视端、支付宝小程序、微信小程序或 115 组织 Android。授权设备会和 Cookie 一起保存并显示在 Provider 中；旧 Cookie 无法追溯设备时显示为“未记录”。
 
 ## 生成产物
 
@@ -286,7 +286,7 @@ go run ./cmd/bifunpack -o "D:\Temp\bif-frames" -- "D:\Media\TV\Example\Example-3
 - `GET /api/health`
 - `GET /api/config`、`PUT /api/config`
 - `GET /api/tools/status`、`POST /api/tools/check`
-- `GET /api/watch-dirs`、`POST /api/watch-dirs`、`PUT /api/watch-dirs/{id}`、`DELETE /api/watch-dirs/{id}`
+- `GET /api/watch-dirs`、`POST /api/watch-dirs`、`PUT /api/watch-dirs/{id}`、`DELETE /api/watch-dirs/{id}`；新增和更新请求通过 `uploadConfigs` 原子保存该目录的上传步骤
 - `GET /api/tasks`、`GET /api/tasks/{id}`
 - `POST /api/tasks/rescan`
 - `POST /api/tasks/cancel-active`

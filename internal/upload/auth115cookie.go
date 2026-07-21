@@ -23,6 +23,21 @@ var supported115CookieTerminals = map[string]pan115.LoginApp{
 	"qandroid":   pan115.LoginQAppAndroid,
 }
 
+type cookie115AuthClient interface {
+	QRCodeStart() (*pan115.QRCodeSession, error)
+	QRCodeStatus(*pan115.QRCodeSession) (*pan115.QRCodeStatus, error)
+	QRCodeLoginWithApp(*pan115.QRCodeSession, pan115.LoginApp) (*pan115.Credential, error)
+}
+
+var newCookie115AuthClient = func() cookie115AuthClient {
+	return pan115.New()
+}
+
+func IsSupported115CookieDevice(value string) bool {
+	_, ok := supported115CookieTerminals[strings.ToLower(strings.TrimSpace(value))]
+	return ok
+}
+
 type Cookie115AuthStatus struct {
 	SessionID   string `json:"sessionId"`
 	ProviderID  int64  `json:"providerId"`
@@ -36,7 +51,8 @@ type Cookie115AuthStatus struct {
 
 type cookie115AuthFlow struct {
 	Cookie115AuthStatus
-	session *pan115.QRCodeSession
+	session  *pan115.QRCodeSession
+	inFlight bool
 }
 
 func (m *Manager) StartCookie115Auth(ctx context.Context, providerID int64, terminal string) (Cookie115AuthStatus, error) {
@@ -57,7 +73,7 @@ func (m *Manager) StartCookie115Auth(ctx context.Context, providerID int64, term
 	if err := ctx.Err(); err != nil {
 		return Cookie115AuthStatus{}, err
 	}
-	session, err := pan115.New().QRCodeStart()
+	session, err := newCookie115AuthClient().QRCodeStart()
 	if err != nil {
 		return Cookie115AuthStatus{}, fmt.Errorf("start 115 QR authorization: %w", err)
 	}
@@ -82,17 +98,18 @@ func (m *Manager) StartCookie115Auth(ctx context.Context, providerID int64, term
 }
 
 func (m *Manager) PollCookie115Auth(ctx context.Context, providerID int64, sessionID string) (Cookie115AuthStatus, error) {
-	flow, ok := m.getAuthFlow(providerID, sessionID)
+	flow, ok, claimed := m.claimAuthFlow(providerID, sessionID)
 	if !ok {
 		return Cookie115AuthStatus{}, errorsNew("115 Cookie authorization session not found")
 	}
-	if isCookieAuthTerminal(flow.State) {
+	if !claimed {
 		return flow.Cookie115AuthStatus, nil
 	}
+	defer m.releaseAuthFlowClaim(sessionID)
 	if err := ctx.Err(); err != nil {
 		return Cookie115AuthStatus{}, err
 	}
-	client := pan115.New()
+	client := newCookie115AuthClient()
 	status, err := client.QRCodeStatus(flow.session)
 	if err != nil {
 		m.updateAuthFlow(sessionID, func(current *cookie115AuthFlow) {
@@ -144,7 +161,7 @@ func (m *Manager) PollCookie115Auth(ctx context.Context, providerID int64, sessi
 		updated, _ := m.getAuthFlow(providerID, sessionID)
 		return updated.Cookie115AuthStatus, nil
 	}
-	if err := m.store.SetUploadProviderSecret(ctx, providerID, "cookie", credential.Cookie()); err != nil {
+	if err := m.store.SetUploadProviderCookie(ctx, providerID, credential.Cookie(), flow.Terminal); err != nil {
 		return Cookie115AuthStatus{}, err
 	}
 	m.updateAuthFlow(sessionID, func(current *cookie115AuthFlow) {
@@ -191,6 +208,31 @@ func (m *Manager) getAuthFlow(providerID int64, sessionID string) (*cookie115Aut
 	return &copy, true
 }
 
+func (m *Manager) claimAuthFlow(providerID int64, sessionID string) (*cookie115AuthFlow, bool, bool) {
+	m.authMu.Lock()
+	defer m.authMu.Unlock()
+	m.pruneAuthFlowsLocked()
+	flow, ok := m.authFlows[sessionID]
+	if !ok || flow.ProviderID != providerID {
+		return nil, false, false
+	}
+	if isCookieAuthTerminal(flow.State) || flow.inFlight {
+		copy := *flow
+		return &copy, true, false
+	}
+	flow.inFlight = true
+	copy := *flow
+	return &copy, true, true
+}
+
+func (m *Manager) releaseAuthFlowClaim(sessionID string) {
+	m.authMu.Lock()
+	defer m.authMu.Unlock()
+	if flow, ok := m.authFlows[sessionID]; ok {
+		flow.inFlight = false
+	}
+}
+
 func (m *Manager) updateAuthFlow(sessionID string, update func(*cookie115AuthFlow)) {
 	m.authMu.Lock()
 	defer m.authMu.Unlock()
@@ -203,6 +245,9 @@ func (m *Manager) updateAuthFlow(sessionID string, update func(*cookie115AuthFlo
 func (m *Manager) pruneAuthFlowsLocked() {
 	cutoff := time.Now().UTC().Add(-30 * time.Minute)
 	for id, flow := range m.authFlows {
+		if flow.inFlight {
+			continue
+		}
 		updatedAt, err := time.Parse(time.RFC3339, flow.UpdatedAt)
 		if err != nil || updatedAt.Before(cutoff) {
 			delete(m.authFlows, id)

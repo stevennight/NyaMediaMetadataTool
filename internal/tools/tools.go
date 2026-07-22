@@ -3,11 +3,11 @@ package tools
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"strings"
 	"time"
 
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/executil"
 )
 
 type Status struct {
@@ -53,7 +53,7 @@ func Check(ctx context.Context, name string, path string, args ...string) Status
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(checkCtx, path, args...)
+	cmd := executil.CommandContext(checkCtx, path, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if errors.Is(checkCtx.Err(), context.DeadlineExceeded) {

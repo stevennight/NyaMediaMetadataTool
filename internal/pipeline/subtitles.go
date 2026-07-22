@@ -7,13 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/executil"
 	"NyaMediaMetadataTool/internal/store"
 )
 
@@ -80,7 +80,7 @@ func listSubtitleStreams(ctx context.Context, cfg config.Config, mediaPath strin
 
 	runCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(runCtx, cfg.Tools.FFprobe, "-v", "error", "-print_format", "json", "-show_streams", mediaPath)
+	cmd := executil.CommandContext(runCtx, cfg.Tools.FFprobe, "-v", "error", "-print_format", "json", "-show_streams", mediaPath)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -131,7 +131,7 @@ func exportSubtitle(ctx context.Context, cfg config.Config, mediaPath string, st
 	}
 	args = append(args, outputPath)
 
-	cmd := exec.CommandContext(ctx, cfg.Tools.FFmpeg, args...)
+	cmd := executil.CommandContext(ctx, cfg.Tools.FFmpeg, args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return subtitleArtifact{}, fmt.Errorf("extract subtitle stream %d: %w: %s", stream.Index, err, strings.TrimSpace(string(output)))
 	}

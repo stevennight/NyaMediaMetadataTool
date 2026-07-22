@@ -94,6 +94,15 @@ func (s *Store) Migrate(ctx context.Context, legacyUploads ...*config.LegacyUplo
 	if err := s.ensureTaskScanRunColumn(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureTaskScanRunIndex(ctx); err != nil {
+		return err
+	}
+	if err := s.backfillScanRuns(ctx); err != nil {
+		return err
+	}
+	if err := s.sealInterruptedScanRuns(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureTaskProcessingConfigColumn(ctx); err != nil {
 		return err
 	}
@@ -127,6 +136,38 @@ func (s *Store) ensureTaskOverwriteColumn(ctx context.Context) error {
 
 func (s *Store) ensureTaskScanRunColumn(ctx context.Context) error {
 	return s.ensureTaskColumn(ctx, "scan_run_id", `ALTER TABLE tasks ADD COLUMN scan_run_id TEXT NOT NULL DEFAULT ''`)
+}
+
+func (s *Store) ensureTaskScanRunIndex(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tasks_scan_run_status ON tasks(scan_run_id, status)`); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tasks_scan_run_updated ON tasks(scan_run_id, updated_at DESC)`)
+	return err
+}
+
+func (s *Store) backfillScanRuns(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO scan_runs (id, source, scope_path, error_summary, sealed_at, created_at)
+SELECT scan_run_id, 'legacy', '', '', MAX(updated_at), MIN(created_at)
+FROM tasks
+WHERE scan_run_id != ''
+GROUP BY scan_run_id
+`)
+	return err
+}
+
+func (s *Store) sealInterruptedScanRuns(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE scan_runs
+SET error_summary = CASE
+      WHEN error_summary = '' THEN '扫描因应用重启而中断'
+      ELSE error_summary
+    END,
+    sealed_at = CURRENT_TIMESTAMP
+WHERE sealed_at IS NULL
+`)
+	return err
 }
 
 func (s *Store) ensureTaskProcessingConfigColumn(ctx context.Context) error {
@@ -515,6 +556,15 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_media_file_id ON tasks(media_file_id);
+
+CREATE TABLE IF NOT EXISTS scan_runs (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL DEFAULT 'scan',
+  scope_path TEXT NOT NULL DEFAULT '',
+  error_summary TEXT NOT NULL DEFAULT '',
+  sealed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS scan_scopes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

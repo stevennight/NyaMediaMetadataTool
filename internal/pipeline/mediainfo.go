@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/executil"
 	"NyaMediaMetadataTool/internal/store"
 )
 
@@ -59,7 +59,7 @@ func runCommand(ctx context.Context, bin string, args ...string) ([]byte, error)
 func runCommandTimeout(ctx context.Context, timeout time.Duration, bin string, args ...string) ([]byte, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(runCtx, bin, args...)
+	cmd := executil.CommandContext(runCtx, bin, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if len(output) > 0 {

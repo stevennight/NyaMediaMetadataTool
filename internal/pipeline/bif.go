@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/executil"
 	"NyaMediaMetadataTool/internal/store"
 )
 
@@ -73,9 +73,9 @@ func extractBIFFrames(ctx context.Context, cfg config.Config, mediaPath string, 
 		}
 
 		args := bifFFmpegArgs(mediaPath, pattern, cfg.Processing.BIFInterval, cfg.Processing.BIFWidth, attempt)
-		cmd := exec.CommandContext(ctx, cfg.Tools.FFmpeg, args...)
+		cmd := executil.CommandContext(ctx, cfg.Tools.FFmpeg, args...)
 		var stderrBuf bytes.Buffer
-		cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+		cmd.Stderr = &stderrBuf
 		cmd.Stdout = io.Discard
 		if err := cmd.Run(); err == nil {
 			return nil

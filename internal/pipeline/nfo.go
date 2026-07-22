@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -20,6 +19,7 @@ import (
 
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/episodeparse"
+	"NyaMediaMetadataTool/internal/executil"
 	"NyaMediaMetadataTool/internal/fanart"
 	"NyaMediaMetadataTool/internal/store"
 	"NyaMediaMetadataTool/internal/tmdb"
@@ -1089,7 +1089,7 @@ func ensureEpisodeThumbFromVideo(ctx context.Context, cfg config.Config, nfoPath
 	}
 	seek := fmt.Sprintf("%.3f", duration*0.5)
 	args := []string{"-y", "-ss", seek, "-i", mediaPath, "-frames:v", "1", "-q:v", "3", thumbPath}
-	cmd := exec.CommandContext(ctx, cfg.Tools.FFmpeg, args...)
+	cmd := executil.CommandContext(ctx, cfg.Tools.FFmpeg, args...)
 	var stderrBuf bytes.Buffer
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderrBuf

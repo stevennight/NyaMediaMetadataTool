@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -41,12 +42,21 @@ func ScanOptionsFromStrategy(strategy string) ScanOptions {
 	return ScanOptions{MissingOnly: true}
 }
 
-func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, dir config.WatchDir, options ScanOptions) error {
+func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, dir config.WatchDir, options ScanOptions) (scanErr error) {
 	if !dir.ScanOnStart {
 		return nil
 	}
+	ownedRun := options.ScanRunID == ""
 	if options.ScanRunID == "" {
-		options.ScanRunID = newScanRunID()
+		options.ScanRunID = NewScanRunID()
+	}
+	if ownedRun {
+		if err := st.BeginScanRun(ctx, options.ScanRunID, "scan", dir.Path); err != nil {
+			return fmt.Errorf("begin scan run: %w", err)
+		}
+		defer func() {
+			scanErr = finishOwnedScanRun(ctx, st, options.ScanRunID, scanErr)
+		}()
 	}
 	if hasIgnoreFileInAncestors(dir.Path) {
 		return nil
@@ -57,11 +67,16 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 		allowed[strings.ToLower(ext)] = struct{}{}
 	}
 
-	return filepath.WalkDir(dir.Path, func(path string, entry fs.DirEntry, err error) error {
+	var fileErrors []error
+	walkErr := filepath.WalkDir(dir.Path, func(path string, entry fs.DirEntry, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			if path == dir.Path {
 				return err
 			}
+			fileErrors = append(fileErrors, fmt.Errorf("scan %q: %w", path, err))
 			return nil
 		}
 		if entry.IsDir() {
@@ -80,6 +95,7 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 
 		info, err := entry.Info()
 		if err != nil {
+			fileErrors = append(fileErrors, fmt.Errorf("inspect %q: %w", path, err))
 			return nil
 		}
 
@@ -91,19 +107,31 @@ func ScanWatchDir(ctx context.Context, cfg config.Config, st *store.Store, logge
 		mediaFileID, err := st.UpsertMediaFile(ctx, path, info)
 		if err != nil {
 			logger.Warn("upsert media file failed", "path", path, "error", err)
+			fileErrors = append(fileErrors, fmt.Errorf("upsert %q: %w", path, err))
 			return nil
 		}
 
 		if err := enqueueScannedMedia(ctx, cfg, st, path, mediaFileID, options); err != nil {
 			logger.Warn("enqueue media task failed", "path", path, "error", err)
+			fileErrors = append(fileErrors, fmt.Errorf("enqueue %q: %w", path, err))
 		}
 		return nil
 	})
+	return errors.Join(walkErr, errors.Join(fileErrors...))
 }
 
-func ScanPath(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, path string, options ScanOptions) error {
+func ScanPath(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, path string, options ScanOptions) (scanErr error) {
+	ownedRun := options.ScanRunID == ""
 	if options.ScanRunID == "" {
-		options.ScanRunID = newScanRunID()
+		options.ScanRunID = NewScanRunID()
+	}
+	if ownedRun {
+		if err := st.BeginScanRun(ctx, options.ScanRunID, "scan", path); err != nil {
+			return fmt.Errorf("begin scan run: %w", err)
+		}
+		defer func() {
+			scanErr = finishOwnedScanRun(ctx, st, options.ScanRunID, scanErr)
+		}()
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -144,8 +172,21 @@ func enqueueScannedMedia(ctx context.Context, cfg config.Config, st *store.Store
 	return st.EnqueueMediaTaskWithProcessing(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly, options.ScanRunID, options.Processing)
 }
 
-func newScanRunID() string {
+func NewScanRunID() string {
 	return fmt.Sprintf("scan-%d", time.Now().UTC().UnixNano())
+}
+
+func finishOwnedScanRun(ctx context.Context, st *store.Store, scanRunID string, scanErr error) error {
+	errorSummary := ""
+	if scanErr != nil {
+		errorSummary = scanErr.Error()
+	}
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := st.FinishScanRun(finishCtx, scanRunID, errorSummary); err != nil {
+		return errors.Join(scanErr, fmt.Errorf("finish scan run: %w", err))
+	}
+	return scanErr
 }
 
 func hasIgnoreFile(dir string) bool {

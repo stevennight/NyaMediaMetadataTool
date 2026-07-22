@@ -222,6 +222,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tools/check", s.handleToolsCheck)
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
 	s.mux.HandleFunc("GET /api/tasks/summary", s.handleTaskSummary)
+	s.mux.HandleFunc("GET /api/tasks/runs", s.handleTaskRuns)
 	s.mux.HandleFunc("POST /api/tasks/cancel-active", s.handleCancelActiveTasks)
 	s.mux.HandleFunc("POST /api/tasks/retry", s.handleRetryTasks)
 	s.mux.HandleFunc("POST /api/tasks/ignore", s.handleIgnoreTasks)
@@ -352,6 +353,16 @@ func (s *Server) handleTaskSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	runs, err := s.store.ListScanRunSummaries(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, runs)
 }
 
 func (s *Server) handleCancelActiveTasks(w http.ResponseWriter, r *http.Request) {
@@ -952,15 +963,24 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+		scanRunID := bootstrap.NewScanRunID()
+		if err := s.store.BeginScanRun(r.Context(), scanRunID, "manual", input.Path); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		options.ScanRunID = scanRunID
 		if !s.runBackground(func(ctx context.Context) {
-			if err := bootstrap.ScanPath(ctx, cfg, s.store, s.logger, input.Path, options); err != nil && !errors.Is(err, context.Canceled) {
-				s.logger.Warn("manual path rescan failed", "path", input.Path, "error", err)
+			scanErr := bootstrap.ScanPath(ctx, cfg, s.store, s.logger, input.Path, options)
+			if scanErr != nil && !errors.Is(scanErr, context.Canceled) {
+				s.logger.Warn("manual path rescan failed", "path", input.Path, "error", scanErr)
 			}
+			s.finishScanRun(ctx, scanRunID, scanErr)
 		}) {
+			s.finishScanRun(r.Context(), scanRunID, errors.New("service is shutting down"))
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service is shutting down"})
 			return
 		}
-		writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "count": 1})
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "count": 1, "scanRunId": scanRunID})
 		return
 	}
 
@@ -990,20 +1010,48 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	scanRunID := bootstrap.NewScanRunID()
+	scopePath := "全部媒体目录"
+	if len(dirs) == 1 {
+		scopePath = dirs[0].Path
+	}
+	if err := s.store.BeginScanRun(r.Context(), scanRunID, "manual", scopePath); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	options.ScanRunID = scanRunID
 
 	if !s.runBackground(func(ctx context.Context) {
+		var scanErr error
 		for _, dir := range dirs {
 			cfgDir := config.WatchDir{Path: dir.Path, Recursive: dir.Recursive, Enabled: true, WatchEnabled: dir.WatchEnabled, ScanOnStart: true}
-			if err := bootstrap.ScanWatchDir(ctx, cfg, s.store, s.logger, cfgDir, options); err != nil && !errors.Is(err, context.Canceled) {
-				s.logger.Warn("manual rescan failed", "path", dir.Path, "error", err)
+			if err := bootstrap.ScanWatchDir(ctx, cfg, s.store, s.logger, cfgDir, options); err != nil {
+				scanErr = errors.Join(scanErr, err)
+				if !errors.Is(err, context.Canceled) {
+					s.logger.Warn("manual rescan failed", "path", dir.Path, "error", err)
+				}
 			}
 		}
+		s.finishScanRun(ctx, scanRunID, scanErr)
 	}) {
+		s.finishScanRun(r.Context(), scanRunID, errors.New("service is shutting down"))
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service is shutting down"})
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "count": len(dirs)})
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "count": len(dirs), "scanRunId": scanRunID})
+}
+
+func (s *Server) finishScanRun(ctx context.Context, scanRunID string, scanErr error) {
+	errorSummary := ""
+	if scanErr != nil {
+		errorSummary = scanErr.Error()
+	}
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.store.FinishScanRun(finishCtx, scanRunID, errorSummary); err != nil {
+		s.logger.Warn("finish scan run failed", "scanRunID", scanRunID, "error", err)
+	}
 }
 
 func pathWithinRoot(path string, root string) bool {

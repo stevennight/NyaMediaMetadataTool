@@ -19,15 +19,19 @@ import (
 )
 
 type Watcher struct {
-	cfg      config.Config
-	store    *store.Store
-	logger   *slog.Logger
-	allowed  map[string]struct{}
-	mu       sync.Mutex
-	timers   map[string]*time.Timer
-	reloadCh chan reloadRequest
-	asyncWG  sync.WaitGroup
-	stopping bool
+	cfg         config.Config
+	store       *store.Store
+	logger      *slog.Logger
+	allowed     map[string]struct{}
+	mu          sync.Mutex
+	timers      map[string]*time.Timer
+	timerRuns   map[string]string
+	runPending  map[string]int
+	runErrors   map[string][]error
+	activeRunID string
+	reloadCh    chan reloadRequest
+	asyncWG     sync.WaitGroup
+	stopping    bool
 }
 
 type reloadRequest struct {
@@ -41,7 +45,17 @@ func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Watcher {
 	for _, ext := range cfg.Processing.Extensions {
 		allowed[strings.ToLower(ext)] = struct{}{}
 	}
-	return &Watcher{cfg: cfg, store: st, logger: logger, allowed: allowed, timers: map[string]*time.Timer{}, reloadCh: make(chan reloadRequest)}
+	return &Watcher{
+		cfg:        cfg,
+		store:      st,
+		logger:     logger,
+		allowed:    allowed,
+		timers:     make(map[string]*time.Timer),
+		timerRuns:  make(map[string]string),
+		runPending: make(map[string]int),
+		runErrors:  make(map[string][]error),
+		reloadCh:   make(chan reloadRequest),
+	}
 }
 
 func (w *Watcher) ReloadWatchDirs(ctx context.Context) error {
@@ -245,19 +259,45 @@ func (w *Watcher) debounceFile(ctx context.Context, path string) {
 	}
 	if timer, ok := w.timers[path]; ok {
 		timer.Stop()
+	} else {
+		if w.activeRunID == "" {
+			candidate := bootstrap.NewScanRunID()
+			if err := w.store.BeginScanRun(ctx, candidate, "watcher", filepath.Dir(path)); err != nil {
+				w.logger.Warn("begin watcher scan run failed", "path", path, "error", err)
+			} else {
+				w.activeRunID = candidate
+			}
+		}
+		w.timerRuns[path] = w.activeRunID
+		if w.activeRunID != "" {
+			w.runPending[w.activeRunID]++
+		}
 	}
-	w.timers[path] = time.AfterFunc(w.cfg.Processing.StableDelay, func() {
+	var scheduledTimer *time.Timer
+	scheduledTimer = time.AfterFunc(w.cfg.Processing.StableDelay, func() {
 		w.mu.Lock()
-		delete(w.timers, path)
-		if w.stopping {
+		if w.timers[path] != scheduledTimer {
 			w.mu.Unlock()
+			return
+		}
+		scanRunID := w.timerRuns[path]
+		delete(w.timers, path)
+		delete(w.timerRuns, path)
+		if w.stopping {
+			sealRun, scanErr := w.releaseScanRunLocked(scanRunID, nil)
+			w.mu.Unlock()
+			if sealRun {
+				w.finishWatcherScanRun(scanRunID, scanErr)
+			}
 			return
 		}
 		w.asyncWG.Add(1)
 		w.mu.Unlock()
 		defer w.asyncWG.Done()
-		w.scheduleFile(ctx, path)
+		itemErr := w.scheduleFile(ctx, path, scanRunID)
+		w.completeScanRunItem(scanRunID, itemErr)
 	})
+	w.timers[path] = scheduledTimer
 	w.mu.Unlock()
 }
 
@@ -278,11 +318,20 @@ func (w *Watcher) startAsync(run func()) bool {
 func (w *Watcher) stopAsync() {
 	w.mu.Lock()
 	w.stopping = true
+	sealRuns := make(map[string]error)
 	for path, timer := range w.timers {
 		timer.Stop()
 		delete(w.timers, path)
+		scanRunID := w.timerRuns[path]
+		delete(w.timerRuns, path)
+		if sealRun, scanErr := w.releaseScanRunLocked(scanRunID, nil); sealRun {
+			sealRuns[scanRunID] = scanErr
+		}
 	}
 	w.mu.Unlock()
+	for scanRunID, scanErr := range sealRuns {
+		w.finishWatcherScanRun(scanRunID, scanErr)
+	}
 	w.asyncWG.Wait()
 }
 
@@ -308,13 +357,22 @@ func (w *Watcher) recoverFromOverflow(ctx context.Context) {
 
 func (w *Watcher) cancelTimersOutside(activeRoots []string) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	sealRuns := make(map[string]error)
 	for path, timer := range w.timers {
 		if isUnderAnyRoot(path, activeRoots) {
 			continue
 		}
 		timer.Stop()
 		delete(w.timers, path)
+		scanRunID := w.timerRuns[path]
+		delete(w.timerRuns, path)
+		if sealRun, scanErr := w.releaseScanRunLocked(scanRunID, nil); sealRun {
+			sealRuns[scanRunID] = scanErr
+		}
+	}
+	w.mu.Unlock()
+	for scanRunID, scanErr := range sealRuns {
+		w.finishWatcherScanRun(scanRunID, scanErr)
 	}
 }
 
@@ -329,9 +387,9 @@ func isUnderAnyRoot(path string, roots []string) bool {
 	return false
 }
 
-func (w *Watcher) scheduleFile(ctx context.Context, path string) {
+func (w *Watcher) scheduleFile(ctx context.Context, path string, scanRunID string) error {
 	if hasIgnoreFileInAncestors(filepath.Dir(path)) {
-		return
+		return nil
 	}
 
 	checks := w.cfg.Processing.StableChecks
@@ -342,24 +400,24 @@ func (w *Watcher) scheduleFile(ctx context.Context, path string) {
 	for i := 0; i < checks; i++ {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		default:
 		}
 		var err error
 		info, err = os.Stat(path)
 		if err != nil || info.IsDir() {
-			return
+			return nil
 		}
 		if time.Since(info.ModTime()) >= w.cfg.Processing.StableDelay {
 			break
 		}
 		if i == checks-1 {
 			w.debounceFile(ctx, path)
-			return
+			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-time.After(w.cfg.Processing.StableDelay):
 		}
 	}
@@ -367,15 +425,74 @@ func (w *Watcher) scheduleFile(ctx context.Context, path string) {
 	mediaFileID, err := w.store.UpsertMediaFile(ctx, path, info)
 	if err != nil {
 		w.logger.Warn("watch upsert media file failed", "path", path, "error", err)
-		return
+		return err
 	}
 	strategy := w.cfg.Processing.Strategy
 	if dir, findErr := w.store.FindWatchDirForPath(ctx, path); findErr == nil && !dir.UseGlobalProcessing {
 		strategy = dir.Processing.Strategy
 	}
 	options := bootstrap.ScanOptionsFromStrategy(strategy)
-	if err := w.store.EnqueueMediaTaskWithOptions(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly); err != nil {
-		w.logger.Warn("watch enqueue media task failed", "path", path, "error", err)
+	var enqueueErr error
+	if scanRunID == "" {
+		enqueueErr = w.store.EnqueueMediaTaskWithOptions(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly)
+	} else {
+		enqueueErr = w.store.EnqueueMediaTaskWithScanRun(ctx, mediaFileID, options.OverwriteExisting, options.Force || options.MissingOnly, scanRunID)
+	}
+	if enqueueErr != nil {
+		w.logger.Warn("watch enqueue media task failed", "path", path, "error", enqueueErr)
+	}
+	return enqueueErr
+}
+
+func (w *Watcher) completeScanRunItem(scanRunID string, itemErr error) {
+	if scanRunID == "" {
+		return
+	}
+	w.mu.Lock()
+	sealRun, scanErr := w.releaseScanRunLocked(scanRunID, itemErr)
+	w.mu.Unlock()
+	if sealRun {
+		w.finishWatcherScanRun(scanRunID, scanErr)
+	}
+}
+
+func (w *Watcher) releaseScanRunLocked(scanRunID string, itemErr error) (bool, error) {
+	if scanRunID == "" {
+		return false, nil
+	}
+	pendingCount, ok := w.runPending[scanRunID]
+	if !ok {
+		return false, nil
+	}
+	if itemErr != nil {
+		w.runErrors[scanRunID] = append(w.runErrors[scanRunID], itemErr)
+	}
+	pending := pendingCount - 1
+	if pending > 0 {
+		w.runPending[scanRunID] = pending
+		return false, nil
+	}
+	delete(w.runPending, scanRunID)
+	if w.activeRunID == scanRunID {
+		w.activeRunID = ""
+	}
+	scanErr := errors.Join(w.runErrors[scanRunID]...)
+	delete(w.runErrors, scanRunID)
+	return true, scanErr
+}
+
+func (w *Watcher) finishWatcherScanRun(scanRunID string, scanErr error) {
+	if scanRunID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errorSummary := ""
+	if scanErr != nil {
+		errorSummary = scanErr.Error()
+	}
+	if err := w.store.FinishScanRun(ctx, scanRunID, errorSummary); err != nil {
+		w.logger.Warn("finish watcher scan run failed", "scanRunID", scanRunID, "error", err)
 	}
 }
 

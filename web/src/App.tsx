@@ -117,6 +117,7 @@ type Task = {
   type: string;
   status: string;
   overwriteExisting: boolean;
+  scanRunId: string;
   attempts: number;
   errorSummary: string;
   createdAt: string;
@@ -130,6 +131,27 @@ type TaskListResponse = {
   total: number;
   page: number;
   pageSize: number;
+};
+
+type TaskRun = {
+  id: string;
+  source: string;
+  scopePath: string;
+  status: string;
+  total: number;
+  active: number;
+  completed: number;
+  failed: number;
+  canceled: number;
+  ignored: number;
+  errorSummary: string;
+  createdAt: string;
+  scanFinishedAt?: string;
+  updatedAt: string;
+};
+
+type TaskRunListResponse = {
+  items: TaskRun[];
 };
 
 type TaskSummary = {
@@ -829,6 +851,14 @@ function taskTypeLabel(type: string) {
   }
 }
 
+function isTaskRunActive(status: string) {
+  return status === 'collecting' || status === 'running';
+}
+
+function isTaskRunTerminal(status: string) {
+  return ['completed', 'failed', 'canceled', 'ignored', 'partial', 'empty'].includes(status);
+}
+
 function healthStatusLabel(status?: string) {
   switch (status) {
     case 'ok': return '正常';
@@ -1066,7 +1096,9 @@ export function App() {
   const fileAuditRequestRef = useRef(0);
   const workspaceContentRef = useRef<HTMLDivElement>(null);
   const allowSettingsHistoryNavigationRef = useRef(false);
-  const observedTaskStatusesRef = useRef(new Map<number, string>());
+  const observedTaskRunStatusesRef = useRef(new Map<string, string>());
+  const notifiedTaskRunIDsRef = useRef(new Set<string>());
+  const taskRunNotificationBaselineReadyRef = useRef(false);
   const observedUploadStatusesRef = useRef(new Map<number, string>());
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const lastTaskSelectionIndexRef = useRef<number | null>(null);
@@ -1547,7 +1579,6 @@ export function App() {
 
   function applyTaskList(value: TaskListResponse | Task[] | null | undefined) {
     if (Array.isArray(value)) {
-      observeTaskStatuses(value);
       setTasks(value);
       setTaskTotal(value.length);
       setTaskPage(1);
@@ -1555,7 +1586,6 @@ export function App() {
       return;
     }
     const items = asArray<Task>(value?.items);
-    observeTaskStatuses(items);
     setTasks(items);
     setTaskTotal(value?.total ?? 0);
     setTaskPage(value?.page ?? 1);
@@ -1595,15 +1625,43 @@ export function App() {
     setUploadPage(value.page ?? 1);
   }
 
-  function observeTaskStatuses(items: Task[]) {
-    const observed = observedTaskStatusesRef.current;
-    for (const task of items) {
-      const previous = observed.get(task.id);
-      observed.set(task.id, task.status);
-      if (!previous || previous === task.status || !['completed', 'failed'].includes(task.status)) continue;
-      const name = task.mediaPath.split(/[\\/]/).pop() || task.mediaPath || `任务 #${task.id}`;
-      const failed = task.status === 'failed';
-      void notifyDesktop(failed ? '媒体任务失败' : '媒体任务完成', failed ? `${name}：${task.errorSummary || '请打开任务详情查看原因'}` : name).catch(() => {});
+  function observeTaskRunStatuses(items: TaskRun[], baselineStartedAt: number) {
+    const observed = observedTaskRunStatusesRef.current;
+    const notified = notifiedTaskRunIDsRef.current;
+    const establishingBaseline = !taskRunNotificationBaselineReadyRef.current;
+    taskRunNotificationBaselineReadyRef.current = true;
+
+    for (const run of items) {
+      const previous = observed.get(run.id);
+      observed.set(run.id, run.status);
+      if (!isTaskRunTerminal(run.status)) continue;
+      if (notified.has(run.id)) continue;
+      const updatedAt = parseStoredTime(run.updatedAt)?.getTime() ?? 0;
+      if (establishingBaseline && updatedAt < baselineStartedAt - 1000) {
+        notified.add(run.id);
+        continue;
+      }
+      if (previous !== undefined && !isTaskRunActive(previous)) {
+        notified.add(run.id);
+        continue;
+      }
+      if (run.status === 'empty' && !run.errorSummary) {
+        notified.add(run.id);
+        continue;
+      }
+
+      const scopeName = run.scopePath.split(/[\\/]/).filter(Boolean).pop() || run.scopePath || '媒体扫描';
+      const counts = run.total === 0 ? ['扫描未完成'] : [`共 ${run.total} 个文件`, `完成 ${run.completed}`];
+      if (run.total > 0 && run.failed > 0) counts.push(`失败 ${run.failed}`);
+      if (run.total > 0 && run.canceled > 0) counts.push(`取消 ${run.canceled}`);
+      if (run.total > 0 && run.ignored > 0) counts.push(`忽略 ${run.ignored}`);
+      const needsAttention = run.failed > 0 || run.status === 'failed' || run.status === 'partial';
+      const canceled = run.status === 'canceled';
+      const title = needsAttention ? '媒体批次需要处理' : canceled ? '媒体批次已取消' : '媒体批次完成';
+      const summary = run.errorSummary.trim().replace(/\s+/g, ' ');
+      const detail = summary ? `；${summary.slice(0, 160)}${summary.length > 160 ? '…' : ''}` : '';
+      notified.add(run.id);
+      void notifyDesktop(title, `${scopeName}：${counts.join('，')}${detail}`).catch(() => {});
     }
   }
 
@@ -1921,29 +1979,38 @@ export function App() {
   useEffect(() => {
     if (!runtimeInfo?.desktop) return;
     let active = true;
+    let polling = false;
+    let abortController: AbortController | null = null;
+    const baselineStartedAt = Date.now();
     async function pollDesktopNotifications() {
+      if (polling) return;
+      polling = true;
+      abortController = new AbortController();
       try {
-        const [tasksResponse, uploadsResponse] = await Promise.all([
-          fetch('/api/tasks?page=1&pageSize=50'),
-          fetch('/api/uploads?page=1&pageSize=50')
+        const [taskRunsResult, uploadsResult] = await Promise.allSettled([
+          fetch('/api/tasks/runs?limit=50', { signal: abortController.signal }).then(async (response) => response.ok ? await response.json() as TaskRun[] | TaskRunListResponse : null),
+          fetch('/api/uploads?page=1&pageSize=50', { signal: abortController.signal }).then(async (response) => response.ok ? await response.json() as UploadBatchListResponse : null)
         ]);
         if (!active) return;
-        if (tasksResponse.ok) {
-          const value = await tasksResponse.json() as TaskListResponse;
-          observeTaskStatuses(asArray<Task>(value.items));
+        if (taskRunsResult.status === 'fulfilled' && taskRunsResult.value) {
+          const value = taskRunsResult.value;
+          observeTaskRunStatuses(Array.isArray(value) ? value : asArray<TaskRun>(value.items), baselineStartedAt);
         }
-        if (uploadsResponse.ok) {
-          const value = await uploadsResponse.json() as UploadBatchListResponse;
-          observeUploadStatuses(asArray<UploadBatch>(value.items));
+        if (uploadsResult.status === 'fulfilled' && uploadsResult.value) {
+          observeUploadStatuses(asArray<UploadBatch>(uploadsResult.value.items));
         }
       } catch {
         // Notification polling must not replace the main connection status.
+      } finally {
+        polling = false;
+        abortController = null;
       }
     }
     void pollDesktopNotifications();
     const interval = window.setInterval(() => void pollDesktopNotifications(), desktopNotificationPollIntervalMs);
     return () => {
       active = false;
+      abortController?.abort();
       window.clearInterval(interval);
     };
   }, [runtimeInfo?.desktop]);

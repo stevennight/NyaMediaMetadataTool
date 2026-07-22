@@ -300,6 +300,13 @@ func TestScanWatchDirAssignsOneScanRunToDirectoryTasks(t *testing.T) {
 	if tasks[0].ScanRunID != tasks[1].ScanRunID {
 		t.Fatalf("expected same scan run id, got %q and %q", tasks[0].ScanRunID, tasks[1].ScanRunID)
 	}
+	runs, err := st.ListScanRunSummaries(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ID != tasks[0].ScanRunID || runs[0].Status != store.ScanRunStatusRunning || runs[0].ScanFinishedAt == "" {
+		t.Fatalf("expected sealed active scan run, got %+v", runs)
+	}
 	if !tasks[0].OverwriteExisting || !tasks[1].OverwriteExisting {
 		t.Fatal("expected overwrite strategy to be preserved on file tasks")
 	}

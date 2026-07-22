@@ -18,6 +18,7 @@ import (
 	"NyaMediaMetadataTool/internal/appcore"
 	"NyaMediaMetadataTool/internal/appdata"
 	"NyaMediaMetadataTool/internal/config"
+	"NyaMediaMetadataTool/internal/executil"
 	"NyaMediaMetadataTool/internal/renamer"
 
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -506,22 +507,22 @@ func startOpenCommand(path string, selectFile bool) error {
 	switch runtime.GOOS {
 	case "windows":
 		if selectFile {
-			command = exec.Command("explorer.exe", "/select,", path)
+			command = executil.VisibleCommand("explorer.exe", "/select,", path)
 		} else {
-			command = exec.Command("explorer.exe", path)
+			command = executil.VisibleCommand("explorer.exe", path)
 		}
 	case "darwin":
 		if selectFile {
-			command = exec.Command("open", "-R", path)
+			command = executil.VisibleCommand("open", "-R", path)
 		} else {
-			command = exec.Command("open", path)
+			command = executil.VisibleCommand("open", path)
 		}
 	default:
 		target := path
 		if selectFile {
 			target = filepath.Dir(path)
 		}
-		command = exec.Command("xdg-open", target)
+		command = executil.VisibleCommand("xdg-open", target)
 	}
 	return startAndReap(command)
 }
@@ -530,11 +531,11 @@ func startDefaultCommand(path string) error {
 	var command *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
+		command = executil.VisibleCommand("rundll32", "url.dll,FileProtocolHandler", path)
 	case "darwin":
-		command = exec.Command("open", path)
+		command = executil.VisibleCommand("open", path)
 	default:
-		command = exec.Command("xdg-open", path)
+		command = executil.VisibleCommand("xdg-open", path)
 	}
 	return startAndReap(command)
 }

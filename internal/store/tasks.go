@@ -58,6 +58,12 @@ type TaskListResult struct {
 	PageSize int    `json:"pageSize"`
 }
 
+type TaskSummary struct {
+	Total  int `json:"total"`
+	Active int `json:"active"`
+	Failed int `json:"failed"`
+}
+
 func (s *Store) ListTasks(ctx context.Context, limit int) ([]Task, error) {
 	result, err := s.ListTasksFiltered(ctx, TaskListFilters{Page: 1, PageSize: limit})
 	return result.Items, err
@@ -76,6 +82,17 @@ func (s *Store) CountTasksByStatuses(ctx context.Context, statuses ...string) (i
 	var count int
 	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM tasks WHERE status IN (%s)`, strings.Join(placeholders, ",")), args...).Scan(&count)
 	return count, err
+}
+
+func (s *Store) GetTaskSummary(ctx context.Context) (TaskSummary, error) {
+	var summary TaskSummary
+	err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*),
+       COALESCE(SUM(CASE WHEN status IN ('pending', 'running') THEN 1 ELSE 0 END), 0),
+       COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)
+FROM tasks
+`).Scan(&summary.Total, &summary.Active, &summary.Failed)
+	return summary, err
 }
 
 func (s *Store) ListTasksFiltered(ctx context.Context, filters TaskListFilters) (TaskListResult, error) {

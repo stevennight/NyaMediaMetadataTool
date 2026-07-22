@@ -1387,6 +1387,10 @@ button:disabled {
   gap: 8px;
 }
 
+.template-input-row.no-history {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .template-history-picker {
   position: relative;
   min-width: 0;
@@ -4306,6 +4310,54 @@ label small {
   padding: 28px 16px;
 }
 
+/* Keep long-dialog context and actions available while its content scrolls. */
+.modal-card {
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.modal-card > .card-header {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  margin-top: -24px;
+  margin-right: -24px;
+  margin-left: -24px;
+  padding-right: 24px;
+  padding-left: 24px;
+  box-shadow: var(--shadow-small);
+}
+
+.modal-card:not(.confirm-dialog) .modal-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 7;
+  margin-right: -24px;
+  margin-bottom: -24px;
+  margin-left: -24px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-raised);
+  padding: 12px 24px 16px;
+}
+
+/* Empty workflow tables should describe the empty state, not fill the viewport. */
+.task-page-grid:has(.task-table .empty-cell),
+.rename-page-grid:has(.rename-preview-empty) {
+  height: auto;
+  align-self: start;
+  grid-template-rows: auto;
+}
+
+.task-page-grid > .card:has(.task-table .empty-cell),
+.rename-page-grid > .card:last-child:has(.rename-preview-empty) {
+  height: auto;
+}
+
+.task-page-grid > .card:has(.task-table .empty-cell) > .task-table-wrap,
+.rename-page-grid > .card:last-child:has(.rename-preview-empty) > .task-table-wrap {
+  flex: 0 0 auto;
+}
+
 @media (min-width: 761px) {
   html,
   body,
@@ -4340,6 +4392,21 @@ label small {
     overflow-x: hidden;
     overflow-y: auto;
     scrollbar-gutter: stable;
+  }
+
+  /* Use the remaining flex area so restart banners reduce page height naturally. */
+  .settings-grid,
+  .task-page-grid,
+  .rename-page-grid {
+    height: 100%;
+  }
+}
+
+@media (max-width: 860px) and (min-width: 761px) {
+  .settings-grid > .card > .settings-form {
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding-right: 6px;
   }
 }
 
@@ -4399,6 +4466,34 @@ label small {
   .workspace-content {
     padding-right: 20px;
     padding-left: 20px;
+  }
+
+  .card-header {
+    flex-wrap: wrap;
+  }
+
+  .card-header > .inline-actions {
+    min-width: 0;
+    flex: 1 1 360px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 1180px) and (min-width: 861px) {
+  .task-filters,
+  .audit-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1320px) and (min-width: 861px) {
+  .rename-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rename-preview-action {
+    grid-column: 1 / -1;
   }
 }
 
@@ -4514,6 +4609,25 @@ label small {
     padding: 14px 12px 20px;
   }
 
+  .settings-tabs {
+    top: 62px;
+  }
+
+  .settings-grid > .card {
+    overflow: visible;
+  }
+
+  .card-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .card-header > .inline-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
   .restart-banner,
   .initial-loading {
     margin: 12px 12px 0;
@@ -4555,6 +4669,7 @@ label small {
 
   .modal-card {
     max-height: calc(100vh - 20px);
+    max-height: calc(100dvh - 20px);
   }
 
   .toast-card,
@@ -4608,6 +4723,133 @@ label small {
 
   .theme-option::after {
     right: 6px;
+  }
+}
+
+.dashboard-overview-compact {
+  display: block;
+}
+
+.workflow-fieldset {
+  min-inline-size: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.workflow-fieldset:disabled {
+  opacity: 0.72;
+}
+
+.workflow-warning {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--warning-border);
+  border-radius: 7px;
+  background: var(--warning-soft);
+  color: var(--warning-text-strong);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.rename-preview-empty {
+  display: flex;
+  min-height: 92px;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+}
+
+.empty-workflow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 92px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  padding: 16px;
+}
+
+.empty-workflow-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.empty-workflow > div {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+
+.empty-workflow > div > span {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+@media (max-width: 620px) {
+  .empty-workflow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .empty-workflow > button {
+    width: 100%;
+  }
+}
+
+@media (min-width: 761px) {
+  .error-toast {
+    top: 82px;
+    bottom: auto;
+  }
+}
+
+.content-panel > .error-toast {
+  position: relative;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  z-index: 20;
+  width: auto;
+  min-height: 48px;
+  flex: 0 0 auto;
+  margin: 12px 24px 0;
+}
+
+body:has(.modal-backdrop) .content-panel > .error-toast {
+  position: fixed;
+  top: 82px;
+  right: 22px;
+  left: auto;
+  z-index: 160;
+  width: min(420px, calc(100vw - 44px));
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .content-panel > .error-toast {
+    margin: 10px 12px 0;
+  }
+
+  body:has(.modal-backdrop) .content-panel > .error-toast {
+    top: 72px;
+    right: 12px;
+    width: calc(100vw - 24px);
   }
 }
 

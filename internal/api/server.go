@@ -221,6 +221,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/tools/status", s.handleToolsStatus)
 	s.mux.HandleFunc("POST /api/tools/check", s.handleToolsCheck)
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
+	s.mux.HandleFunc("GET /api/tasks/summary", s.handleTaskSummary)
 	s.mux.HandleFunc("POST /api/tasks/cancel-active", s.handleCancelActiveTasks)
 	s.mux.HandleFunc("POST /api/tasks/retry", s.handleRetryTasks)
 	s.mux.HandleFunc("POST /api/tasks/ignore", s.handleIgnoreTasks)
@@ -342,6 +343,15 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (s *Server) handleTaskSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := s.store.GetTaskSummary(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 func (s *Server) handleCancelActiveTasks(w http.ResponseWriter, r *http.Request) {

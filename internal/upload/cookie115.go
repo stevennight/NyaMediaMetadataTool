@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
+	"net/http"
 	"os"
 	pathpkg "path"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,9 +28,10 @@ const (
 )
 
 type cookie115Provider struct {
-	client      *pan115.Pan115Client
-	requestMu   sync.Mutex
-	lastRequest time.Time
+	client          *pan115.Pan115Client
+	requestMu       sync.Mutex
+	lastRequest     time.Time
+	requestInterval func() time.Duration
 }
 
 func (m *Manager) defaultProviderFactory(ctx context.Context, target store.UploadBatchTarget) (Provider, error) {
@@ -63,11 +64,65 @@ func (p *cookie115Provider) Check(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := p.waitRequest(ctx); err != nil {
+	var err error
+	for attempt := 0; attempt < max115ListRetries; attempt++ {
+		if err = p.waitRequest(ctx); err != nil {
+			return err
+		}
+		err = check115FileAPI(ctx, p.client)
+		if err == nil {
+			return nil
+		}
+		if !isRetryable115Error(err) {
+			break
+		}
+	}
+	return fmt.Errorf("115 file API check failed: %w", err)
+}
+
+type http115StatusError struct {
+	statusCode int
+}
+
+func (err *http115StatusError) Error() string {
+	return fmt.Sprintf("115 file API returned HTTP %d", err.statusCode)
+}
+
+func check115FileAPI(ctx context.Context, client *pan115.Pan115Client) error {
+	result := pan115.FileListResp{}
+	response, err := client.NewRequest().
+		SetContext(ctx).
+		SetQueryParams(map[string]string{
+			"aid":              "1",
+			"cid":              "0",
+			"o":                pan115.FileOrderByTime,
+			"asc":              "1",
+			"offset":           "0",
+			"show_dir":         "1",
+			"limit":            "1",
+			"snap":             "0",
+			"natsort":          "0",
+			"record_open_time": "1",
+			"format":           "json",
+			"fc_mix":           "0",
+		}).
+		SetResult(&result).
+		ForceContentType("application/json;charset=UTF-8").
+		Get(pan115.ApiFileList)
+	if err != nil {
 		return err
 	}
-	if err := p.client.CookieCheck(); err != nil {
-		return fmt.Errorf("115 Cookie check failed: %w", err)
+	if response == nil {
+		return errors.New("115 file API returned no response")
+	}
+	if response.IsError() && isRetryable115Status(response.StatusCode()) {
+		return &http115StatusError{statusCode: response.StatusCode()}
+	}
+	if err := pan115.CheckErr(nil, &result, response); err != nil {
+		return err
+	}
+	if !result.State {
+		return errors.New("115 file API returned an invalid response")
 	}
 	return nil
 }
@@ -282,7 +337,11 @@ func (p *cookie115Provider) waitRequest(ctx context.Context) error {
 	p.requestMu.Lock()
 	defer p.requestMu.Unlock()
 	if !p.lastRequest.IsZero() {
-		waitFor := p.lastRequest.Add(random115RequestInterval()).Sub(time.Now())
+		interval := random115RequestInterval()
+		if p.requestInterval != nil {
+			interval = p.requestInterval()
+		}
+		waitFor := p.lastRequest.Add(interval).Sub(time.Now())
 		if waitFor > 0 {
 			timer := time.NewTimer(waitFor)
 			defer timer.Stop()
@@ -306,20 +365,27 @@ func isRetryable115Error(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}
+	var statusErr *http115StatusError
+	if errors.As(err, &statusErr) {
+		return isRetryable115Status(statusErr.statusCode)
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
 		return true
 	}
 	message := strings.ToLower(err.Error())
-	for _, marker := range []string{"405", "too many", "rate limit", "waf", "timeout", "temporary", "connection reset", "connection refused", "unexpected eof", "eof"} {
+	for _, marker := range []string{"method not allowed", "too many", "rate limit", "waf", "gateway timeout", "service unavailable", "bad gateway", "timeout", "temporary", "connection reset", "connection refused", "unexpected eof", "eof"} {
 		if strings.Contains(message, marker) {
 			return true
 		}
 	}
-	if code, convErr := strconv.Atoi(strings.TrimSpace(message)); convErr == nil && code == 405 {
-		return true
-	}
 	return false
+}
+
+func isRetryable115Status(status int) bool {
+	return status == http.StatusMethodNotAllowed ||
+		status == http.StatusTooManyRequests ||
+		(status >= http.StatusInternalServerError && status <= 599)
 }
 
 func normalize115Path(value string) string {

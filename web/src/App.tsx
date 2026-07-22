@@ -12,11 +12,13 @@ import {
   FolderCog,
   FolderOpen,
   History,
+  KeyRound,
   LayoutDashboard,
   ListTodo,
   Monitor,
   Moon,
   Plus,
+  Pencil,
   RefreshCw,
   Save,
   SearchCheck,
@@ -450,6 +452,7 @@ function outputProcessingFromConfig(config: AppConfig | null): OutputProcessingC
 }
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
 type UploadStatusFilter = 'all' | 'collecting' | 'pending' | 'running' | 'completed' | 'partial' | 'failed' | 'canceled';
+type UploadView = 'batches' | 'providers';
 type AuditTab = 'missing' | 'emby' | 'files';
 type ConfirmationRequest = {
   title: string;
@@ -496,6 +499,7 @@ const themeOptions: Array<{ value: ThemeMode; label: string; icon: LucideIcon }>
 ];
 
 function pageFromPath(pathname: string): PageKey {
+  if (pathname === '/uploads' || pathname.startsWith('/uploads/')) return 'uploads';
   switch (pathname) {
     case '/settings':
       return 'settings';
@@ -503,8 +507,6 @@ function pageFromPath(pathname: string): PageKey {
       return 'watchDirs';
     case '/tasks':
       return 'tasks';
-    case '/uploads':
-      return 'uploads';
     case '/rename':
       return 'rename';
     case '/audit':
@@ -815,6 +817,10 @@ function uploadStatusPillClass(status: string) {
   }
 }
 
+function uploadViewFromPath(pathname: string): UploadView {
+  return pathname === '/uploads/providers' ? 'providers' : 'batches';
+}
+
 function logLevelPillClass(level: string) {
   switch (level) {
     case 'error':
@@ -853,6 +859,8 @@ export function App() {
   const [uploadBatches, setUploadBatches] = useState<UploadBatch[]>([]);
   const [uploadProviders, setUploadProviders] = useState<UploadProvider[]>([]);
   const [uploadProviderTypes, setUploadProviderTypes] = useState<UploadProviderDescriptor[]>([]);
+  const [uploadView, setUploadView] = useState<UploadView>(() => uploadViewFromPath(window.location.pathname));
+  const [uploadProviderUsage, setUploadProviderUsage] = useState<UploadProvider | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('basic');
   const [taskTotal, setTaskTotal] = useState(0);
   const [taskPage, setTaskPage] = useState(1);
@@ -1004,7 +1012,7 @@ export function App() {
     directoryPicker && 'directory', targetPathEditor && 'target-path', selectedHistoryBatch && 'history-detail', renameHistoryOpen && 'history',
     renameTemplateEditorOpen && 'template', tmdbEpisodeDetail && 'episode-detail', addEmbyKeyOpen && 'emby-key', auditTmdbMatchOpen && 'audit-tmdb', tmdbMatchOpen && 'tmdb',
     batchEpisodeOpen && 'batch', editingWatchDir && 'edit-dir', addWatchDirOpen && 'add-dir', rescanOpen && 'rescan', selectedUploadBatch && 'upload-detail',
-    uploadCookieProvider && 'upload-cookie', (newUploadProviderOpen || uploadProviderModal) && 'upload-provider', selectedTask && 'task-detail',
+    uploadCookieProvider && 'upload-cookie', uploadProviderUsage && 'upload-provider-usage', (newUploadProviderOpen || uploadProviderModal) && 'upload-provider', selectedTask && 'task-detail',
     recentArtifactsOpen && 'artifacts'
   ].filter(Boolean).join('|');
 
@@ -1147,6 +1155,7 @@ export function App() {
       else if (tmdbMatchOpen) setTmdbMatchOpen(false);
       else if (batchEpisodeOpen && !modalBusyRef.current.applyingBatchEpisode) setBatchEpisodeOpen(false);
       else if (uploadCookieProvider && !modalBusyRef.current.savingUploadProvider) { setUploadCookieProvider(null); setCookieAuth(null); setUploadCookieValue(''); }
+      else if (uploadProviderUsage) setUploadProviderUsage(null);
       else if ((newUploadProviderOpen || uploadProviderModal) && !modalBusyRef.current.savingUploadProvider) { setNewUploadProviderOpen(false); setUploadProviderModal(null); }
       else if (editingWatchDir && !modalBusyRef.current.savingWatchDir) setEditingWatchDir(null);
       else if (addWatchDirOpen && !modalBusyRef.current.savingWatchDir) setAddWatchDirOpen(false);
@@ -1239,6 +1248,7 @@ export function App() {
   useEffect(() => {
     function handlePopState() {
       setActivePage(pageFromPath(window.location.pathname));
+      setUploadView(uploadViewFromPath(window.location.pathname));
     }
 
     window.addEventListener('popstate', handlePopState);
@@ -1253,7 +1263,10 @@ export function App() {
   }, [config?.scraping.language, renameLanguageInitialized]);
 
   function navigate(page: PageKey) {
-    if (page === activePage) return;
+    if (page === activePage) {
+      if (page === 'uploads' && uploadView !== 'batches') navigateUploadView('batches');
+      return;
+    }
     if (activePage === 'settings' && page !== 'settings' && configDirty) {
       requestConfirmation({
         title: '放弃设置修改？',
@@ -1272,6 +1285,7 @@ export function App() {
 
   function navigateDirect(page: PageKey) {
     setActivePage(page);
+    if (page === 'uploads') setUploadView('batches');
     const path = pagePaths[page];
     if (window.location.pathname !== path) {
       window.history.pushState(null, '', path);
@@ -1303,7 +1317,7 @@ export function App() {
     if (taskToFilter) params.set('to', zonedInputToUTC(taskToFilter, displayTimezone, true));
     const response = await fetch(`/api/tasks?${params.toString()}`);
     if (!response.ok) {
-      setError(await response.text());
+      setError(await readErrorMessage(response));
       return;
     }
     applyTaskList(await response.json());
@@ -1329,6 +1343,13 @@ export function App() {
     }
   }
 
+  function navigateUploadView(view: UploadView) {
+    setActivePage('uploads');
+    setUploadView(view);
+    const path = view === 'providers' ? '/uploads/providers' : '/uploads';
+    if (window.location.pathname !== path) window.history.pushState(null, '', path);
+  }
+
   function observeUploadStatuses(items: UploadBatch[]) {
     const observed = observedUploadStatusesRef.current;
     for (const batch of items) {
@@ -1343,25 +1364,25 @@ export function App() {
 
   async function loadUploadProviders() {
     const response = await fetch('/api/upload/providers');
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw new Error(await readErrorMessage(response));
     setUploadProviders(asArray<UploadProvider>(await response.json()));
   }
 
   async function loadWatchDirs() {
     const response = await fetch('/api/watch-dirs');
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw new Error(await readErrorMessage(response));
     setWatchDirs(asArray<WatchDir>(await response.json()));
   }
 
   async function loadUploadProviderTypes() {
     const response = await fetch('/api/upload/provider-types');
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw new Error(await readErrorMessage(response));
     setUploadProviderTypes(asArray<UploadProviderDescriptor>(await response.json()));
   }
 
   async function loadUploadSummary() {
     const response = await fetch('/api/uploads/summary');
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw new Error(await readErrorMessage(response));
     setUploadSummary(await response.json() as UploadSummary);
   }
 
@@ -1370,7 +1391,7 @@ export function App() {
     if (status !== 'all') params.set('status', status);
     if (uploadPathFilter.trim()) params.set('path', uploadPathFilter.trim());
     const response = await fetch(`/api/uploads?${params.toString()}`);
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw new Error(await readErrorMessage(response));
     applyUploadBatchList(await response.json() as UploadBatchListResponse);
   }
 
@@ -1379,6 +1400,14 @@ export function App() {
       await Promise.all([loadUploadSummary(), loadUploadProviders(), loadUploadProviderTypes(), loadUploadBatches(page, status)]);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载上传管理失败');
+    }
+  }
+
+  async function refreshUploadProviders() {
+    try {
+      await Promise.all([loadUploadProviders(), loadUploadProviderTypes(), loadWatchDirs()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载 Provider 账号失败');
     }
   }
 
@@ -1423,7 +1452,7 @@ export function App() {
   async function loadUploadBatchDetail(batchID: number) {
     try {
       const response = await fetch(`/api/uploads/${batchID}`);
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(await readErrorMessage(response));
       setSelectedUploadBatch(await response.json() as UploadBatchDetail);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载上传批次详情失败');
@@ -1440,7 +1469,7 @@ export function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(provider)
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(await readErrorMessage(response));
       const saved = await response.json() as UploadProvider;
       setUploadProviderModal(null);
       setNewUploadProviderOpen(false);
@@ -1480,7 +1509,7 @@ export function App() {
     try {
       const response = await fetch(`/api/upload/providers/${provider.id}`, { method: 'DELETE' });
       if (response.status === 409) throw new Error('该 Provider 已有关联的上传历史，不能删除。请编辑并停用它。');
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(await readErrorMessage(response));
       setNotice('Provider 已删除，关联的目录上传配置已移除。');
       await Promise.all([refreshUploads(), loadWatchDirs()]);
     } catch (err) {
@@ -1497,7 +1526,7 @@ export function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cookie: uploadCookieValue.trim(), authDevice: uploadCookieDevice })
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(await readErrorMessage(response));
       const saved = await response.json() as UploadProvider;
       setUploadCookieProvider(saved);
       setUploadCookieValue('');
@@ -1520,7 +1549,7 @@ export function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ terminal: uploadCookieDevice })
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(await readErrorMessage(response));
       setCookieAuth(await response.json() as CookieAuthStatus);
     } catch (err) {
       setError(err instanceof Error ? err.message : '启动二维码授权失败');
@@ -1533,7 +1562,7 @@ export function App() {
     setCheckingUploadProviderID(provider.id);
     try {
       const response = await fetch(`/api/upload/providers/${provider.id}/check`, { method: 'POST' });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(await readErrorMessage(response));
       setNotice(`“${provider.name}”连接正常。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : '检查上传目标失败');
@@ -1560,7 +1589,7 @@ export function App() {
     setUploadTargetActionID(target.id);
     try {
       const response = await fetch(`/api/uploads/targets/${target.id}/${action}`, { method: 'POST' });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(await readErrorMessage(response));
       setNotice(action === 'retry' ? '上传目标已重新排队。' : '上传目标已取消。');
       if (selectedUploadBatch) await loadUploadBatchDetail(selectedUploadBatch.batch.id);
       await refreshUploads();
@@ -1581,12 +1610,16 @@ export function App() {
 
   useEffect(() => {
     if (activePage !== 'uploads') return;
+    if (uploadView === 'providers') {
+      void refreshUploadProviders();
+      return;
+    }
     void refreshUploads(uploadPage, uploadStatusFilter);
     const interval = window.setInterval(() => {
       void refreshUploads(uploadPage, uploadStatusFilter);
     }, uploadListRefreshIntervalMs);
     return () => window.clearInterval(interval);
-  }, [activePage, uploadPage, uploadStatusFilter, uploadPathFilter, taskPageSize]);
+  }, [activePage, uploadView, uploadPage, uploadStatusFilter, uploadPathFilter, taskPageSize]);
 
   useEffect(() => {
     if (!runtimeInfo?.desktop) return;
@@ -1634,7 +1667,7 @@ export function App() {
     async function pollAuthorization() {
       try {
         const response = await fetch(`/api/upload/providers/${providerID}/auth/115cookie?sessionId=${encodeURIComponent(sessionID)}`);
-        if (!response.ok) throw new Error(await response.text());
+        if (!response.ok) throw new Error(await readErrorMessage(response));
         const next = await response.json() as CookieAuthStatus;
         if (!active) return;
         setCookieAuth(next);
@@ -1692,7 +1725,7 @@ export function App() {
   async function loadTasksWithoutFilters() {
     const response = await fetch(`/api/tasks?page=1&pageSize=${taskPageSize}`);
     if (!response.ok) {
-      setError(await response.text());
+      setError(await readErrorMessage(response));
       return;
     }
     applyTaskList(await response.json());
@@ -1751,7 +1784,7 @@ export function App() {
         signal: controller.signal
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       if (!response.body) {
@@ -1841,7 +1874,7 @@ export function App() {
       const params = new URLSearchParams({ showId: String(item.tmdbShowId), season: String(item.season), episode: String(item.episode), language: renameLanguage, refresh: String(refresh) });
       const response = await fetch(`/api/tmdb/episode?${params.toString()}`);
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       setTmdbEpisodeDetail(await response.json() as TmdbEpisodeDetail);
@@ -1911,7 +1944,7 @@ export function App() {
       })
     });
     if (!response.ok) {
-      const message = await response.text();
+      const message = await readErrorMessage(response);
       setError(message);
       throw new Error(message);
     }
@@ -1941,7 +1974,7 @@ export function App() {
       const params = new URLSearchParams({ query: tmdbQuery.trim(), language: renameLanguage });
       const response = await fetch(`/api/tmdb/search-tv?${params.toString()}`);
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const result = await response.json();
@@ -2081,7 +2114,7 @@ export function App() {
         body: JSON.stringify({ items: targets.map((item) => ({ path: item.path, newName: item.newName, newPath: item.newPath })) })
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const result = await response.json();
@@ -2101,7 +2134,7 @@ export function App() {
   async function undoRenameBatch(id: string) {
     const checkResponse = await fetch(`/api/rename/history/${id}/undo-check`);
     if (!checkResponse.ok) {
-      setError(await checkResponse.text());
+      setError(await readErrorMessage(checkResponse));
       return;
     }
     const check = await checkResponse.json() as RenameUndoCheckResult;
@@ -2126,7 +2159,7 @@ export function App() {
     try {
       const response = await fetch(`/api/rename/history/${id}/undo`, { method: 'POST' });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       setNotice('已撤销最近一次重命名。');
@@ -2151,7 +2184,7 @@ export function App() {
         body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, watchEnabled: newWatchDirWatchEnabled, scanOnStart: false, useGlobalProcessing: newWatchDirUseGlobalProcessing, processing: newWatchDirProcessing, uploadConfigs: newWatchDirUploadConfigs })
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const created = await response.json();
@@ -2211,7 +2244,7 @@ export function App() {
       body: JSON.stringify(next)
     });
     if (!response.ok) {
-      setError(await response.text());
+      setError(await readErrorMessage(response));
       return false;
     }
     const updated = await response.json();
@@ -2244,7 +2277,7 @@ export function App() {
     setError('');
     const response = await fetch(`/api/watch-dirs/${id}`, { method: 'DELETE' });
     if (!response.ok) {
-      setError(await response.text());
+      setError(await readErrorMessage(response));
       return;
     }
     setWatchDirs((items) => items.filter((item) => item.id !== id));
@@ -2336,7 +2369,7 @@ export function App() {
         })
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const report = await response.json() as AuditReport;
@@ -2393,7 +2426,7 @@ export function App() {
         })
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const report = await response.json() as FileAuditReport;
@@ -2420,7 +2453,7 @@ export function App() {
         body: JSON.stringify({ title: newEmbyKeyTitle.trim(), apiKey: newEmbyKeyValue.trim() })
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const saved = await response.json() as EmbyAPIKey;
@@ -2453,7 +2486,7 @@ export function App() {
     setError('');
     const response = await fetch(`/api/emby-api-keys/${id}`, { method: 'DELETE' });
     if (!response.ok) {
-      setError(await response.text());
+      setError(await readErrorMessage(response));
       return;
     }
     setAuditEmbyAPIKeys((keys) => keys.filter((key) => key.id !== id));
@@ -2466,7 +2499,7 @@ export function App() {
   async function fetchTaskDetail(id: number) {
     const response = await fetch(`/api/tasks/${id}`);
     if (!response.ok) {
-      throw new Error(await response.text());
+      throw new Error(await readErrorMessage(response));
     }
     return normalizeTaskDetail(await response.json());
   }
@@ -2524,7 +2557,7 @@ export function App() {
         body: JSON.stringify({ ids: selectedTaskIds })
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const result = await response.json();
@@ -2552,7 +2585,7 @@ export function App() {
         body: JSON.stringify({ ids: selectedTaskIds })
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const result = await response.json();
@@ -2583,7 +2616,7 @@ export function App() {
     try {
       const response = await fetch('/api/tasks/cancel-active', { method: 'POST' });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const result = await response.json();
@@ -2608,7 +2641,7 @@ export function App() {
         body: JSON.stringify(config)
       });
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const result = await response.json();
@@ -3278,17 +3311,58 @@ export function App() {
 
         {activePage === 'uploads' && (
         <section className="page-grid uploads-page-grid">
-          <Card title="上传概览" action={<button className="secondary" type="button" onClick={() => void refreshUploads()}>刷新</button>}>
-            <div className="upload-summary-grid" aria-label="上传概览">
-              <DashboardMetric label="合并中" value={String(uploadSummary.collecting)} tone={uploadSummary.collecting ? 'warn' : 'neutral'} />
-              <DashboardMetric label="等待上传" value={String(uploadSummary.pending)} tone={uploadSummary.pending ? 'warn' : 'neutral'} />
-              <DashboardMetric label="上传中" value={String(uploadSummary.running)} tone={uploadSummary.running ? 'warn' : 'neutral'} />
-              <DashboardMetric label="已完成" value={String(uploadSummary.completed)} tone="good" />
-              <DashboardMetric label="失败/部分失败" value={String(uploadSummary.failed)} tone={uploadSummary.failed ? 'bad' : 'good'} />
-            </div>
-          </Card>
+          <nav className="upload-tabs" aria-label="上传管理子页面">
+            <button className={uploadView === 'batches' ? 'status-tab active' : 'status-tab'} type="button" aria-current={uploadView === 'batches' ? 'page' : undefined} onClick={() => navigateUploadView('batches')}>上传批次</button>
+            <button className={uploadView === 'providers' ? 'status-tab active' : 'status-tab'} type="button" aria-current={uploadView === 'providers' ? 'page' : undefined} onClick={() => navigateUploadView('providers')}>Provider 账号</button>
+          </nav>
 
-          <Card title="Provider 账号" action={<button className="icon-text-button" type="button" onClick={() => setNewUploadProviderOpen(true)}><Plus size={16} />添加 Provider</button>}>
+          {uploadView === 'batches' && <>
+            <Card title="上传概览" action={<button className="secondary" type="button" onClick={() => void refreshUploads()}>刷新</button>}>
+              <div className="upload-summary-grid" aria-label="上传概览">
+                <DashboardMetric label="合并中" value={String(uploadSummary.collecting)} tone={uploadSummary.collecting ? 'warn' : 'neutral'} />
+                <DashboardMetric label="等待上传" value={String(uploadSummary.pending)} tone={uploadSummary.pending ? 'warn' : 'neutral'} />
+                <DashboardMetric label="上传中" value={String(uploadSummary.running)} tone={uploadSummary.running ? 'warn' : 'neutral'} />
+                <DashboardMetric label="已完成" value={String(uploadSummary.completed)} tone="good" />
+                <DashboardMetric label="失败/部分失败" value={String(uploadSummary.failed)} tone={uploadSummary.failed ? 'bad' : 'good'} />
+              </div>
+            </Card>
+
+            <Card title="上传批次" action={<button className="secondary" type="button" onClick={() => void refreshUploads(1)}>刷新队列</button>}>
+              <div className="task-status-tabs" role="group" aria-label="上传批次状态过滤">
+                {uploadStatusFilters.map((status) => <button className={uploadStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} aria-pressed={uploadStatusFilter === status.value} onClick={() => { setUploadStatusFilter(status.value); void refreshUploads(1, status.value); }}>{status.label}</button>)}
+              </div>
+              <div className="task-filters upload-filters">
+                <label>番剧路径<input value={uploadPathFilter} onChange={(event) => setUploadPathFilter(event.target.value)} placeholder="输入番剧目录关键字" /></label>
+                <div className="filter-actions"><button type="button" onClick={() => void refreshUploads(1)}>过滤</button><button className="secondary" type="button" onClick={() => { setUploadPathFilter(''); setUploadStatusFilter('all'); void refreshUploads(1, 'all'); }}>重置</button></div>
+              </div>
+              <div className="task-table-wrap">
+                <table className="task-table">
+                  <thead><tr><th>ID</th><th>状态</th><th>番剧目录</th><th>文件</th><th>目标</th><th>完成</th><th>失败</th><th>可上传时间</th><th>操作</th></tr></thead>
+                  <tbody>
+                    {uploadBatches.length ? uploadBatches.map((batch) => (
+                      <tr key={batch.id} onClick={() => void loadUploadBatchDetail(batch.id)}>
+                        <td>#{batch.id}</td>
+                        <td><span className={uploadStatusPillClass(batch.status)}>{batch.status}</span></td>
+                        <td className="path-cell">{batch.seriesPath}</td>
+                        <td>{batch.fileCount}</td>
+                        <td>{batch.targetCount}</td>
+                        <td>{batch.completedTargets}</td>
+                        <td>{batch.failedTargets}</td>
+                        <td>{formatStoredTime(batch.readyAt, displayTimezone)}</td>
+                        <td><button className="secondary" type="button" onClick={(event) => { event.stopPropagation(); void loadUploadBatchDetail(batch.id); }}>详情</button></td>
+                      </tr>
+                    )) : <tr><td colSpan={9} className="empty-cell">暂无上传批次。</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+              <div className="pagination-bar">
+                <span>共 {uploadTotal} 条，第 {uploadPage} / {Math.max(1, Math.ceil(uploadTotal / taskPageSize))} 页</span>
+                <div className="inline-actions"><button className="secondary" type="button" disabled={uploadPage <= 1} onClick={() => void refreshUploads(uploadPage - 1)}>上一页</button><button className="secondary" type="button" disabled={uploadPage >= Math.ceil(uploadTotal / taskPageSize)} onClick={() => void refreshUploads(uploadPage + 1)}>下一页</button></div>
+              </div>
+            </Card>
+          </>}
+
+          {uploadView === 'providers' && <Card title="Provider 账号" action={<div className="inline-actions"><button className="secondary" type="button" onClick={() => void refreshUploadProviders()}>刷新</button><button className="icon-text-button" type="button" onClick={() => setNewUploadProviderOpen(true)}><Plus size={16} />添加 Provider</button></div>}>
             <div className="task-table-wrap">
               <table className="task-table upload-provider-table">
                 <thead><tr><th>名称</th><th>类型</th><th>授权</th><th>授权设备</th><th>目录配置</th><th>状态</th><th>操作</th></tr></thead>
@@ -3302,50 +3376,16 @@ export function App() {
                         <td>{uploadProviderTypes.find((item) => item.type === provider.type)?.name ?? provider.type}</td>
                         <td>{provider.type === '115cookie' ? <span className={provider.hasCookie ? 'pill ok' : 'pill warn'}>{provider.hasCookie ? '已授权' : '未授权'}</span> : <span className="pill ignored">按类型配置</span>}</td>
                         <td>{provider.type === '115cookie' && provider.hasCookie ? uploadAuthDeviceName(provider.authDevice, provider.type, uploadProviderTypes) : '-'}</td>
-                        <td>{directoryCount ? `${directoryCount} 个媒体目录` : '未使用'}</td>
+                        <td>{directoryCount ? <button className="secondary upload-provider-directory-button" type="button" onClick={() => setUploadProviderUsage(provider)}>{directoryCount} 个目录</button> : <span className="pill ignored">未使用</span>}</td>
                         <td><span className={provider.enabled ? 'pill ok' : 'pill ignored'}>{provider.enabled ? '可用' : '停用'}</span></td>
-                        <td><div className="inline-actions"><button className="secondary" type="button" onClick={() => setUploadProviderModal(provider)}>编辑</button>{provider.type === '115cookie' && <button className="secondary" type="button" onClick={() => openUploadCookieAuthorization(provider)}>{provider.hasCookie ? '重新授权' : '授权'}</button>}<button className="secondary" type="button" disabled={checkingUploadProviderID === provider.id || needsAuthorization} onClick={() => void checkUploadProvider(provider)}>{checkingUploadProviderID === provider.id ? '检查中' : '检查连接'}</button><button className="danger" type="button" onClick={() => void deleteUploadProvider(provider)}>删除</button></div></td>
+                        <td><div className="table-actions upload-provider-actions"><button className="icon-button secondary" type="button" title="编辑 Provider" aria-label={`编辑 Provider ${provider.name}`} onClick={() => setUploadProviderModal(provider)}><Pencil size={16} /></button>{provider.type === '115cookie' && <button className="icon-button secondary" type="button" title={provider.hasCookie ? '重新授权' : '授权'} aria-label={`${provider.hasCookie ? '重新授权' : '授权'} ${provider.name}`} onClick={() => openUploadCookieAuthorization(provider)}><KeyRound size={16} /></button>}<button className="icon-button secondary" type="button" title="检查连接" aria-label={`检查连接 ${provider.name}`} disabled={checkingUploadProviderID === provider.id || needsAuthorization} onClick={() => void checkUploadProvider(provider)}>{checkingUploadProviderID === provider.id ? <span className="loading-spinner compact" aria-hidden="true" /> : <CircleGauge size={16} />}</button><button className="icon-button danger" type="button" title="删除 Provider" aria-label={`删除 Provider ${provider.name}`} onClick={() => void deleteUploadProvider(provider)}><Trash2 size={16} /></button></div></td>
                       </tr>
                     );
                   }) : <tr><td colSpan={7} className="empty-cell">尚未添加 Provider。先添加并授权账号，再到媒体目录中配置上传步骤。</td></tr>}
                 </tbody>
               </table>
             </div>
-          </Card>
-
-          <Card title="上传批次" action={<button className="secondary" type="button" onClick={() => void refreshUploads(1)}>刷新队列</button>}>
-            <div className="task-status-tabs" role="group" aria-label="上传批次状态过滤">
-              {uploadStatusFilters.map((status) => <button className={uploadStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} aria-pressed={uploadStatusFilter === status.value} onClick={() => { setUploadStatusFilter(status.value); void refreshUploads(1, status.value); }}>{status.label}</button>)}
-            </div>
-            <div className="task-filters upload-filters">
-              <label>番剧路径<input value={uploadPathFilter} onChange={(event) => setUploadPathFilter(event.target.value)} placeholder="输入番剧目录关键字" /></label>
-              <div className="filter-actions"><button type="button" onClick={() => void refreshUploads(1)}>过滤</button><button className="secondary" type="button" onClick={() => { setUploadPathFilter(''); setUploadStatusFilter('all'); void refreshUploads(1, 'all'); }}>重置</button></div>
-            </div>
-            <div className="task-table-wrap">
-              <table className="task-table">
-                <thead><tr><th>ID</th><th>状态</th><th>番剧目录</th><th>文件</th><th>目标</th><th>完成</th><th>失败</th><th>可上传时间</th><th>操作</th></tr></thead>
-                <tbody>
-                  {uploadBatches.length ? uploadBatches.map((batch) => (
-                    <tr key={batch.id} onClick={() => void loadUploadBatchDetail(batch.id)}>
-                      <td>#{batch.id}</td>
-                      <td><span className={uploadStatusPillClass(batch.status)}>{batch.status}</span></td>
-                      <td className="path-cell">{batch.seriesPath}</td>
-                      <td>{batch.fileCount}</td>
-                      <td>{batch.targetCount}</td>
-                      <td>{batch.completedTargets}</td>
-                      <td>{batch.failedTargets}</td>
-                      <td>{formatStoredTime(batch.readyAt, displayTimezone)}</td>
-                      <td><button className="secondary" type="button" onClick={(event) => { event.stopPropagation(); void loadUploadBatchDetail(batch.id); }}>详情</button></td>
-                    </tr>
-                  )) : <tr><td colSpan={9} className="empty-cell">暂无上传批次。</td></tr>}
-                </tbody>
-              </table>
-            </div>
-            <div className="pagination-bar">
-              <span>共 {uploadTotal} 条，第 {uploadPage} / {Math.max(1, Math.ceil(uploadTotal / taskPageSize))} 页</span>
-              <div className="inline-actions"><button className="secondary" type="button" disabled={uploadPage <= 1} onClick={() => void refreshUploads(uploadPage - 1)}>上一页</button><button className="secondary" type="button" disabled={uploadPage >= Math.ceil(uploadTotal / taskPageSize)} onClick={() => void refreshUploads(uploadPage + 1)}>下一页</button></div>
-            </div>
-          </Card>
+          </Card>}
         </section>
       )}
 
@@ -3418,6 +3458,7 @@ export function App() {
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} watchDirId={rescanWatchDirId} useCustomProcessing={rescanUseCustomProcessing} processing={rescanProcessing} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={(value) => { setRescanScope(value); setRescanTarget(''); setRescanWatchDirId(''); }} onTargetChange={setRescanTarget} onWatchDirIdChange={(value) => { setRescanWatchDirId(value); setRescanTarget(''); }} onUseCustomProcessingChange={(value) => { setRescanUseCustomProcessing(value); if (value) setRescanProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setRescanProcessing((value) => ({ ...value, ...patch }))} onBrowsePath={() => { const rootPath = rescanScope === 'dir' ? watchDirs.find((dir) => String(dir.id) === rescanWatchDirId)?.path ?? '' : ''; void browseDirectory({ title: '选择扫描路径', value: rescanTarget || rootPath, rootPath: rootPath || undefined, onSelect: setRescanTarget }); }} onSubmit={() => void rescan()} />}
       {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" saving={savingWatchDir} path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} uploadConfigs={newWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setNewWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
       {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" saving={savingWatchDir} path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} uploadConfigs={editingWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setEditingWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
+      {uploadProviderUsage && <UploadProviderUsageModal provider={uploadProviderUsage} watchDirs={watchDirs} onClose={() => setUploadProviderUsage(null)} onEditDirectory={(dir) => { setUploadProviderUsage(null); openEditWatchDir(dir); }} />}
       {(newUploadProviderOpen || uploadProviderModal) && <UploadProviderModal provider={uploadProviderModal ?? undefined} providerTypes={uploadProviderTypes} saving={savingUploadProvider} onClose={() => { setNewUploadProviderOpen(false); setUploadProviderModal(null); }} onSubmit={(provider) => void saveUploadProvider(provider)} />}
       {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} devices={uploadAuthDevices(uploadCookieProvider.type, uploadProviderTypes)} device={uploadCookieDevice} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onDeviceChange={setUploadCookieDevice} onCookieChange={setUploadCookieValue} onClose={() => { setUploadCookieProvider(null); setCookieAuth(null); setUploadCookieValue(''); }} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
@@ -3459,6 +3500,66 @@ function newDirectoryUploadConfig(providerId: number): UploadProviderRoute {
     collisionPolicy: 'fail',
     includeTypes: uploadTypeOptions.map((option) => option.value)
   };
+}
+
+function uploadCollisionPolicyLabel(value: UploadCollisionPolicy) {
+  switch (value) {
+    case 'replace':
+      return '替换';
+    case 'skip':
+      return '跳过';
+    case 'fail':
+      return '冲突失败';
+    default:
+      return value || '-';
+  }
+}
+
+function uploadContentTypeLabel(value: string) {
+  return uploadTypeOptions.find((option) => option.value === value)?.label ?? value;
+}
+
+function UploadProviderUsageModal(props: { provider: UploadProvider; watchDirs: WatchDir[]; onClose: () => void; onEditDirectory: (dir: WatchDir) => void }) {
+  const routes = props.watchDirs.flatMap((dir) => (dir.uploadConfigs ?? [])
+    .filter((route) => route.providerId === props.provider.id)
+    .map((route) => ({ dir, route })));
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card upload-provider-usage-modal" role="dialog" aria-modal="true" aria-labelledby="upload-provider-usage-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <div><h2 id="upload-provider-usage-title">目录配置</h2><small>{props.provider.name} · 汇总所有媒体目录中的上传路由</small></div>
+          <IconCloseButton onClick={props.onClose} />
+        </div>
+        <div className="upload-provider-usage-summary">
+          <strong>{routes.length}</strong>
+          <span>个媒体目录正在引用此 Provider</span>
+        </div>
+        {routes.length ? (
+          <div className="task-table-wrap">
+            <table className="task-table upload-provider-usage-table">
+              <thead><tr><th>媒体目录</th><th>目标路径</th><th>上传内容</th><th>冲突策略</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody>
+                {routes.map(({ dir, route }) => {
+                  const enabled = route.enabled && props.provider.enabled;
+                  const statusLabel = !props.provider.enabled ? 'Provider 停用' : route.enabled ? '启用' : '步骤停用';
+                  return <tr key={`${dir.id}-${route.id ?? route.providerId}`}>
+                    <td className="path-cell" title={dir.path}>{dir.path}</td>
+                    <td><code>{route.remoteRoot || '/'}</code></td>
+                    <td className="upload-provider-usage-content" title={(route.includeTypes ?? []).map(uploadContentTypeLabel).join('、')}>{(route.includeTypes ?? []).length ? (route.includeTypes ?? []).map(uploadContentTypeLabel).join('、') : '-'}</td>
+                    <td>{uploadCollisionPolicyLabel(route.collisionPolicy)}</td>
+                    <td><span className={enabled ? 'pill ok' : 'pill ignored'}>{statusLabel}</span></td>
+                    <td><button className="secondary" type="button" onClick={() => props.onEditDirectory(dir)}>编辑目录</button></td>
+                  </tr>
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : <p className="empty-cell">当前没有媒体目录引用此 Provider。</p>}
+        <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={props.onClose}>关闭</button></div>
+      </section>
+    </div>
+  );
 }
 
 function nextUploadTypeSelection(current: string[], value: string, checked: boolean) {
@@ -4412,7 +4513,7 @@ function DirectoryPicker(props: { title: string; initialPath: string; rootPath?:
       if (props.rootPath?.trim()) params.set('root', props.rootPath.trim());
       const response = await fetch(`/api/fs/directories?${params.toString()}`);
       if (!response.ok) {
-        setError(await response.text());
+        setError(await readErrorMessage(response));
         return;
       }
       const result = await response.json();

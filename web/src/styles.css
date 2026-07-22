@@ -378,6 +378,18 @@ h1 {
   gap: 18px;
 }
 
+.upload-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+}
+
+.upload-tabs .status-tab {
+  min-width: 112px;
+}
+
 .upload-summary-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -390,8 +402,68 @@ h1 {
   color: var(--text-muted);
 }
 
-.upload-provider-table {
-  min-width: 920px;
+.task-table.upload-provider-table {
+  min-width: 780px;
+}
+
+.upload-provider-actions {
+  gap: 5px;
+}
+
+.upload-provider-actions .icon-button {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+}
+
+.loading-spinner.compact {
+  flex-basis: 14px;
+  width: 14px;
+  height: 14px;
+}
+
+.upload-provider-directory-button {
+  min-height: 30px;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+
+.modal-card.upload-provider-usage-modal {
+  width: min(1080px, 100%);
+}
+
+.upload-provider-usage-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 14px;
+  color: var(--text-muted);
+}
+
+.upload-provider-usage-summary strong {
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.task-table.upload-provider-usage-table {
+  min-width: 900px;
+}
+
+.task-table.upload-provider-usage-table td.path-cell {
+  width: 34%;
+  min-width: 220px;
+  max-width: 340px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.upload-provider-usage-content {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .upload-filters {

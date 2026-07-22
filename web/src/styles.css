@@ -4234,6 +4234,43 @@ label small {
   padding: 28px 16px;
 }
 
+@media (min-width: 761px) {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    overflow: hidden;
+  }
+
+  .app-shell {
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .content-panel {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .workspace-header {
+    flex: 0 0 auto;
+  }
+
+  .workspace-content {
+    min-height: 0;
+    flex: 1 1 auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+}
+
 @media (max-width: 1180px) and (min-width: 761px) {
   .app-shell {
     grid-template-columns: 72px minmax(0, 1fr);

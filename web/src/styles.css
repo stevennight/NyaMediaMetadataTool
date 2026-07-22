@@ -1307,6 +1307,67 @@ button:disabled {
   vertical-align: top;
 }
 
+/* Keep selection and action controls reachable while wide tables scroll horizontally. */
+.task-page-grid .task-table th:first-child,
+.rename-table th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  background: var(--table-header);
+  box-shadow: inset -1px 0 var(--border-subtle);
+}
+
+.task-page-grid .task-table td:first-child,
+.rename-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: var(--surface-raised);
+  box-shadow: inset -1px 0 var(--border-subtle);
+}
+
+.task-page-grid .task-table th:last-child,
+.task-page-grid .task-table td:last-child,
+.uploads-page-grid .task-table th:last-child,
+.uploads-page-grid .task-table td:last-child,
+.rename-table th:last-child,
+.rename-table td:last-child {
+  position: sticky;
+  right: 0;
+  z-index: 3;
+  background: var(--surface-raised);
+  box-shadow: inset 1px 0 var(--border-subtle);
+}
+
+.task-page-grid .task-table th:last-child,
+.uploads-page-grid .task-table th:last-child,
+.rename-table th:last-child {
+  background: var(--table-header);
+  z-index: 4;
+}
+
+.task-page-grid .task-table tbody tr:hover td:first-child,
+.task-page-grid .task-table tbody tr:hover td:last-child,
+.uploads-page-grid .task-table tbody tr:hover td:last-child,
+.rename-table tbody tr:hover td:first-child,
+.rename-table tbody tr:hover td:last-child {
+  background: var(--surface-hover);
+}
+
+.task-page-grid .task-table tbody tr.selected td:first-child,
+.task-page-grid .task-table tbody tr.selected td:last-child,
+.rename-table tbody tr.selected td:first-child,
+.rename-table tbody tr.selected td:last-child {
+  background: var(--surface-selected);
+}
+
+.task-page-grid .task-table tbody tr.selected:hover td:first-child,
+.task-page-grid .task-table tbody tr.selected:hover td:last-child,
+.rename-table tbody tr.selected:hover td:first-child,
+.rename-table tbody tr.selected:hover td:last-child {
+  background: var(--surface-selected-hover);
+}
+
 .task-table th {
   color: #78716c;
   font-size: 13px;
@@ -1491,6 +1552,19 @@ button:disabled {
 
 .rename-row.selected:hover {
   background: var(--surface-selected-hover);
+}
+
+.rename-row.pending,
+.rename-row.unselectable {
+  cursor: default;
+}
+
+.rename-row.pending td {
+  background: var(--warning-soft);
+}
+
+.rename-row.pending:hover td {
+  background: var(--warning-soft);
 }
 
 .rename-status-cell {
@@ -2073,7 +2147,7 @@ button:disabled {
   gap: 14px;
   padding: 18px;
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: 8px;
   background: var(--surface-muted);
 }
 
@@ -2179,7 +2253,7 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px 16px;
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: 8px;
   background: var(--surface-muted);
   color: var(--text);
   padding: 14px 16px;
@@ -2344,7 +2418,7 @@ button:disabled {
 
 .directory-item {
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 8px;
   background: var(--surface-muted);
   color: var(--text);
   text-align: left;
@@ -4410,7 +4484,7 @@ label small {
   }
 }
 
-@media (max-width: 1180px) and (min-width: 761px) {
+@media (max-width: 1320px) and (min-width: 761px) {
   .app-shell {
     grid-template-columns: 72px minmax(0, 1fr);
   }
@@ -4833,12 +4907,37 @@ label small {
 
 body:has(.modal-backdrop) .content-panel > .error-toast {
   position: fixed;
-  top: 82px;
-  right: 22px;
-  left: auto;
+  top: 12px;
+  right: auto;
+  left: 50%;
   z-index: 160;
-  width: min(420px, calc(100vw - 44px));
+  width: min(680px, calc(100vw - 48px));
+  max-height: 72px;
   margin: 0;
+  overflow: auto;
+  transform: translateX(-50%);
+}
+
+body:has(.modal-backdrop) .content-panel > .toast-card {
+  top: 12px;
+  right: auto;
+  bottom: auto;
+  left: 50%;
+  width: min(680px, calc(100vw - 48px));
+  max-height: 72px;
+  overflow: auto;
+  transform: translateX(-50%);
+}
+
+.content-panel > .toast-card ~ .modal-backdrop,
+.content-panel > .error-toast ~ .modal-backdrop {
+  padding-top: 92px;
+}
+
+.content-panel > .toast-card ~ .modal-backdrop .modal-card,
+.content-panel > .error-toast ~ .modal-backdrop .modal-card {
+  max-height: calc(100vh - 116px);
+  max-height: calc(100dvh - 116px);
 }
 
 @media (max-width: 760px) {
@@ -4846,10 +4945,21 @@ body:has(.modal-backdrop) .content-panel > .error-toast {
     margin: 10px 12px 0;
   }
 
-  body:has(.modal-backdrop) .content-panel > .error-toast {
-    top: 72px;
-    right: 12px;
-    width: calc(100vw - 24px);
+  body:has(.modal-backdrop) .content-panel > .error-toast,
+  body:has(.modal-backdrop) .content-panel > .toast-card {
+    top: 10px;
+    width: calc(100vw - 20px);
+  }
+
+  .content-panel > .toast-card ~ .modal-backdrop,
+  .content-panel > .error-toast ~ .modal-backdrop {
+    padding-top: 82px;
+  }
+
+  .content-panel > .toast-card ~ .modal-backdrop .modal-card,
+  .content-panel > .error-toast ~ .modal-backdrop .modal-card {
+    max-height: calc(100vh - 102px);
+    max-height: calc(100dvh - 102px);
   }
 }
 

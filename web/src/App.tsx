@@ -783,6 +783,22 @@ function getRenameTargetEditorValue(item: RenamePreviewItem) {
   return item.renderedTarget || item.newPath || item.newName || '';
 }
 
+function isRenameItemExecutable(item: RenamePreviewItem, pendingPaths: Set<string>, recalculatingPaths: Set<string>) {
+  return !pendingPaths.has(item.path)
+    && !recalculatingPaths.has(item.path)
+    && !item.conflict
+    && !['error', 'renamed', 'skipped'].includes(item.status)
+    && Boolean(item.newName || item.newPath || item.renderedTarget);
+}
+
+function isCookieAuthorizationActive(auth: CookieAuthStatus | null) {
+  return Boolean(auth && !['authorized', 'expired', 'cancelled', 'error'].includes(auth.state));
+}
+
+function watchDirDraftSignature(path: string, watchEnabled: boolean, useGlobalProcessing: boolean, processing: OutputProcessingConfig, uploadConfigs: UploadProviderRoute[]) {
+  return JSON.stringify({ path, watchEnabled, useGlobalProcessing, processing, uploadConfigs });
+}
+
 function taskStatusPillClass(status: string) {
   switch (status) {
     case 'completed':
@@ -804,6 +820,24 @@ function taskStatusPillClass(status: string) {
 
 function taskStatusLabel(status: string) {
   return taskStatusFilters.find((item) => item.value === status)?.label ?? status;
+}
+
+function taskTypeLabel(type: string) {
+  switch (type) {
+    case 'media_process': return '媒体处理';
+    default: return type || '-';
+  }
+}
+
+function healthStatusLabel(status?: string) {
+  switch (status) {
+    case 'ok': return '正常';
+    case 'degraded': return '部分异常';
+    case 'error': return '异常';
+    case undefined:
+    case '': return '连接中';
+    default: return status;
+  }
 }
 
 function uploadStatusPillClass(status: string) {
@@ -946,6 +980,7 @@ export function App() {
   const [tmdbApplyProgress, setTmdbApplyProgress] = useState(0);
   const [tmdbApplyTotal, setTmdbApplyTotal] = useState(0);
   const [recalculatingRenamePaths, setRecalculatingRenamePaths] = useState<string[]>([]);
+  const [pendingRenamePaths, setPendingRenamePaths] = useState<string[]>([]);
   const [applyingRename, setApplyingRename] = useState(false);
   const [batchEpisodeOpen, setBatchEpisodeOpen] = useState(false);
   const [batchSeason, setBatchSeason] = useState(1);
@@ -954,7 +989,7 @@ export function App() {
   const [batchEpisodeStart, setBatchEpisodeStart] = useState(1);
   const [applyingBatchEpisode, setApplyingBatchEpisode] = useState(false);
   const [batchEpisodeProgress, setBatchEpisodeProgress] = useState(0);
-  const [targetPathEditor, setTargetPathEditor] = useState<{ path: string; value: string } | null>(null);
+  const [targetPathEditor, setTargetPathEditor] = useState<{ path: string; value: string; initialValue: string } | null>(null);
   const [renameTemplateEditorOpen, setRenameTemplateEditorOpen] = useState(false);
   const [previewingRename, setPreviewingRename] = useState(false);
   const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; rootPath?: string; onSelect: (path: string) => void } | null>(null);
@@ -1022,15 +1057,22 @@ export function App() {
   const [activePage, setActivePage] = useState<PageKey>(() => pageFromPath(window.location.pathname));
   const applyingTmdbShowRef = useRef(false);
   const recalculatingRenamePathsRef = useRef(new Set<string>());
+  const requestUploadCookieCloseRef = useRef<() => void>(() => {});
   const renamePreviewAbortRef = useRef<AbortController | null>(null);
   const refreshingUploadsRef = useRef(false);
   const refreshingUploadProvidersRef = useRef(false);
+  const missingAuditRequestRef = useRef(0);
+  const embyAuditRequestRef = useRef(0);
+  const fileAuditRequestRef = useRef(0);
   const workspaceContentRef = useRef<HTMLDivElement>(null);
   const allowSettingsHistoryNavigationRef = useRef(false);
   const observedTaskStatusesRef = useRef(new Map<number, string>());
   const observedUploadStatusesRef = useRef(new Map<number, string>());
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const lastTaskSelectionIndexRef = useRef<number | null>(null);
+  const watchDirDraftInitialRef = useRef('');
+  const activeModalStackRef = useRef('');
+  const modalFocusReturnRef = useRef(new Map<string, HTMLElement | null>());
   const modalBusyRef = useRef({ applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey, savingWatchDir });
   modalBusyRef.current = { applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey, savingWatchDir };
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
@@ -1045,6 +1087,12 @@ export function App() {
     releaseGroup: renameReleaseGroup.trim()
   });
   const renamePreviewStale = renamePreview.length > 0 && renamePreviewSignature !== renameInputSignature;
+  const pendingRenamePathSet = new Set(pendingRenamePaths);
+  const recalculatingRenamePathSet = new Set(recalculatingRenamePaths);
+  const renamePendingCount = new Set([...pendingRenamePaths, ...recalculatingRenamePaths]).size;
+  const executableRenameItems = renamePreview.filter((item) => isRenameItemExecutable(item, pendingRenamePathSet, recalculatingRenamePathSet));
+  const executableRenamePathSet = new Set(executableRenameItems.map((item) => item.path));
+  const selectedRenameItemsBlocked = selectedRenamePaths.some((path) => !executableRenamePathSet.has(path));
   const availableToolCount = tools.filter((tool) => tool.available).length;
   const coreToolsReady = ['ffmpeg', 'ffprobe'].every((name) => tools.some((tool) => tool.name === name && tool.available));
   const enabledWatchDirCount = watchDirs.filter((dir) => dir.enabled).length;
@@ -1054,12 +1102,17 @@ export function App() {
   const retryableSelectedTaskIds = selectedTasks.filter((task) => ['failed', 'canceled', 'ignored'].includes(task.status) && task.mediaFileId).map((task) => task.id);
   const ignorableSelectedTaskIds = selectedTasks.filter((task) => task.status === 'failed').map((task) => task.id);
   const configDirty = Boolean(config && savedConfig && JSON.stringify(config) !== JSON.stringify(savedConfig));
+  const watchDirDraftDirty = addWatchDirOpen
+    ? watchDirDraftInitialRef.current !== watchDirDraftSignature(newWatchDir, newWatchDirWatchEnabled, newWatchDirUseGlobalProcessing, newWatchDirProcessing, newWatchDirUploadConfigs)
+    : Boolean(editingWatchDir && watchDirDraftInitialRef.current !== watchDirDraftSignature(editingWatchDirPath, editingWatchDirWatchEnabled, editingWatchDirUseGlobalProcessing, editingWatchDirProcessing, editingWatchDirUploadConfigs));
+  const targetPathDraftDirty = Boolean(targetPathEditor && targetPathEditor.value !== targetPathEditor.initialValue);
   const currentPageMeta = pageMeta[activePage];
+  requestUploadCookieCloseRef.current = requestCloseUploadCookieModal;
   const modalStackKey = [
     directoryPicker && 'directory', targetPathEditor && 'target-path', selectedHistoryBatch && 'history-detail', renameHistoryOpen && 'history',
     renameTemplateEditorOpen && 'template', tmdbEpisodeDetail && 'episode-detail', addEmbyKeyOpen && 'emby-key', auditTmdbMatchOpen && 'audit-tmdb', tmdbMatchOpen && 'tmdb',
-    batchEpisodeOpen && 'batch', editingWatchDir && 'edit-dir', addWatchDirOpen && 'add-dir', rescanOpen && 'rescan', selectedUploadBatch && 'upload-detail',
-    uploadCookieProvider && 'upload-cookie', uploadProviderUsage && 'upload-provider-usage', (newUploadProviderOpen || uploadProviderModal) && 'upload-provider', selectedTask && 'task-detail',
+    batchEpisodeOpen && 'batch', uploadCookieProvider && 'upload-cookie', uploadProviderUsage && 'upload-provider-usage', (newUploadProviderOpen || uploadProviderModal) && 'upload-provider',
+    editingWatchDir && 'edit-dir', addWatchDirOpen && 'add-dir', rescanOpen && 'rescan', selectedUploadBatch && 'upload-detail', selectedTask && 'task-detail',
     recentArtifactsOpen && 'artifacts'
   ].filter(Boolean).join('|');
 
@@ -1073,42 +1126,72 @@ export function App() {
 
   useEffect(() => {
     async function load() {
-      try {
-        const [healthResponse, configResponse, toolsResponse, tasksResponse, taskSummaryResponse, dirsResponse, artifactsResponse, providersResponse, providerTypesResponse, desktopRuntime] = await Promise.all([
-          fetch('/api/health'),
-          fetch('/api/config'),
-          fetch('/api/tools/status'),
-          fetch(`/api/tasks?page=1&pageSize=${taskPageSize}`),
-          fetch('/api/tasks/summary'),
-          fetch('/api/watch-dirs'),
-          fetch('/api/artifacts?limit=10'),
-          fetch('/api/upload/providers'),
-          fetch('/api/upload/provider-types'),
-          getRuntimeInfo()
-        ]);
-        const loadedHealth = await healthResponse.json() as Health;
-        const loadedConfig = await configResponse.json() as AppConfig;
-        setHealth(loadedHealth);
-        setConnectionOnline(healthResponse.ok);
-        setHealthCheckedAt(new Date());
-        setConfig(loadedConfig);
-        setSavedConfig(structuredClone(loadedConfig));
-        setRuntimeInfo(desktopRuntime);
-        setTools(asArray<ToolStatus>(await toolsResponse.json()));
-        applyTaskList(await tasksResponse.json());
-        setTaskSummary(await taskSummaryResponse.json() as TaskSummary);
-        setWatchDirs(asArray<WatchDir>(await dirsResponse.json()));
-        setArtifacts(asArray<Artifact>(await artifactsResponse.json()));
-        setUploadProviders(asArray<UploadProvider>(await providersResponse.json()));
-        setUploadProviderTypes(asArray<UploadProviderDescriptor>(await providerTypesResponse.json()));
-        await loadRenameHistory();
-        await loadEmbyAPIKeys();
-      } catch (err) {
+      const [
+        healthResult,
+        configResult,
+        toolsResult,
+        tasksResult,
+        taskSummaryResult,
+        dirsResult,
+        artifactsResult,
+        providersResult,
+        providerTypesResult,
+        runtimeResult,
+        renameHistoryResult,
+        embyKeysResult
+      ] = await Promise.allSettled([
+        requestJSON<Health>('/api/health', '服务状态'),
+        requestJSON<AppConfig>('/api/config', '应用配置'),
+        requestJSON<ToolStatus[]>('/api/tools/status', '工具状态'),
+        requestJSON<TaskListResponse | Task[]>(`/api/tasks?page=1&pageSize=${taskPageSize}`, '任务列表'),
+        requestJSON<TaskSummary>('/api/tasks/summary', '任务摘要'),
+        requestJSON<WatchDir[]>('/api/watch-dirs', '媒体目录'),
+        requestJSON<Artifact[]>('/api/artifacts?limit=10', '最近产物'),
+        requestJSON<UploadProvider[]>('/api/upload/providers', '上传 Provider'),
+        requestJSON<UploadProviderDescriptor[]>('/api/upload/provider-types', 'Provider 类型'),
+        getRuntimeInfo(),
+        loadRenameHistory(true),
+        loadEmbyAPIKeys(true)
+      ]);
+
+      setHealthCheckedAt(new Date());
+      if (healthResult.status === 'fulfilled') {
+        setHealth(healthResult.value);
+        setConnectionOnline(true);
+      } else {
         setConnectionOnline(false);
-        setError(err instanceof Error ? err.message : '加载失败');
-      } finally {
-        setInitialLoading(false);
       }
+      if (configResult.status === 'fulfilled') {
+        setConfig(configResult.value);
+        setSavedConfig(structuredClone(configResult.value));
+      }
+      if (toolsResult.status === 'fulfilled') setTools(asArray<ToolStatus>(toolsResult.value));
+      if (tasksResult.status === 'fulfilled') applyTaskList(tasksResult.value);
+      if (taskSummaryResult.status === 'fulfilled') setTaskSummary(taskSummaryResult.value);
+      if (dirsResult.status === 'fulfilled') setWatchDirs(asArray<WatchDir>(dirsResult.value));
+      if (artifactsResult.status === 'fulfilled') setArtifacts(asArray<Artifact>(artifactsResult.value));
+      if (providersResult.status === 'fulfilled') setUploadProviders(asArray<UploadProvider>(providersResult.value));
+      if (providerTypesResult.status === 'fulfilled') setUploadProviderTypes(asArray<UploadProviderDescriptor>(providerTypesResult.value));
+      if (runtimeResult.status === 'fulfilled') setRuntimeInfo(runtimeResult.value);
+
+      const failedSections = [
+        healthResult.status === 'rejected' && '服务状态',
+        configResult.status === 'rejected' && '应用配置',
+        toolsResult.status === 'rejected' && '工具状态',
+        tasksResult.status === 'rejected' && '任务列表',
+        taskSummaryResult.status === 'rejected' && '任务摘要',
+        dirsResult.status === 'rejected' && '媒体目录',
+        artifactsResult.status === 'rejected' && '最近产物',
+        providersResult.status === 'rejected' && '上传 Provider',
+        providerTypesResult.status === 'rejected' && 'Provider 类型',
+        runtimeResult.status === 'rejected' && '桌面运行信息',
+        renameHistoryResult.status === 'rejected' && '重命名历史',
+        embyKeysResult.status === 'rejected' && 'Emby 密钥'
+      ].filter((label): label is string => Boolean(label));
+      if (failedSections.length) {
+        setError(`部分数据未能加载：${failedSections.join('、')}。其余功能仍可使用，请检查后台服务后重试。`);
+      }
+      setInitialLoading(false);
     }
 
     void load();
@@ -1154,6 +1237,20 @@ export function App() {
     setConfirmation(request);
   }
 
+  function requestDiscardChanges(dirty: boolean, close: () => void) {
+    if (!dirty) {
+      close();
+      return;
+    }
+    requestConfirmation({
+      title: '放弃当前编辑？',
+      message: '当前弹窗中的未提交内容不会保存。',
+      confirmLabel: '放弃并关闭',
+      tone: 'danger',
+      onConfirm: close
+    });
+  }
+
   async function acceptConfirmation() {
     if (!confirmation || confirming) return;
     const action = confirmation.onConfirm;
@@ -1187,14 +1284,34 @@ export function App() {
   }, [activePage, configDirty, config]);
 
   useEffect(() => {
-    if (!modalStackKey || confirmation) return;
+    if (confirmation) return;
+    const previousStack = activeModalStackRef.current.split('|').filter(Boolean);
+    const currentStack = modalStackKey.split('|').filter(Boolean);
+    let commonDepth = 0;
+    while (previousStack[previousStack.length - 1 - commonDepth]
+      && previousStack[previousStack.length - 1 - commonDepth] === currentStack[currentStack.length - 1 - commonDepth]) commonDepth++;
+    const removedDialogs = previousStack.slice(0, previousStack.length - commonDepth);
+    const addedDialogs = currentStack.slice(0, currentStack.length - commonDepth);
+    const returnTarget = removedDialogs.length ? modalFocusReturnRef.current.get(removedDialogs[removedDialogs.length - 1]) : null;
+    for (const key of removedDialogs) modalFocusReturnRef.current.delete(key);
+    if (addedDialogs.length) {
+      const opener = returnTarget ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+      for (const key of addedDialogs) modalFocusReturnRef.current.set(key, opener);
+    }
+    activeModalStackRef.current = modalStackKey;
+
+    if (!modalStackKey) {
+      const returnTimer = window.setTimeout(() => {
+        if (returnTarget?.isConnected) returnTarget.focus();
+      }, 0);
+      return () => window.clearTimeout(returnTimer);
+    }
     setError('');
     setNotice('');
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
 
-    const focusTimer = window.setTimeout(() => {
+    const focusTimer = addedDialogs.length ? window.setTimeout(() => {
       const dialogs = Array.from(document.querySelectorAll<HTMLElement>('.modal-card')).filter((dialog) => dialog.offsetParent !== null);
       const activeDialog = dialogs[dialogs.length - 1];
       if (!activeDialog) return;
@@ -1205,6 +1322,8 @@ export function App() {
         activeDialog.tabIndex = -1;
         activeDialog.focus();
       }
+    }, 0) : window.setTimeout(() => {
+      if (returnTarget?.isConnected) returnTarget.focus();
     }, 0);
 
     function closeTopModal() {
@@ -1218,7 +1337,7 @@ export function App() {
       else if (auditTmdbMatchOpen) setAuditTmdbMatchOpen(false);
       else if (tmdbMatchOpen) setTmdbMatchOpen(false);
       else if (batchEpisodeOpen && !modalBusyRef.current.applyingBatchEpisode) setBatchEpisodeOpen(false);
-      else if (uploadCookieProvider && !modalBusyRef.current.savingUploadProvider) { setUploadCookieProvider(null); setCookieAuth(null); setUploadCookieValue(''); }
+      else if (uploadCookieProvider && !modalBusyRef.current.savingUploadProvider) requestUploadCookieCloseRef.current();
       else if (uploadProviderUsage) setUploadProviderUsage(null);
       else if ((newUploadProviderOpen || uploadProviderModal) && !modalBusyRef.current.savingUploadProvider) { setNewUploadProviderOpen(false); setUploadProviderModal(null); }
       else if (editingWatchDir && !modalBusyRef.current.savingWatchDir) setEditingWatchDir(null);
@@ -1234,8 +1353,17 @@ export function App() {
       const activeDialog = dialogs[dialogs.length - 1];
       if (!activeDialog) return;
       if (event.key === 'Escape') {
-        if (activeDialog.dataset.protectDraft === 'true') return;
         event.preventDefault();
+        if (activeDialog.dataset.protectDraft === 'true') {
+          requestConfirmation({
+            title: '放弃当前编辑？',
+            message: '当前弹窗中的未提交内容不会保存。',
+            confirmLabel: '放弃并关闭',
+            tone: 'danger',
+            onConfirm: closeTopModal
+          });
+          return;
+        }
         closeTopModal();
         return;
       }
@@ -1268,28 +1396,33 @@ export function App() {
       window.clearTimeout(focusTimer);
       document.removeEventListener('keydown', handleDialogKey);
       document.body.style.overflow = previousOverflow;
-      previousFocus?.focus();
     };
   }, [modalStackKey, confirmation]);
 
-  async function loadRenameHistory() {
+  async function loadRenameHistory(throwOnError = false) {
     setLoadingRenameHistory(true);
     try {
       const response = await fetch('/api/rename/history');
-      if (!response.ok) {
-        return;
-      }
+      if (!response.ok) throw new Error(await readErrorMessage(response));
       const result = await response.json();
       setRenameHistory(asArray<RenameHistoryBatch>(result.items));
+    } catch (err) {
+      if (throwOnError) throw err;
+      setError(err instanceof Error ? err.message : '加载重命名历史失败');
     } finally {
       setLoadingRenameHistory(false);
     }
   }
 
-  async function loadEmbyAPIKeys() {
-    const response = await fetch('/api/emby-api-keys');
-    if (!response.ok) return;
-    setAuditEmbyAPIKeys(asArray<EmbyAPIKey>(await response.json()));
+  async function loadEmbyAPIKeys(throwOnError = false) {
+    try {
+      const response = await fetch('/api/emby-api-keys');
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      setAuditEmbyAPIKeys(asArray<EmbyAPIKey>(await response.json()));
+    } catch (err) {
+      if (throwOnError) throw err;
+      setError(err instanceof Error ? err.message : '加载 Emby API Key 失败');
+    }
   }
 
   useEffect(() => {
@@ -1311,6 +1444,24 @@ export function App() {
       compareMd5: fileAuditCompareMD5
     });
   }, [auditRoot, auditTmdbId, auditIncludeSeasonZero, auditEmbyItemUrl, auditSelectedEmbyKeyId, fileAuditLocalRoot, fileAuditRemoteRoot, fileAuditSFTPAddr, fileAuditSFTPUser, fileAuditSFTPKeyPath, fileAuditSFTPKnownHostsPath, fileAuditSFTPInsecure, fileAuditAllowSTRM, fileAuditCompareSize, fileAuditCompareMD5]);
+
+  useEffect(() => {
+    missingAuditRequestRef.current++;
+    setMissingAuditReport(null);
+    setAuditingMissing(false);
+  }, [auditRoot, auditTmdbId, auditIncludeSeasonZero]);
+
+  useEffect(() => {
+    embyAuditRequestRef.current++;
+    setEmbyAuditReport(null);
+    setAuditingEmby(false);
+  }, [auditRoot, auditEmbyItemUrl, auditEmbyApiKey, auditSelectedEmbyKeyId]);
+
+  useEffect(() => {
+    fileAuditRequestRef.current++;
+    setFileAuditReport(null);
+    setAuditingFiles(false);
+  }, [fileAuditLocalRoot, fileAuditRemoteRoot, fileAuditSFTPAddr, fileAuditSFTPUser, fileAuditSFTPPassword, fileAuditSFTPKeyPath, fileAuditSFTPKnownHostsPath, fileAuditSFTPInsecure, fileAuditAllowSTRM, fileAuditCompareSize, fileAuditCompareMD5]);
 
   useEffect(() => {
     function handlePopState() {
@@ -1620,6 +1771,27 @@ export function App() {
     setCookieAuth(null);
   }
 
+  function dismissUploadCookieModal() {
+    setUploadCookieProvider(null);
+    setCookieAuth(null);
+    setUploadCookieValue('');
+  }
+
+  function requestCloseUploadCookieModal() {
+    if (savingUploadProvider) return;
+    if (isCookieAuthorizationActive(cookieAuth)) {
+      requestConfirmation({
+        title: '结束二维码授权？',
+        message: '关闭后会停止检查授权状态，已经扫码的结果可能无法保存。建议等待授权成功或二维码失效后再关闭。',
+        confirmLabel: '结束并关闭',
+        tone: 'danger',
+        onConfirm: dismissUploadCookieModal
+      });
+      return;
+    }
+    dismissUploadCookieModal();
+  }
+
   function deleteUploadProvider(provider: UploadProvider) {
     requestConfirmation({
       title: `删除“${provider.name}”？`,
@@ -1794,7 +1966,11 @@ export function App() {
         const response = await fetch(`/api/upload/providers/${providerID}/auth/115cookie?sessionId=${encodeURIComponent(sessionID)}`);
         if (!response.ok) throw new Error(await readErrorMessage(response));
         const next = await response.json() as CookieAuthStatus;
-        if (!active) return;
+        if (!active) {
+          // The backend may persist the cookie while this request is in flight after the modal closes.
+          if (next.state === 'authorized') await loadUploadProviders();
+          return;
+        }
         setCookieAuth(next);
         if (next.state === 'authorized') {
           setUploadCookieProvider((current) => current && current.id === providerID ? { ...current, hasCookie: true, authDevice: next.terminal } : current);
@@ -1872,7 +2048,7 @@ export function App() {
     setError('');
     try {
       const response = await fetch('/api/tools/check', { method: 'POST' });
-      setTools(asArray<ToolStatus>(await response.json()));
+      setTools(asArray<ToolStatus>(await readJSONResponse<ToolStatus[]>(response, '工具检测')));
     } catch (err) {
       setError(err instanceof Error ? err.message : '工具检测失败');
     } finally {
@@ -1894,6 +2070,8 @@ export function App() {
     setRenamePreviewCount(0);
     setRenamePreviewTotal(0);
     setSelectedRenamePaths([]);
+    setPendingRenamePaths([]);
+    lastRenameSelectionIndexRef.current = null;
     const controller = new AbortController();
     renamePreviewAbortRef.current = controller;
     try {
@@ -2026,18 +2204,25 @@ export function App() {
     setRenamePreview((items) => items.map((item) => item.path === path ? { ...item, ...patch } : item));
   }
 
+  function markRenameItemPending(path: string, patch: Partial<RenamePreviewItem>) {
+    updateRenameItem(path, patch);
+    setPendingRenamePaths((paths) => paths.includes(path) ? paths : [...paths, path]);
+    setSelectedRenamePaths((paths) => paths.filter((item) => item !== path));
+  }
+
   function replaceRenameItem(next: RenamePreviewItem) {
     setRenamePreview((items) => items.map((item) => item.path === next.path ? next : item));
   }
 
   function toggleRenameSelection(path: string, checked: boolean, shiftKey = false) {
     const index = renamePreview.findIndex((item) => item.path === path);
+    if (checked && !executableRenamePathSet.has(path)) return;
     setSelectedRenamePaths((paths) => {
       if (shiftKey && lastRenameSelectionIndexRef.current !== null && index >= 0) {
         const start = lastRenameSelectionIndexRef.current;
         if (start >= 0) {
           const [from, to] = start < index ? [start, index] : [index, start];
-          const range = renamePreview.slice(from, to + 1).map((item) => item.path);
+          const range = renamePreview.slice(from, to + 1).filter((item) => executableRenamePathSet.has(item.path)).map((item) => item.path);
           return checked ? [...new Set([...paths, ...range])] : paths.filter((item) => !range.includes(item));
         }
       }
@@ -2048,9 +2233,10 @@ export function App() {
 
   function toggleRenameRowSelection(path: string, index: number, shiftKey = false) {
     const selected = selectedRenamePaths.includes(path);
+    if (!selected && !executableRenamePathSet.has(path)) return;
     if (shiftKey && lastRenameSelectionIndexRef.current !== null) {
       const [from, to] = lastRenameSelectionIndexRef.current < index ? [lastRenameSelectionIndexRef.current, index] : [index, lastRenameSelectionIndexRef.current];
-      const range = renamePreview.slice(from, to + 1).map((entry) => entry.path);
+      const range = renamePreview.slice(from, to + 1).filter((entry) => executableRenamePathSet.has(entry.path)).map((entry) => entry.path);
       setSelectedRenamePaths((paths) => selected ? paths.filter((entry) => !range.includes(entry)) : [...new Set([...paths, ...range])]);
       lastRenameSelectionIndexRef.current = index;
       return;
@@ -2100,18 +2286,29 @@ export function App() {
   }
 
   async function recalculateRenameItem(item: RenamePreviewItem, options: { tmdbShowId?: number; show?: string; forceTmdb?: boolean; keepManualName?: boolean } = {}) {
-    if (recalculatingRenamePathsRef.current.has(item.path)) return;
+    if (recalculatingRenamePathsRef.current.has(item.path)) return false;
     recalculatingRenamePathsRef.current.add(item.path);
     setRecalculatingRenamePaths(Array.from(recalculatingRenamePathsRef.current));
+    setSelectedRenamePaths((paths) => paths.filter((path) => path !== item.path));
     try {
       const next = await previewAdjustedRenameItem(item, options);
-      if (next) replaceRenameItem(next);
+      if (next) {
+        replaceRenameItem(next);
+        setPendingRenamePaths((paths) => paths.filter((path) => path !== item.path));
+        const executable = isRenameItemExecutable(next, new Set(), new Set());
+        if (!executable) {
+          setError(next.message || (next.conflict ? '目标文件已存在，请修改目标路径' : '当前预览项不可执行'));
+        }
+        return executable;
+      }
     } catch (err) {
       updateRenameItem(item.path, { status: 'error', message: err instanceof Error ? err.message : '重新预览失败' });
+      setPendingRenamePaths((paths) => paths.includes(item.path) ? paths : [...paths, item.path]);
     } finally {
       recalculatingRenamePathsRef.current.delete(item.path);
       setRecalculatingRenamePaths(Array.from(recalculatingRenamePathsRef.current));
     }
+    return false;
   }
 
   async function searchTmdbShows() {
@@ -2160,16 +2357,21 @@ export function App() {
     setTmdbApplyTotal(targets.length);
     setError('');
     let completed = 0;
+    let failed = 0;
     try {
       await runWithConcurrency(targets, renameBatchConcurrency, async (item) => {
         try {
-          await recalculateRenameItem({ ...item, manualName: false }, { tmdbShowId: show.id, show: show.name || show.originalName, forceTmdb: true, keepManualName: false });
+          const applied = await recalculateRenameItem({ ...item, manualName: false }, { tmdbShowId: show.id, show: show.name || show.originalName, forceTmdb: true, keepManualName: false });
+          if (!applied) failed++;
         } finally {
           completed++;
           setTmdbApplyProgress(completed);
         }
       });
       setTmdbMatchOpen(false);
+      setNotice(failed
+        ? `剧集匹配更新完成：${targets.length - failed} 个已更新，${failed} 个需要继续处理。`
+        : `已将 ${targets.length} 个文件匹配到“${show.name || show.originalName}”。`);
     } finally {
       applyingTmdbShowRef.current = false;
       setApplyingTmdbShowId(null);
@@ -2179,17 +2381,24 @@ export function App() {
   }
 
   function selectAllRenameItems() {
-    setSelectedRenamePaths(renamePreview.map((item) => item.path));
+    setSelectedRenamePaths(executableRenameItems.map((item) => item.path));
   }
 
   function invertRenameSelection() {
-    setSelectedRenamePaths(renamePreview.filter((item) => !selectedRenamePaths.includes(item.path)).map((item) => item.path));
+    setSelectedRenamePaths(executableRenameItems.filter((item) => !selectedRenamePaths.includes(item.path)).map((item) => item.path));
   }
 
-  function applyTargetPathEdit() {
+  async function applyTargetPathEdit() {
     if (!targetPathEditor) return;
-    updateRenameItem(targetPathEditor.path, { newName: targetPathEditor.value, newPath: targetPathEditor.value, renderedTarget: targetPathEditor.value, manualName: true });
-    setTargetPathEditor(null);
+    const item = renamePreview.find((candidate) => candidate.path === targetPathEditor.path);
+    if (!item || !targetPathEditor.value.trim()) return;
+    const manualTarget = targetPathEditor.value.trim();
+    const applied = await recalculateRenameItem({ ...item, newName: manualTarget, newPath: manualTarget, renderedTarget: manualTarget, manualName: true }, { keepManualName: true });
+    if (applied) {
+      setTargetPathEditor((current) => current?.path === item.path ? null : current);
+    } else if (recalculatingRenamePathsRef.current.has(item.path)) {
+      setError('该文件正在重新生成目标，请完成后再应用手工路径');
+    }
   }
 
   function openBatchEpisodeDialog() {
@@ -2211,6 +2420,7 @@ export function App() {
     setBatchEpisodeProgress(0);
     setError('');
     let completed = 0;
+    let failed = 0;
     try {
       await runWithConcurrency(targets, renameBatchConcurrency, async (item, index) => {
         const episode = batchEpisodeMode === 'sequence'
@@ -2221,16 +2431,29 @@ export function App() {
         const adjusted = { ...item, season: batchSeason, episode: Math.max(0, episode), manualName: false };
         try {
           const next = await previewAdjustedRenameItem(adjusted, { forceTmdb: true, keepManualName: false });
-          if (next) replaceRenameItem(next);
+          if (next) {
+            replaceRenameItem(next);
+            if (isRenameItemExecutable(next, new Set(), new Set())) {
+              setPendingRenamePaths((paths) => paths.filter((path) => path !== item.path));
+            } else {
+              failed++;
+              setSelectedRenamePaths((paths) => paths.filter((path) => path !== item.path));
+            }
+          }
         } catch (err) {
+          failed++;
           updateRenameItem(item.path, { status: 'error', message: err instanceof Error ? err.message : '重新预览失败' });
+          setPendingRenamePaths((paths) => paths.includes(item.path) ? paths : [...paths, item.path]);
+          setSelectedRenamePaths((paths) => paths.filter((path) => path !== item.path));
         } finally {
           completed++;
           setBatchEpisodeProgress(completed);
         }
       });
       setBatchEpisodeOpen(false);
-      setNotice(`已批量修正 ${targets.length} 个文件的季集并重新预览。`);
+      setNotice(failed
+        ? `批量修正完成：${targets.length - failed} 个已更新，${failed} 个失败并保留为待处理。`
+        : `已批量修正 ${targets.length} 个文件的季集并重新预览。`);
     } finally {
       setApplyingBatchEpisode(false);
       setBatchEpisodeProgress(0);
@@ -2242,7 +2465,11 @@ export function App() {
       setError('路径、模板、查询语言或字幕组已变更，请重新生成预览后再执行');
       return;
     }
-    const targets = renamePreview.filter((item) => selectedRenamePaths.includes(item.path));
+    if (selectedRenameItemsBlocked) {
+      setError('选中项中包含尚未重新生成、正在生成或存在错误的文件，请处理后重新选择');
+      return;
+    }
+    const targets = executableRenameItems.filter((item) => selectedRenamePaths.includes(item.path));
     if (!targets.length) {
       setError('请先勾选要重命名的文件');
       return;
@@ -2357,12 +2584,15 @@ export function App() {
   }
 
   function openEditWatchDir(dir: WatchDir) {
+    const processing = dir.processing?.strategy ? dir.processing : outputProcessingFromConfig(config);
+    const uploadConfigs = structuredClone(dir.uploadConfigs ?? []);
+    watchDirDraftInitialRef.current = watchDirDraftSignature(dir.path, dir.watchEnabled, dir.useGlobalProcessing, processing, uploadConfigs);
     setEditingWatchDir(dir);
     setEditingWatchDirPath(dir.path);
     setEditingWatchDirWatchEnabled(dir.watchEnabled);
     setEditingWatchDirUseGlobalProcessing(dir.useGlobalProcessing);
-    setEditingWatchDirProcessing(dir.processing?.strategy ? dir.processing : outputProcessingFromConfig(config));
-    setEditingWatchDirUploadConfigs(structuredClone(dir.uploadConfigs ?? []));
+    setEditingWatchDirProcessing(processing);
+    setEditingWatchDirUploadConfigs(uploadConfigs);
   }
 
   async function submitEditWatchDir() {
@@ -2381,6 +2611,8 @@ export function App() {
       if (!updated) return;
       setEditingWatchDir(null);
       setEditingWatchDirPath('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存媒体目录失败，请检查后台连接后重试');
     } finally {
       modalBusyRef.current.savingWatchDir = false;
       setSavingWatchDir(false);
@@ -2417,23 +2649,29 @@ export function App() {
   }
 
   function openAddWatchDirModal() {
+    const processing = outputProcessingFromConfig(config);
+    watchDirDraftInitialRef.current = watchDirDraftSignature('', true, true, processing, []);
     setNewWatchDir('');
     setNewWatchDirWatchEnabled(true);
     setNewWatchDirUseGlobalProcessing(true);
-    setNewWatchDirProcessing(outputProcessingFromConfig(config));
+    setNewWatchDirProcessing(processing);
     setNewWatchDirUploadConfigs([]);
     setAddWatchDirOpen(true);
   }
 
   async function performDeleteWatchDir(id: number) {
     setError('');
-    const response = await fetch(`/api/watch-dirs/${id}`, { method: 'DELETE' });
-    if (!response.ok) {
-      setError(await readErrorMessage(response));
-      return;
+    try {
+      const response = await fetch(`/api/watch-dirs/${id}`, { method: 'DELETE' });
+      if (!response.ok) {
+        setError(await readErrorMessage(response));
+        return;
+      }
+      setWatchDirs((items) => items.filter((item) => item.id !== id));
+      setNotice('媒体目录已移除，磁盘上的文件未被修改。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '移除媒体目录失败，请检查后台连接后重试');
     }
-    setWatchDirs((items) => items.filter((item) => item.id !== id));
-    setNotice('媒体目录已移除，磁盘上的文件未被修改。');
   }
 
   async function rescan() {
@@ -2501,6 +2739,8 @@ export function App() {
       setError('请选择或输入 Emby API Key');
       return;
     }
+    const requestRef = mode === 'missing' ? missingAuditRequestRef : embyAuditRequestRef;
+    const requestID = ++requestRef.current;
     const setAuditing = mode === 'missing' ? setAuditingMissing : setAuditingEmby;
     if (mode === 'missing') setMissingAuditReport(null);
     else setEmbyAuditReport(null);
@@ -2523,11 +2763,13 @@ export function App() {
           }),
         })
       });
+      if (requestRef.current !== requestID) return;
       if (!response.ok) {
         setError(await readErrorMessage(response));
         return;
       }
       const report = await response.json() as AuditReport;
+      if (requestRef.current !== requestID) return;
       if (mode === 'missing') {
         setMissingAuditReport(report);
         const missingCount = report.seasonReports.reduce((sum, season) => sum + (season.missingEpisodes?.length ?? 0), 0);
@@ -2544,9 +2786,9 @@ export function App() {
         setNotice(`Emby 与本地核对完成：发现 ${report.embyComparisons?.length ?? 0} 项差异。`);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '剧集核对失败');
+      if (requestRef.current === requestID) setError(err instanceof Error ? err.message : '剧集核对失败');
     } finally {
-      setAuditing(false);
+      if (requestRef.current === requestID) setAuditing(false);
     }
   }
 
@@ -2559,6 +2801,7 @@ export function App() {
       setError('请输入 SFTP 地址和用户名');
       return;
     }
+    const requestID = ++fileAuditRequestRef.current;
     setFileAuditReport(null);
     setAuditingFiles(true);
     setError('');
@@ -2581,17 +2824,19 @@ export function App() {
           compareMd5: fileAuditCompareMD5
         })
       });
+      if (fileAuditRequestRef.current !== requestID) return;
       if (!response.ok) {
         setError(await readErrorMessage(response));
         return;
       }
       const report = await response.json() as FileAuditReport;
+      if (fileAuditRequestRef.current !== requestID) return;
       setFileAuditReport(report);
       setNotice(`文件对齐检查完成：本地 ${report.localCount} 个，远端 ${report.remoteCount} 个，差异 ${report.issues?.length ?? 0} 项。`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '文件对齐检查失败');
+      if (fileAuditRequestRef.current === requestID) setError(err instanceof Error ? err.message : '文件对齐检查失败');
     } finally {
-      setAuditingFiles(false);
+      if (fileAuditRequestRef.current === requestID) setAuditingFiles(false);
     }
   }
 
@@ -2925,7 +3170,7 @@ export function App() {
         <section className="dashboard-page">
           <section className="dashboard-overview dashboard-overview-compact">
             <div className="dashboard-metrics" aria-label="运行概览">
-              <DashboardMetric label="服务状态" value={health?.status ?? 'loading'} tone={health?.status === 'ok' ? 'good' : 'warn'} />
+              <DashboardMetric label="服务状态" value={!healthCheckedAt ? '连接中' : connectionOnline ? healthStatusLabel(health?.status) : '未连接'} tone={connectionOnline && health?.status === 'ok' ? 'good' : 'warn'} />
               <DashboardMetric label="任务总数" value={String(taskSummary.total)} />
               <DashboardMetric label="活跃任务" value={String(activeTaskCount)} tone={activeTaskCount ? 'warn' : 'neutral'} />
               <DashboardMetric label="失败任务" value={String(failedTaskCount)} tone={failedTaskCount ? 'bad' : 'good'} />
@@ -3115,24 +3360,24 @@ export function App() {
               <SelectField label="查询语言" value={renameLanguage} options={languageOptions} onChange={setRenameLanguage} />
               <label>字幕组<input value={renameReleaseGroup} onChange={(event) => setRenameReleaseGroup(event.target.value)} placeholder="留空则从原文件名识别" /></label>
               <div className="rename-preview-action">
-                <button className="secondary" type="button" onClick={previewingRename ? cancelRenamePreview : () => void previewRename(true)}>{previewingRename ? '取消预览' : '忽略缓存重新生成'}</button>
-                <button type="button" onClick={() => void previewRename()} disabled={previewingRename}>{previewingRename ? renamePreviewTotal ? `生成预览 ${renamePreviewCount} / ${renamePreviewTotal}` : '正在扫描文件…' : '生成预览'}</button>
+                <button className="secondary" type="button" onClick={previewingRename ? cancelRenamePreview : () => void previewRename(true)} disabled={!previewingRename && (recalculatingRenamePaths.length > 0 || applyingTmdbShowId !== null || applyingBatchEpisode || applyingRename)}>{previewingRename ? '取消预览' : '忽略缓存重新生成'}</button>
+                <button type="button" onClick={() => void previewRename()} disabled={previewingRename || recalculatingRenamePaths.length > 0 || applyingTmdbShowId !== null || applyingBatchEpisode || applyingRename}>{previewingRename ? renamePreviewTotal ? `生成预览 ${renamePreviewCount} / ${renamePreviewTotal}` : '正在扫描文件…' : '生成预览'}</button>
               </div>
             </div>
           </Card>
 
-          <Card title="重命名预览" action={<div className="rename-preview-summary"><span>共 <strong>{renamePreview.length}</strong> 项</span><span>已选 <strong>{selectedRenamePaths.length}</strong></span><span className={renameWarningCount ? 'warn' : ''}>警告 <strong>{renameWarningCount}</strong></span><span className={renameErrorCount ? 'bad' : ''}>错误 <strong>{renameErrorCount}</strong></span></div>}>
+          <Card title="重命名预览" action={<div className="rename-preview-summary"><span>共 <strong>{renamePreview.length}</strong> 项</span><span>已选 <strong>{selectedRenamePaths.length}</strong></span>{renamePendingCount > 0 && <span className="warn">待更新 <strong>{renamePendingCount}</strong></span>}<span className={renameWarningCount ? 'warn' : ''}>警告 <strong>{renameWarningCount}</strong></span><span className={renameErrorCount ? 'bad' : ''}>错误 <strong>{renameErrorCount}</strong></span></div>}>
             {renamePreviewStale && <div className="workflow-warning" role="status"><AlertTriangle size={17} aria-hidden="true" /><span>预览参数已变更。请重新生成预览，确认新文件名后再执行。</span></div>}
             <div className="rename-match-bar">
               <div className="rename-action-row">
                 <div className="inline-actions rename-bulk-actions">
-                  <button className="secondary" type="button" onClick={selectAllRenameItems} disabled={!renamePreview.length}>全选</button>
-                  <button className="secondary" type="button" onClick={invertRenameSelection} disabled={!renamePreview.length}>反选</button>
-                  <button className="secondary" type="button" onClick={openBatchEpisodeDialog} disabled={renamePreviewStale || !selectedRenamePaths.length}>批量修正季集</button>
-                  <button className="secondary" type="button" onClick={() => setTmdbMatchOpen(true)} disabled={renamePreviewStale || !selectedRenamePaths.length}>更改匹配剧集</button>
+                  <button className="secondary" type="button" onClick={selectAllRenameItems} disabled={renamePreviewStale || !executableRenameItems.length || applyingRename}>全选可执行项</button>
+                  <button className="secondary" type="button" onClick={invertRenameSelection} disabled={renamePreviewStale || !executableRenameItems.length || applyingRename}>反选</button>
+                  <button className="secondary" type="button" onClick={openBatchEpisodeDialog} disabled={renamePreviewStale || selectedRenameItemsBlocked || !selectedRenamePaths.length || applyingRename}>批量修正季集</button>
+                  <button className="secondary" type="button" onClick={() => setTmdbMatchOpen(true)} disabled={renamePreviewStale || selectedRenameItemsBlocked || !selectedRenamePaths.length || applyingRename}>更改匹配剧集</button>
                   <span className="rename-preview-stats">并发 {renameBatchConcurrency}</span>
                 </div>
-                <button className="rename-apply-button" type="button" onClick={applySelectedRenames} disabled={renamePreviewStale || applyingRename || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
+                <button className="rename-apply-button" type="button" onClick={applySelectedRenames} disabled={renamePreviewStale || applyingRename || selectedRenameItemsBlocked || !selectedRenamePaths.length}>{applyingRename ? '重命名中' : `执行选中重命名 (${selectedRenamePaths.length})`}</button>
               </div>
             </div>
             {renamePreview.length ? <div className="task-table-wrap">
@@ -3151,12 +3396,16 @@ export function App() {
                 <tbody>
                   {renamePreview.map((item, index) => {
                     const recalculatingItem = recalculatingRenamePaths.includes(item.path);
+                    const pendingItem = pendingRenamePaths.includes(item.path);
+                    const executableItem = executableRenamePathSet.has(item.path);
+                    const selectedItem = selectedRenamePaths.includes(item.path);
+                    const rowClassName = ['rename-row', selectedItem && 'selected', pendingItem && 'pending', !executableItem && 'unselectable'].filter(Boolean).join(' ');
                     return (
-                    <tr className={selectedRenamePaths.includes(item.path) ? 'rename-row selected' : 'rename-row'} key={item.path} tabIndex={0} aria-selected={selectedRenamePaths.includes(item.path)} onClick={(event) => handleRenameRowClick(event, item, index)} onKeyDown={(event) => handleRenameRowKeyDown(event, item, index)} title="点击行选择，Shift+点击连续选择；聚焦后按 Enter 或空格选择">
-                      <td><span className={selectedRenamePaths.includes(item.path) ? 'rename-row-index selected' : 'rename-row-index'} aria-hidden="true"><strong>{index + 1}</strong></span></td>
+                    <tr className={rowClassName} key={item.path} tabIndex={executableItem || selectedItem ? 0 : -1} aria-selected={selectedItem} onClick={(event) => handleRenameRowClick(event, item, index)} onKeyDown={(event) => handleRenameRowKeyDown(event, item, index)} title={executableItem ? '点击行选择，Shift+点击连续选择；聚焦后按 Enter 或空格选择' : recalculatingItem ? '正在重新生成目标' : pendingItem ? '季集已修改，请先重新生成目标' : '当前项目不可执行'}>
+                      <td><span className={selectedItem ? 'rename-row-index selected' : 'rename-row-index'} aria-hidden="true"><strong>{index + 1}</strong>{(pendingItem || recalculatingItem) && <small>{recalculatingItem ? '生成中' : '待更新'}</small>}</span></td>
                       <td>
                         <div className="rename-status-cell">
-                          <span className={`pill ${item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{renameStatusLabel(item.status)}</span>
+                          <span className={`pill ${pendingItem || recalculatingItem ? 'warn' : item.status === 'error' ? 'bad' : item.status === 'ok' ? 'ok' : ''}`}>{recalculatingItem ? '生成中' : pendingItem ? '待重新生成' : renameStatusLabel(item.status)}</span>
                           <small title={`身份来源：${renameIdentitySourceLabel(item.identitySource || item.source)}`}>{renameIdentitySourceLabel(item.identitySource || item.source)}</small>
                           <small title={`元数据：${renameMetadataSourceLabel(item.metadataSource)}`}>{item.metadataSource === 'tmdb' ? 'TMDB' : renameMetadataSourceLabel(item.metadataSource)}</small>
                         </div>
@@ -3169,11 +3418,11 @@ export function App() {
                         <div className="rename-episode-edit">
                           <label className="rename-edit-field">
                             <span>季</span>
-                            <input type="number" min="0" value={item.season ?? 0} onChange={(event) => updateRenameItem(item.path, { season: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false }); }} title="季，回车重新查 TMDB" />
+                            <input type="number" min="0" value={item.season ?? 0} onChange={(event) => markRenameItemPending(item.path, { season: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem({ ...item, season: Number(event.currentTarget.value), manualName: false }, { forceTmdb: true, keepManualName: false }); }} disabled={recalculatingItem || applyingTmdbShowId !== null || applyingBatchEpisode || applyingRename} title="修改后按回车重新查询 TMDB 并生成目标" />
                           </label>
                           <label className="rename-edit-field">
                             <span>集</span>
-                            <input type="number" min="0" value={item.episode ?? 0} onChange={(event) => updateRenameItem(item.path, { episode: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false }); }} title="集，回车重新查 TMDB" />
+                            <input type="number" min="0" value={item.episode ?? 0} onChange={(event) => markRenameItemPending(item.path, { episode: Number(event.target.value) })} onKeyDown={(event) => { if (event.key === 'Enter') void recalculateRenameItem({ ...item, episode: Number(event.currentTarget.value), manualName: false }, { forceTmdb: true, keepManualName: false }); }} disabled={recalculatingItem || applyingTmdbShowId !== null || applyingBatchEpisode || applyingRename} title="修改后按回车重新查询 TMDB 并生成目标" />
                           </label>
                         </div>
                         <label className="rename-edit-field">
@@ -3184,14 +3433,14 @@ export function App() {
                       </td>
                       <td className="path-cell">{item.currentName}</td>
                       <td className="rename-target-cell">
-                        <button className="target-path-preview" type="button" title={getRenameTargetDisplayValue(item)} onClick={() => setTargetPathEditor({ path: item.path, value: getRenameTargetEditorValue(item) })}>
+                        <button className="target-path-preview" type="button" title={getRenameTargetDisplayValue(item)} onClick={() => { const value = getRenameTargetEditorValue(item); setTargetPathEditor({ path: item.path, value, initialValue: value }); }}>
                           <RenameTargetPathDisplay value={getRenameTargetDisplayValue(item)} />
                         </button>
                       </td>
-                      <td className="path-cell">{item.conflict ? '目标文件已存在' : item.message || '-'}</td>
+                      <td className="path-cell">{recalculatingItem ? '正在根据当前季集生成新目标…' : pendingItem ? '季集已修改，重新生成前不会执行' : item.conflict ? '目标文件已存在' : item.message || '-'}</td>
                       <td>
                         <div className="inline-actions rename-row-actions">
-                          <button type="button" title="根据当前剧名、季、集重新查询 TMDB 并生成预览" onClick={() => recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false })} disabled={renamePreviewStale || applyingTmdbShowId !== null || applyingBatchEpisode || recalculatingItem}>{recalculatingItem ? '生成中' : '重新生成'}</button>
+                          <button type="button" title="根据当前剧名、季、集重新查询 TMDB 并生成预览" onClick={() => recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false })} disabled={renamePreviewStale || previewingRename || applyingTmdbShowId !== null || applyingBatchEpisode || applyingRename || recalculatingItem}>{recalculatingItem ? '生成中' : '重新生成'}</button>
                         </div>
                       </td>
                     </tr>
@@ -3591,7 +3840,7 @@ export function App() {
                       <td><input type="checkbox" aria-label={`选择任务 ${task.id}`} checked={selectedTaskIds.includes(task.id)} onChange={(event) => toggleTaskSelection(task.id, event.target.checked, (event.nativeEvent as MouseEvent).shiftKey)} /></td>
                       <td>#{task.id}</td>
                       <td><span className={taskStatusPillClass(task.status)}>{taskStatusLabel(task.status)}</span></td>
-                      <td>{task.type}</td>
+                      <td>{taskTypeLabel(task.type)}</td>
                       <td className="path-cell">{task.mediaPath || '-'}</td>
                       <td>{formatStoredTime(task.createdAt, displayTimezone)}</td>
                       <td className="path-cell">{task.errorSummary || '-'}</td>
@@ -3619,20 +3868,20 @@ export function App() {
         </div>
       {selectedUploadBatch && <UploadBatchDetailModal detail={selectedUploadBatch} timezone={displayTimezone} actionTargetID={uploadTargetActionID} onClose={() => setSelectedUploadBatch(null)} onRetry={(target) => void actOnUploadTarget(target, 'retry')} onCancel={(target) => void actOnUploadTarget(target, 'cancel')} />}
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} watchDirId={rescanWatchDirId} useCustomProcessing={rescanUseCustomProcessing} processing={rescanProcessing} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={(value) => { setRescanScope(value); setRescanTarget(''); setRescanWatchDirId(''); }} onTargetChange={setRescanTarget} onWatchDirIdChange={(value) => { setRescanWatchDirId(value); setRescanTarget(''); }} onUseCustomProcessingChange={(value) => { setRescanUseCustomProcessing(value); if (value) setRescanProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setRescanProcessing((value) => ({ ...value, ...patch }))} onBrowsePath={() => { const rootPath = rescanScope === 'dir' ? watchDirs.find((dir) => String(dir.id) === rescanWatchDirId)?.path ?? '' : ''; void browseDirectory({ title: '选择扫描路径', value: rescanTarget || rootPath, rootPath: rootPath || undefined, onSelect: setRescanTarget }); }} onSubmit={() => void rescan()} />}
-      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" saving={savingWatchDir} path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} uploadConfigs={newWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setNewWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onClose={() => setAddWatchDirOpen(false)} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
-      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" saving={savingWatchDir} path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} uploadConfigs={editingWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setEditingWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onClose={() => setEditingWatchDir(null)} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
+      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" saving={savingWatchDir} dirty={watchDirDraftDirty} path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} uploadConfigs={newWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setNewWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onClose={() => requestDiscardChanges(watchDirDraftDirty, () => setAddWatchDirOpen(false))} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
+      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" saving={savingWatchDir} dirty={watchDirDraftDirty} path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} uploadConfigs={editingWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setEditingWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onClose={() => requestDiscardChanges(watchDirDraftDirty, () => setEditingWatchDir(null))} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {uploadProviderUsage && <UploadProviderUsageModal provider={uploadProviderUsage} watchDirs={watchDirs} onClose={() => setUploadProviderUsage(null)} onEditDirectory={(dir) => { setUploadProviderUsage(null); openEditWatchDir(dir); }} />}
-      {(newUploadProviderOpen || uploadProviderModal) && <UploadProviderModal provider={uploadProviderModal ?? undefined} providerTypes={uploadProviderTypes} saving={savingUploadProvider} onClose={() => { setNewUploadProviderOpen(false); setUploadProviderModal(null); }} onSubmit={(provider) => void saveUploadProvider(provider)} />}
-      {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} devices={uploadAuthDevices(uploadCookieProvider.type, uploadProviderTypes)} device={uploadCookieDevice} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onDeviceChange={setUploadCookieDevice} onCookieChange={setUploadCookieValue} onClose={() => { setUploadCookieProvider(null); setCookieAuth(null); setUploadCookieValue(''); }} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
+      {(newUploadProviderOpen || uploadProviderModal) && <UploadProviderModal provider={uploadProviderModal ?? undefined} providerTypes={uploadProviderTypes} saving={savingUploadProvider} onClose={(dirty) => requestDiscardChanges(dirty, () => { setNewUploadProviderOpen(false); setUploadProviderModal(null); })} onSubmit={(provider) => void saveUploadProvider(provider)} />}
+      {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} devices={uploadAuthDevices(uploadCookieProvider.type, uploadProviderTypes)} device={uploadCookieDevice} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onDeviceChange={setUploadCookieDevice} onCookieChange={setUploadCookieValue} onClose={requestCloseUploadCookieModal} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
       {auditTmdbMatchOpen && <TmdbMatchModal title="选择核对剧集" description="选择后会将 TMDB ID 用于剧集缺漏判断。" applyLabel="选择剧集" query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={null} applyProgress={0} applyTotal={0} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={applyTmdbShowToAudit} onClose={() => setAuditTmdbMatchOpen(false)} />}
-      {addEmbyKeyOpen && <AddEmbyKeyModal title={newEmbyKeyTitle} apiKey={newEmbyKeyValue} saving={savingEmbyKey} onTitleChange={setNewEmbyKeyTitle} onAPIKeyChange={setNewEmbyKeyValue} onClose={() => setAddEmbyKeyOpen(false)} onSubmit={() => void saveEmbyAPIKey()} />}
+      {addEmbyKeyOpen && <AddEmbyKeyModal title={newEmbyKeyTitle} apiKey={newEmbyKeyValue} saving={savingEmbyKey} dirty={Boolean(newEmbyKeyTitle || newEmbyKeyValue)} onTitleChange={setNewEmbyKeyTitle} onAPIKeyChange={setNewEmbyKeyValue} onClose={() => requestDiscardChanges(Boolean(newEmbyKeyTitle || newEmbyKeyValue), () => setAddEmbyKeyOpen(false))} onSubmit={() => void saveEmbyAPIKey()} />}
       {tmdbEpisodeDetail && <TmdbEpisodeDetailModal detail={tmdbEpisodeDetail} language={renameLanguage} refreshing={loadingTmdbEpisodeDetail} onRefresh={() => void openTmdbEpisodeDetail({ tmdbShowId: tmdbEpisodeDetail.showId, season: tmdbEpisodeDetail.season, episode: tmdbEpisodeDetail.episode } as RenamePreviewItem, true)} onClose={() => setTmdbEpisodeDetail(null)} />}
       {renameHistoryOpen && <RenameHistoryModal history={renameHistory} undoingId={undoingHistoryId} loading={loadingRenameHistory} timezone={displayTimezone} onClose={() => setRenameHistoryOpen(false)} onRefresh={() => void loadRenameHistory()} onOpenDetails={setSelectedHistoryBatch} onUndo={(id) => void undoRenameBatch(id)} />}
       {selectedHistoryBatch && <RenameHistoryDetailsModal batch={selectedHistoryBatch} undoCheck={undoCheckResult?.batch?.id === selectedHistoryBatch.id ? undoCheckResult : null} timezone={displayTimezone} onClose={() => setSelectedHistoryBatch(null)} />}
       {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} matchPattern={renameMatchPattern} sample={renamePreview[0]?.currentName || renamePath} placeholders={renamePlaceholders} onChange={setRenameTemplate} onMatchPatternChange={setRenameMatchPattern} onClose={() => setRenameTemplateEditorOpen(false)} />}
-      {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => setTargetPathEditor(null)} onSubmit={applyTargetPathEdit} />}
+      {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} dirty={targetPathDraftDirty} saving={recalculatingRenamePaths.includes(targetPathEditor.path)} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => requestDiscardChanges(targetPathDraftDirty, () => setTargetPathEditor(null))} onSubmit={() => void applyTargetPathEdit()} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} rootPath={directoryPicker.rootPath} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
       {confirmation && <ConfirmDialog request={confirmation} pending={confirming} onCancel={() => setConfirmation(null)} onConfirm={() => void acceptConfirmation()} />}
       </section>
@@ -3805,9 +4054,11 @@ function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; p
   );
 }
 
-function UploadProviderModal(props: { provider?: UploadProvider; providerTypes: UploadProviderDescriptor[]; saving: boolean; onClose: () => void; onSubmit: (provider: UploadProvider) => void }) {
-  const [draft, setDraft] = useState<UploadProvider>(() => props.provider ? { ...props.provider } : newUploadProviderDraft());
+function UploadProviderModal(props: { provider?: UploadProvider; providerTypes: UploadProviderDescriptor[]; saving: boolean; onClose: (dirty: boolean) => void; onSubmit: (provider: UploadProvider) => void }) {
+  const initialDraftRef = useRef<UploadProvider>(props.provider ? { ...props.provider } : newUploadProviderDraft());
+  const [draft, setDraft] = useState<UploadProvider>(() => ({ ...initialDraftRef.current }));
   const editing = draft.id > 0;
+  const dirty = JSON.stringify(draft) !== JSON.stringify(initialDraftRef.current);
   const descriptors = props.providerTypes.length ? props.providerTypes : [{ type: '115cookie', name: '115 Cookie', implemented: true, secretKeys: ['cookie'] }];
   const providerTypes = descriptors.some((descriptor) => descriptor.type === draft.type) ? descriptors : [...descriptors, { type: draft.type, name: draft.type, implemented: false, secretKeys: [] }];
   const selectedProviderType = providerTypes.find((descriptor) => descriptor.type === draft.type);
@@ -3816,17 +4067,17 @@ function UploadProviderModal(props: { provider?: UploadProvider; providerTypes: 
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="modal-card upload-provider-modal" data-protect-draft="true" role="dialog" aria-modal="true" aria-labelledby="upload-provider-title" onClick={(event) => event.stopPropagation()}>
+      <section className="modal-card upload-provider-modal" data-protect-draft={dirty ? 'true' : undefined} role="dialog" aria-modal="true" aria-labelledby="upload-provider-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
           <div><h2 id="upload-provider-title">{editing ? '编辑 Provider' : '添加 Provider'}</h2><small>Provider 代表一个独立账号实例；目录映射在各媒体目录中配置。</small></div>
-          <IconCloseButton onClick={props.onClose} disabled={props.saving} />
+          <IconCloseButton onClick={() => props.onClose(dirty)} disabled={props.saving} />
         </div>
         <form className="config-form" onSubmit={(event) => { event.preventDefault(); if (canSubmit) props.onSubmit(draft); }}>
           <label>显示名称<input autoFocus value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：115 主归档" required /></label>
           <label>Provider 类型<select value={draft.type} disabled={editing || props.saving} onChange={(event) => setDraft({ ...draft, type: event.target.value })}>{providerTypes.map((providerType) => <option key={providerType.type} value={providerType.type} disabled={!providerType.implemented && providerType.type !== draft.type}>{providerType.name}{providerType.implemented ? '' : '（尚未安装）'}</option>)}</select><small>{editing ? 'Provider 类型在创建后固定。' : (selectedProviderType?.implemented ? '已安装的 Provider 可立即配置授权。' : '此 Provider 类型已预留，但尚未安装上传实现。')}</small></label>
           <label>自定义 User-Agent（可选）<input value={draft.userAgent} onChange={(event) => setDraft({ ...draft, userAgent: event.target.value })} placeholder="Mozilla/5.0" /></label>
           <Toggle label="启用此 Provider" checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} />
-          <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={props.onClose} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : (!editing && draft.type === '115cookie' ? '保存并授权' : '保存 Provider')}</button></div>
+          <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={() => props.onClose(dirty)} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : (!editing && draft.type === '115cookie' ? '保存并授权' : '保存 Provider')}</button></div>
         </form>
       </section>
     </div>
@@ -3836,12 +4087,12 @@ function UploadProviderModal(props: { provider?: UploadProvider; providerTypes: 
 function UploadCookieModal(props: { provider: UploadProvider; devices: UploadAuthDevice[]; device: string; cookie: string; auth: CookieAuthStatus | null; saving: boolean; onDeviceChange: (value: string) => void; onCookieChange: (value: string) => void; onClose: () => void; onSave: () => void; onStartAuth: () => void }) {
   const qrURL = props.auth ? `/api/upload/providers/${props.provider.id}/auth/115cookie/${encodeURIComponent(props.auth.sessionId)}/qrcode` : '';
   const terminal = props.auth && ['authorized', 'expired', 'cancelled', 'error'].includes(props.auth.state);
-  const authActive = Boolean(props.auth && !terminal);
+  const authActive = isCookieAuthorizationActive(props.auth);
   const selectedDeviceName = props.devices.find((device) => device.code === props.device)?.name ?? props.device;
   const recordedDeviceName = !props.provider.hasCookie ? '未授权' : !props.provider.authDevice ? '未记录' : (props.devices.find((device) => device.code === props.provider.authDevice)?.name ?? props.provider.authDevice);
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="modal-card upload-cookie-modal" role="dialog" aria-modal="true" aria-busy={props.saving || authActive} aria-labelledby="upload-cookie-title" onClick={(event) => event.stopPropagation()}>
+      <section className="modal-card upload-cookie-modal" role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="upload-cookie-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header"><div><h2 id="upload-cookie-title">115 Cookie 授权</h2><small>{props.provider.name}</small></div><IconCloseButton onClick={props.onClose} disabled={props.saving} /></div>
         <div className="upload-auth-device-bar">
           <label>授权设备
@@ -3864,6 +4115,7 @@ function UploadCookieModal(props: { provider: UploadProvider; devices: UploadAut
             {props.auth ? <><img className="upload-auth-qr" src={qrURL} alt="115 登录二维码" /><p className="settings-note" aria-live="polite" aria-atomic="true">{props.auth.message || props.auth.state}</p>{terminal ? <button type="button" className="secondary" onClick={props.onStartAuth} disabled={props.saving}>重新获取二维码</button> : <span className="pill running" role="status">授权进行中</span>}</> : <button type="button" onClick={props.onStartAuth} disabled={props.saving}>获取登录二维码</button>}
           </section>
         </div>
+        <div className="inline-actions modal-actions"><button type="button" className={authActive ? 'danger' : 'secondary'} onClick={props.onClose} disabled={props.saving}>{authActive ? '结束授权并关闭' : '关闭'}</button></div>
       </section>
     </div>
   );
@@ -3974,10 +4226,10 @@ function AlertDialog(props: { title: string; message: string; onClose: () => voi
   );
 }
 
-function AddEmbyKeyModal(props: { title: string; apiKey: string; saving: boolean; onTitleChange: (value: string) => void; onAPIKeyChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
+function AddEmbyKeyModal(props: { title: string; apiKey: string; saving: boolean; dirty: boolean; onTitleChange: (value: string) => void; onAPIKeyChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="modal-card add-emby-key-modal" data-protect-draft="true" role="dialog" aria-modal="true" aria-labelledby="add-emby-key-title" onClick={(event) => event.stopPropagation()}>
+      <section className="modal-card add-emby-key-modal" data-protect-draft={props.dirty ? 'true' : undefined} role="dialog" aria-modal="true" aria-labelledby="add-emby-key-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
           <div>
             <h2 id="add-emby-key-title">添加 API Key</h2>
@@ -4130,7 +4382,7 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
           <h2 id="task-detail-title">任务详情</h2>
           <IconCloseButton onClick={props.onClose} />
         </div>
-        <Row label="任务" value={`${props.detail.task.type} #${props.detail.task.id}`} />
+        <Row label="任务" value={`${taskTypeLabel(props.detail.task.type)} #${props.detail.task.id}`} />
         {props.detail.task.mediaPath && <Row label="文件" value={props.detail.task.mediaPath} />}
         <Row label="处理策略" value={props.detail.task.overwriteExisting ? '强制重建' : '只补缺失'} />
         <Row label="状态" value={taskStatusLabel(props.detail.task.status)} />
@@ -4261,6 +4513,7 @@ function WatchDirModal(props: {
   title: string;
   submitLabel: string;
   saving: boolean;
+  dirty: boolean;
   path: string;
   watchEnabled: boolean;
   useGlobalProcessing: boolean;
@@ -4283,7 +4536,7 @@ function WatchDirModal(props: {
     && new Set(uploadProviderIDs).size === uploadProviderIDs.length;
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="modal-card watch-dir-modal" data-protect-draft="true" role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="watch-dir-modal-title" onClick={(event) => event.stopPropagation()}>
+      <section className="modal-card watch-dir-modal" data-protect-draft={props.dirty ? 'true' : undefined} role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="watch-dir-modal-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
           <h2 id="watch-dir-modal-title">{props.title}</h2>
           <IconCloseButton onClick={props.onClose} disabled={props.saving} />
@@ -4585,7 +4838,7 @@ function RenameTemplateEditorModal(props: { value: string; matchPattern: string;
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="modal-card rename-template-modal" data-protect-draft="true" role="dialog" aria-modal="true" aria-labelledby="rename-template-title" onClick={(event) => event.stopPropagation()}>
+      <section className="modal-card rename-template-modal" role="dialog" aria-modal="true" aria-labelledby="rename-template-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
           <h2 id="rename-template-title">编辑命名模板</h2>
           <IconCloseButton onClick={props.onClose} />
@@ -4637,19 +4890,19 @@ function testMatchPattern(pattern: string, sample: string): { matched: boolean; 
   }
 }
 
-function TargetPathEditorModal(props: { value: string; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
+function TargetPathEditorModal(props: { value: string; dirty: boolean; saving: boolean; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="modal-card target-path-modal" data-protect-draft="true" role="dialog" aria-modal="true" aria-labelledby="target-path-title" onClick={(event) => event.stopPropagation()}>
+      <section className="modal-card target-path-modal" data-protect-draft={props.dirty ? 'true' : undefined} role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="target-path-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
           <h2 id="target-path-title">编辑目标路径</h2>
-          <IconCloseButton onClick={props.onClose} />
+          <IconCloseButton onClick={props.onClose} disabled={props.saving} />
         </div>
-        <textarea value={props.value} onChange={(event) => props.onChange(event.target.value)} autoFocus />
+        <textarea value={props.value} onChange={(event) => props.onChange(event.target.value)} autoFocus disabled={props.saving} />
         <p className="muted">可以填写文件名、相对路径或完整路径。执行前仍会检查目标冲突。</p>
         <div className="inline-actions modal-actions">
-          <button className="secondary" onClick={props.onClose}>取消</button>
-          <button onClick={props.onSubmit}>应用</button>
+          <button className="secondary" onClick={props.onClose} disabled={props.saving}>取消</button>
+          <button onClick={props.onSubmit} disabled={props.saving || !props.value.trim()}>{props.saving ? '校验中' : '校验并应用'}</button>
         </div>
       </section>
     </div>
@@ -4951,6 +5204,32 @@ function imageSourceLabel(code: string): string {
 
 function asArray<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
+}
+
+async function requestJSON<T>(url: string, label: string): Promise<T> {
+  const response = await fetch(url);
+  return readJSONResponse<T>(response, label);
+}
+
+async function readJSONResponse<T>(response: Response, label: string): Promise<T> {
+  const text = await response.text();
+  if (!response.ok) {
+    let detail = response.statusText || '请求失败';
+    if (text) {
+      try {
+        detail = (JSON.parse(text) as { error?: string }).error || text;
+      } catch {
+        detail = text;
+      }
+    }
+    throw new Error(`${label}失败：${detail}`);
+  }
+  if (!text.trim()) throw new Error(`${label}返回了空响应`);
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`${label}返回的数据格式无效`);
+  }
 }
 
 async function readErrorMessage(response: Response): Promise<string> {

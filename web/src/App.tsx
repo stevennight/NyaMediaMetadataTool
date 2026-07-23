@@ -3329,23 +3329,23 @@ export function App() {
 
         {activePage === 'settings' && (
         <section className="page-grid settings-grid">
-            <Card title="设置" action={<div className="inline-actions"><button className="secondary icon-text-button" type="button" onClick={confirmDiscardConfigChanges} disabled={!configDirty || savingConfig}><RefreshCw size={16} />放弃修改</button><button className="icon-text-button" onClick={saveConfig} disabled={savingConfig || !configDirty || !config}><Save size={16} />{savingConfig ? '保存中' : '保存配置'}</button></div>}>
+            <Card header={<div className="settings-tabs" role="tablist" aria-label="设置分类" aria-orientation="horizontal">
+              {settingsTabOptions.map((option) => <button
+                id={`settings-tab-${option.value}`}
+                className={settingsTab === option.value ? 'status-tab active' : 'status-tab'}
+                type="button"
+                role="tab"
+                aria-selected={settingsTab === option.value}
+                aria-controls={`settings-panel-${option.value}`}
+                tabIndex={settingsTab === option.value ? 0 : -1}
+                key={option.value}
+                onClick={() => setSettingsTab(option.value)}
+                onKeyDown={(event) => handleSettingsTabKeyDown(event, option.value)}
+              >{option.label}</button>)}
+            </div>} action={<div className="inline-actions"><button className="secondary icon-text-button" type="button" onClick={confirmDiscardConfigChanges} disabled={!configDirty || savingConfig}><RefreshCw size={16} />放弃修改</button><button className="icon-text-button" onClick={saveConfig} disabled={savingConfig || !configDirty || !config}><Save size={16} />{savingConfig ? '保存中' : '保存配置'}</button></div>}>
             {config ? (
+              <div className="settings-scroll-region">
               <div className="config-form settings-form">
-                <div className="settings-tabs" role="tablist" aria-label="设置分类" aria-orientation="horizontal">
-                  {settingsTabOptions.map((option) => <button
-                    id={`settings-tab-${option.value}`}
-                    className={settingsTab === option.value ? 'status-tab active' : 'status-tab'}
-                    type="button"
-                    role="tab"
-                    aria-selected={settingsTab === option.value}
-                    aria-controls={`settings-panel-${option.value}`}
-                    tabIndex={settingsTab === option.value ? 0 : -1}
-                    key={option.value}
-                    onClick={() => setSettingsTab(option.value)}
-                    onKeyDown={(event) => handleSettingsTabKeyDown(event, option.value)}
-                  >{option.label}</button>)}
-                </div>
                 <section id="settings-panel-basic" className={`settings-section ${settingsTab === 'basic' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-basic" hidden={settingsTab !== 'basic'}>
                   <ThemeSelector value={themeMode} onChange={setThemeMode} />
                   <label>显示时区<input list="timezone-options" value={config.server.timezone} onChange={(event) => updateConfig((draft) => { draft.server.timezone = event.target.value; })} placeholder="Asia/Shanghai" /></label>
@@ -3401,6 +3401,7 @@ export function App() {
                     <label>代理<input value={config.scraping.proxy} onChange={(event) => updateConfig((draft) => { draft.scraping.proxy = event.target.value; })} placeholder="http://127.0.0.1:7890" /></label>
                   </SettingsGroup>
                 </section>
+              </div>
               </div>
             ) : <p className="muted">配置加载中。</p>}
           </Card>
@@ -4404,11 +4405,11 @@ function InitialLoading() {
   );
 }
 
-function Card(props: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
+function Card(props: { title?: string; header?: React.ReactNode; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="card">
       <div className="card-header">
-        <h2>{props.title}</h2>
+        {props.header ?? (props.title ? <h2>{props.title}</h2> : null)}
         {props.action}
       </div>
       {props.children}
@@ -5096,20 +5097,22 @@ function RemoteDirectoryPicker(props: { provider: UploadProvider; initialPath: s
           <div><h2 id="remote-directory-picker-title">选择远端根目录</h2><small>{props.provider.name}</small></div>
           <IconCloseButton onClick={props.onClose} />
         </div>
-        <div className="remote-directory-toolbar">
-          <div className="remote-directory-location"><span>当前目录</span><code title={currentPath}>{currentPath}</code></div>
-          <div className="inline-actions">
-            <button className="secondary" type="button" disabled={loading || currentPath === '/'} onClick={() => void load('/')}>根目录</button>
-            <button className="secondary" type="button" disabled={loading || !parentPath} onClick={() => void load(parentPath)}>上一级</button>
-            <button className="secondary icon-text-button" type="button" disabled={loading} onClick={() => void load(currentPath, true)}><RefreshCw size={15} />刷新</button>
+        <div className="remote-directory-picker-content">
+          <div className="remote-directory-toolbar">
+            <div className="remote-directory-location"><span>当前目录</span><code title={currentPath}>{currentPath}</code></div>
+            <div className="inline-actions">
+              <button className="secondary" type="button" disabled={loading || currentPath === '/'} onClick={() => void load('/')}>根目录</button>
+              <button className="secondary" type="button" disabled={loading || !parentPath} onClick={() => void load(parentPath)}>上一级</button>
+              <button className="secondary icon-text-button" type="button" disabled={loading} onClick={() => void load(currentPath, true)}><RefreshCw size={15} />刷新</button>
+            </div>
           </div>
-        </div>
-        {error && <section className="error-card directory-error">{error}</section>}
-        <div className="directory-list remote-directory-list" aria-live="polite">
-          {loading && <div className="remote-directory-loading"><span className="loading-spinner" aria-hidden="true" />正在读取远端目录…</div>}
-          {!loading && data?.entries.map((entry) => <button className="directory-item remote-directory-item" type="button" key={entry.id || entry.path} onClick={() => void load(entry.path)}><FolderOpen size={17} aria-hidden="true" /><span>{entry.name}</span></button>)}
-          {!loading && data && !data.entries.length && <p className="muted">当前目录中没有子目录。</p>}
-          {!loading && !data && !error && <p className="muted">没有可显示的目录。</p>}
+          {error && <section className="error-card directory-error">{error}</section>}
+          <div className="directory-list remote-directory-list" aria-live="polite">
+            {loading && <div className="remote-directory-loading"><span className="loading-spinner" aria-hidden="true" />正在读取远端目录…</div>}
+            {!loading && data?.entries.map((entry) => <button className="directory-item remote-directory-item" type="button" key={entry.id || entry.path} onClick={() => void load(entry.path)}><FolderOpen size={17} aria-hidden="true" /><span>{entry.name}</span></button>)}
+            {!loading && data && !data.entries.length && <p className="muted">当前目录中没有子目录。</p>}
+            {!loading && !data && !error && <p className="muted">没有可显示的目录。</p>}
+          </div>
         </div>
         <div className="inline-actions modal-actions">
           <button className="secondary" type="button" onClick={props.onClose}>取消</button>

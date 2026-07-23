@@ -302,21 +302,40 @@ h1 {
   flex-direction: column;
   justify-content: flex-start;
   overflow: hidden;
+  padding: 0;
 }
 
 .settings-grid > .card > .card-header {
   flex: 0 0 auto;
+  min-height: 56px;
+  margin: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 8px 8px 0 0;
+  padding: 10px 18px;
 }
 
-.settings-grid > .card > .settings-form {
+.settings-grid > .card > .card-header > .settings-tabs {
+  min-width: 0;
   flex: 1 1 auto;
-  width: 100%;
-  max-width: 980px;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.settings-scroll-region {
+  flex: 1 1 auto;
   min-height: 0;
-  align-self: center;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-right: 6px;
+  scrollbar-gutter: stable;
+}
+
+.settings-grid > .card > .settings-scroll-region > .settings-form {
+  width: min(980px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 20px 24px 28px;
 }
 
 .rename-page-grid {
@@ -2435,6 +2454,51 @@ button:disabled {
 
 .modal-card.remote-directory-picker-modal {
   width: min(760px, 100%);
+  display: flex;
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.modal-card.remote-directory-picker-modal > .card-header {
+  position: static;
+  z-index: auto;
+  flex: 0 0 auto;
+  margin: 0;
+  border-radius: 8px 8px 0 0;
+  padding: 14px 18px;
+  box-shadow: none;
+}
+
+.modal-card.remote-directory-picker-modal > .card-header h2 {
+  margin: 0;
+}
+
+.modal-card.remote-directory-picker-modal > .card-header small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.remote-directory-picker-content {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 18px;
+}
+
+.modal-card.remote-directory-picker-modal:not(.confirm-dialog) > .modal-actions {
+  position: static;
+  z-index: auto;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  margin: 0;
+  border-top: 1px solid var(--border);
+  background: var(--surface-raised);
+  padding: 12px 18px 14px;
 }
 
 .remote-directory-toolbar {
@@ -2470,6 +2534,7 @@ button:disabled {
 
 .remote-directory-list {
   min-height: 180px;
+  max-height: none;
 }
 
 .remote-directory-item {
@@ -2736,6 +2801,22 @@ h3 {
   align-content: start;
 }
 
+.settings-form label {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.settings-form label input,
+.settings-form label select,
+.settings-form label textarea {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.settings-form .toggle-row {
+  font-size: 13px;
+}
+
 .settings-form .language-picker {
   grid-column: 1 / -1;
 }
@@ -2745,15 +2826,12 @@ h3 {
 }
 
 .settings-tabs {
-  position: sticky;
-  top: 0;
-  z-index: 6;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 0 0 14px;
-  background: var(--surface-translucent);
-  backdrop-filter: blur(12px);
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .settings-tabs .status-tab {
@@ -2765,11 +2843,11 @@ h3 {
 .settings-section {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 24px;
+  gap: 20px;
   align-content: start;
   min-width: 0;
-  padding: 20px 0 22px;
-  border-top: 1px solid var(--border);
+  padding: 0;
+  border: 0;
 }
 
 .settings-section:not(.active) {
@@ -2781,8 +2859,7 @@ h3 {
 }
 
 .settings-form .settings-section.active {
-  padding-top: 4px;
-  border-top: 0;
+  padding-top: 0;
 }
 
 .settings-group {
@@ -3262,7 +3339,7 @@ h3 {
     overflow-x: auto;
   }
 
-  .settings-grid > .card > .settings-form {
+  .settings-grid > .card > .settings-scroll-region > .settings-form {
     overflow: visible;
     padding-right: 0;
   }
@@ -4548,10 +4625,9 @@ label small {
 }
 
 @media (max-width: 860px) and (min-width: 761px) {
-  .settings-grid > .card > .settings-form {
-    overflow-x: hidden;
-    overflow-y: auto;
-    padding-right: 6px;
+  .settings-grid > .card > .settings-scroll-region > .settings-form {
+    padding-right: 18px;
+    padding-left: 18px;
   }
 }
 
@@ -4754,12 +4830,13 @@ label small {
     padding: 14px 12px 20px;
   }
 
-  .settings-tabs {
-    top: 62px;
+  .settings-grid > .card,
+  .settings-scroll-region {
+    overflow: visible;
   }
 
-  .settings-grid > .card {
-    overflow: visible;
+  .settings-grid > .card > .settings-scroll-region > .settings-form {
+    padding: 14px;
   }
 
   .card-header {

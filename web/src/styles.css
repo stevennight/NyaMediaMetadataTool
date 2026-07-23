@@ -4532,31 +4532,29 @@ label small {
   padding: 28px 16px;
 }
 
-/* Keep long-dialog context and actions available while its content scrolls. */
+/* Keep modal chrome in normal flow so it never covers dialog content. */
 .modal-card {
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: auto;
 }
 
 .modal-card > .card-header {
-  position: sticky;
-  top: 0;
-  z-index: 8;
-  margin-top: -24px;
-  margin-right: -24px;
-  margin-left: -24px;
+  position: static;
+  z-index: auto;
+  margin: -24px -24px 18px;
   padding-right: 24px;
   padding-left: 24px;
-  box-shadow: var(--shadow-small);
+  box-shadow: none;
+}
+
+.modal-card > .card-header h2 {
+  margin: 0;
 }
 
 .modal-card:not(.confirm-dialog) .modal-actions {
-  position: sticky;
-  bottom: 0;
-  z-index: 7;
-  margin-right: -24px;
-  margin-bottom: -24px;
-  margin-left: -24px;
+  position: static;
+  z-index: auto;
+  margin: 18px -24px -24px;
   border-top: 1px solid var(--border);
   background: var(--surface-raised);
   padding: 12px 24px 16px;

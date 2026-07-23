@@ -379,10 +379,7 @@ ORDER BY id
 	return routes, rows.Err()
 }
 
-func replaceWatchDirUploadConfigsTx(ctx context.Context, tx *sql.Tx, watchDirID int64, routes []UploadProviderRoute) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_routes WHERE watch_dir_id = ?`, watchDirID); err != nil {
-		return err
-	}
+func ValidateUploadProviderRoutes(routes []UploadProviderRoute) error {
 	seen := make(map[int64]struct{}, len(routes))
 	for _, route := range routes {
 		if route.ProviderID <= 0 {
@@ -392,21 +389,33 @@ func replaceWatchDirUploadConfigsTx(ctx context.Context, tx *sql.Tx, watchDirID 
 			return fmt.Errorf("%w: duplicate provider %d for watch directory", ErrInvalidUploadConfig, route.ProviderID)
 		}
 		seen[route.ProviderID] = struct{}{}
+		if err := validateStoredUploadTypes(route.IncludeTypes); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidUploadConfig, err)
+		}
+		if len(normalizeStoredUploadTypes(route.IncludeTypes)) == 0 {
+			return fmt.Errorf("%w: at least one include type is required", ErrInvalidUploadConfig)
+		}
+	}
+	return nil
+}
+
+func replaceWatchDirUploadConfigsTx(ctx context.Context, tx *sql.Tx, watchDirID int64, routes []UploadProviderRoute) error {
+	if err := ValidateUploadProviderRoutes(routes); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_routes WHERE watch_dir_id = ?`, watchDirID); err != nil {
+		return err
+	}
+	for _, route := range routes {
 		var providerExists int
 		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM upload_providers WHERE id = ?`, route.ProviderID).Scan(&providerExists); errors.Is(err, sql.ErrNoRows) {
 			return ErrUploadProviderNotFound
 		} else if err != nil {
 			return err
 		}
-		if err := validateStoredUploadTypes(route.IncludeTypes); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidUploadConfig, err)
-		}
 		route.RemoteRoot = normalizeRemoteRoot(route.RemoteRoot)
 		route.CollisionPolicy = normalizeCollisionPolicy(route.CollisionPolicy)
 		route.IncludeTypes = normalizeStoredUploadTypes(route.IncludeTypes)
-		if len(route.IncludeTypes) == 0 {
-			return fmt.Errorf("%w: at least one include type is required", ErrInvalidUploadConfig)
-		}
 		encodedTypes, err := json.Marshal(route.IncludeTypes)
 		if err != nil {
 			return err

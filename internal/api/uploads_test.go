@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -219,6 +220,79 @@ func TestUploadProviderGenericCookieSecretCannotBypassDedicatedEndpoint(t *testi
 	}
 }
 
+func TestUploadProviderDirectoryReturnsProviderEntries(t *testing.T) {
+	remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{
+		"/Anime": {
+			{ID: "directory-1", Name: "Series", Path: "/Anime/Series", IsDir: true},
+			{ID: "file-1", Name: "poster.jpg", Path: "/Anime/poster.jpg", Size: 2048},
+		},
+	}}
+	handler, _, provider := newUploadDirectoryTestHandler(t, remote)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/upload/providers/"+jsonNumber(provider.ID)+"/directories?path=Anime//", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("directory list status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Path    string               `json:"path"`
+		Entries []upload.RemoteEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Path != "/Anime" {
+		t.Fatalf("directory list path=%q, want /Anime", result.Path)
+	}
+	if len(result.Entries) != 2 {
+		t.Fatalf("directory list entries=%#v", result.Entries)
+	}
+	if entry := result.Entries[0]; entry.ID != "directory-1" || entry.Name != "Series" || entry.Path != "/Anime/Series" || !entry.IsDir || entry.Size != 0 {
+		t.Fatalf("unexpected directory entry: %#v", entry)
+	}
+	if entry := result.Entries[1]; entry.ID != "file-1" || entry.Name != "poster.jpg" || entry.Path != "/Anime/poster.jpg" || entry.IsDir || entry.Size != 2048 {
+		t.Fatalf("unexpected file entry: %#v", entry)
+	}
+	if len(remote.listedPaths) != 1 || remote.listedPaths[0] != "/Anime" {
+		t.Fatalf("provider list paths=%#v, want [/Anime]", remote.listedPaths)
+	}
+}
+
+func TestUploadProviderDirectoryMissingPathReturnsBadGateway(t *testing.T) {
+	remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{"/": nil}}
+	handler, _, provider := newUploadDirectoryTestHandler(t, remote)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/upload/providers/"+jsonNumber(provider.ID)+"/directories?path=/Missing", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("missing directory status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["error"] != `remote directory "/Missing" not found` {
+		t.Fatalf("missing directory error=%q", result["error"])
+	}
+}
+
+func TestUploadProviderDirectoryRejectsParentTraversal(t *testing.T) {
+	remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{"/": nil}}
+	handler, _, provider := newUploadDirectoryTestHandler(t, remote)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/upload/providers/"+jsonNumber(provider.ID)+"/directories?path=/Anime/../Outside", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("parent traversal status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(remote.listedPaths) != 0 {
+		t.Fatalf("provider was called for rejected path: %#v", remote.listedPaths)
+	}
+}
+
 func TestWatchDirUploadConfigsRoundTripThroughAPI(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -229,11 +303,12 @@ func TestWatchDirUploadConfigsRoundTripThroughAPI(t *testing.T) {
 	if err := st.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{"/TV": nil}}
 	watchDir, err := st.CreateWatchDir(ctx, store.WatchDir{Path: filepath.Join(t.TempDir(), "media"), Recursive: true, WatchEnabled: true, UseGlobalProcessing: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewServer(config.Default(), filepath.Join(t.TempDir(), "config.yaml"), st, nil, nil, slog.Default(), upload.New(st, slog.Default()))
+	handler := NewServer(config.Default(), filepath.Join(t.TempDir(), "config.yaml"), st, nil, nil, slog.Default(), newDirectoryListingManager(st, remote))
 	request := httptest.NewRequest(http.MethodPost, "/api/upload/providers", bytes.NewBufferString(`{"name":"115 Archive","type":"115cookie","enabled":true}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -275,6 +350,170 @@ func TestWatchDirUploadConfigsRoundTripThroughAPI(t *testing.T) {
 	persisted, err := st.GetWatchDir(ctx, watchDir.ID)
 	if err != nil || len(persisted.UploadConfigs) != 1 || persisted.UploadConfigs[0].RemoteRoot != "/TV" {
 		t.Fatalf("provider update changed directory upload configuration: %#v err=%v", persisted.UploadConfigs, err)
+	}
+}
+
+func TestWatchDirCreateRejectsMissingRemoteRootWithoutPersisting(t *testing.T) {
+	remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{"/Existing": nil}}
+	handler, st, provider := newUploadDirectoryTestHandler(t, remote)
+
+	body := `{"path":` + strconv.Quote(filepath.Join(t.TempDir(), "media")) + `,"recursive":true,"watchEnabled":true,"useGlobalProcessing":true,"uploadConfigs":[{"providerId":` + jsonNumber(provider.ID) + `,"enabled":true,"remoteRoot":"/Missing","collisionPolicy":"fail","includeTypes":["video"]}]}`
+	request := httptest.NewRequest(http.MethodPost, "/api/watch-dirs", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("create with missing remote root status=%d body=%s", response.Code, response.Body.String())
+	}
+	dirs, err := st.ListWatchDirs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 0 {
+		t.Fatalf("rejected create persisted watch directories: %#v", dirs)
+	}
+}
+
+func TestWatchDirCreateAllowsDisabledMissingRemoteRoot(t *testing.T) {
+	remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{"/Existing": nil}}
+	handler, st, provider := newUploadDirectoryTestHandler(t, remote)
+
+	body := `{"path":` + strconv.Quote(filepath.Join(t.TempDir(), "media")) + `,"recursive":true,"watchEnabled":true,"useGlobalProcessing":true,"uploadConfigs":[{"providerId":` + jsonNumber(provider.ID) + `,"enabled":false,"remoteRoot":"/Missing","collisionPolicy":"fail","includeTypes":["video"]}]}`
+	request := httptest.NewRequest(http.MethodPost, "/api/watch-dirs", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create with disabled missing remote root status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(remote.listedPaths) != 0 {
+		t.Fatalf("disabled route unexpectedly accessed provider: %#v", remote.listedPaths)
+	}
+	dirs, err := st.ListWatchDirs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 1 || len(dirs[0].UploadConfigs) != 1 || dirs[0].UploadConfigs[0].Enabled || dirs[0].UploadConfigs[0].RemoteRoot != "/Missing" {
+		t.Fatalf("disabled route was not persisted as configured: %#v", dirs)
+	}
+}
+
+func TestWatchDirCreateRejectsDuplicateProvidersBeforeRemoteAccess(t *testing.T) {
+	remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{"/Existing": nil}}
+	handler, st, provider := newUploadDirectoryTestHandler(t, remote)
+
+	route := `{"providerId":` + jsonNumber(provider.ID) + `,"enabled":true,"remoteRoot":"/Existing","collisionPolicy":"fail","includeTypes":["video"]}`
+	body := `{"path":` + strconv.Quote(filepath.Join(t.TempDir(), "media")) + `,"recursive":true,"watchEnabled":true,"useGlobalProcessing":true,"uploadConfigs":[` + route + `,` + route + `]}`
+	request := httptest.NewRequest(http.MethodPost, "/api/watch-dirs", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("create with duplicate providers status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(remote.listedPaths) != 0 {
+		t.Fatalf("structurally invalid routes unexpectedly accessed provider: %#v", remote.listedPaths)
+	}
+	dirs, err := st.ListWatchDirs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 0 {
+		t.Fatalf("duplicate provider routes persisted watch directories: %#v", dirs)
+	}
+}
+
+func TestWatchDirCreateRejectsInvalidIncludeTypesBeforeRemoteAccess(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		includeTypes string
+	}{
+		{name: "empty", includeTypes: `[]`},
+		{name: "blank", includeTypes: `[""]`},
+		{name: "unknown", includeTypes: `["not-a-file-type"]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{"/Existing": nil}}
+			handler, st, provider := newUploadDirectoryTestHandler(t, remote)
+
+			body := `{"path":` + strconv.Quote(filepath.Join(t.TempDir(), "media")) + `,"recursive":true,"watchEnabled":true,"useGlobalProcessing":true,"uploadConfigs":[{"providerId":` + jsonNumber(provider.ID) + `,"enabled":true,"remoteRoot":"/Existing","collisionPolicy":"fail","includeTypes":` + test.includeTypes + `}]}`
+			request := httptest.NewRequest(http.MethodPost, "/api/watch-dirs", bytes.NewBufferString(body))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("create with %s include types status=%d body=%s", test.name, response.Code, response.Body.String())
+			}
+			if len(remote.listedPaths) != 0 {
+				t.Fatalf("structurally invalid include types accessed provider: %#v", remote.listedPaths)
+			}
+			dirs, err := st.ListWatchDirs(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(dirs) != 0 {
+				t.Fatalf("invalid include types persisted watch directories: %#v", dirs)
+			}
+		})
+	}
+}
+
+func TestWatchDirUpdateUnknownReturnsNotFoundBeforeRemoteAccess(t *testing.T) {
+	remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{"/Existing": nil}}
+	handler, _, provider := newUploadDirectoryTestHandler(t, remote)
+
+	body := `{"path":` + strconv.Quote(filepath.Join(t.TempDir(), "media")) + `,"recursive":true,"watchEnabled":true,"useGlobalProcessing":true,"uploadConfigs":[{"providerId":` + jsonNumber(provider.ID) + `,"enabled":true,"remoteRoot":"/Missing","collisionPolicy":"fail","includeTypes":["video"]}]}`
+	request := httptest.NewRequest(http.MethodPut, "/api/watch-dirs/999999", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown watch directory update status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(remote.listedPaths) != 0 {
+		t.Fatalf("unknown watch directory update accessed provider: %#v", remote.listedPaths)
+	}
+}
+
+func TestWatchDirUpdateRejectsMissingRemoteRootWithoutOverwriting(t *testing.T) {
+	ctx := context.Background()
+	remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{"/Existing": nil}}
+	handler, st, provider := newUploadDirectoryTestHandler(t, remote)
+	original, err := st.CreateWatchDir(ctx, store.WatchDir{
+		Path:                filepath.Join(t.TempDir(), "original"),
+		Recursive:           true,
+		WatchEnabled:        true,
+		UseGlobalProcessing: true,
+		UploadConfigs: []store.UploadProviderRoute{{
+			ProviderID:      provider.ID,
+			Enabled:         true,
+			RemoteRoot:      "/Existing",
+			CollisionPolicy: "fail",
+			IncludeTypes:    []string{"video"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attemptedPath := filepath.Join(t.TempDir(), "changed")
+	body := `{"path":` + strconv.Quote(attemptedPath) + `,"recursive":false,"watchEnabled":false,"useGlobalProcessing":true,"uploadConfigs":[{"providerId":` + jsonNumber(provider.ID) + `,"enabled":true,"remoteRoot":"/Missing","collisionPolicy":"skip","includeTypes":["nfo"]}]}`
+	request := httptest.NewRequest(http.MethodPut, "/api/watch-dirs/"+jsonNumber(original.ID), bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("update with missing remote root status=%d body=%s", response.Code, response.Body.String())
+	}
+	persisted, err := st.GetWatchDir(ctx, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Path != original.Path || !persisted.Recursive || !persisted.WatchEnabled {
+		t.Fatalf("rejected update changed watch directory: before=%#v after=%#v", original, persisted)
+	}
+	if len(persisted.UploadConfigs) != 1 || persisted.UploadConfigs[0].RemoteRoot != "/Existing" || persisted.UploadConfigs[0].CollisionPolicy != "fail" || len(persisted.UploadConfigs[0].IncludeTypes) != 1 || persisted.UploadConfigs[0].IncludeTypes[0] != "video" {
+		t.Fatalf("rejected update changed upload configuration: %#v", persisted.UploadConfigs)
 	}
 }
 
@@ -505,6 +744,53 @@ func TestUploadProviderGenericSecretsUseDescriptorKeysWithoutResponseLeak(t *tes
 	if invalidResponse.Code != http.StatusBadRequest {
 		t.Fatalf("invalid credential key status=%d body=%s", invalidResponse.Code, invalidResponse.Body.String())
 	}
+}
+
+type fakeDirectoryListingProvider struct {
+	directories map[string][]upload.RemoteEntry
+	listedPaths []string
+}
+
+func (p *fakeDirectoryListingProvider) Check(context.Context) error {
+	return nil
+}
+
+func (p *fakeDirectoryListingProvider) List(_ context.Context, remotePath string) ([]upload.RemoteEntry, error) {
+	p.listedPaths = append(p.listedPaths, remotePath)
+	entries, ok := p.directories[remotePath]
+	if !ok {
+		return nil, fmt.Errorf("remote directory %q not found", remotePath)
+	}
+	return append([]upload.RemoteEntry(nil), entries...), nil
+}
+
+func (p *fakeDirectoryListingProvider) Upload(context.Context, string, string, int64, string) (upload.RemoteFile, error) {
+	return upload.RemoteFile{}, fmt.Errorf("unexpected upload through directory listing test provider")
+}
+
+func newDirectoryListingManager(st *store.Store, provider upload.Provider) *upload.Manager {
+	return upload.NewWithFactory(upload.DefaultOptions(), st, slog.Default(), func(context.Context, store.UploadBatchTarget) (upload.Provider, error) {
+		return provider, nil
+	})
+}
+
+func newUploadDirectoryTestHandler(t *testing.T, remote *fakeDirectoryListingProvider) (http.Handler, *store.Store, store.UploadProvider) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := st.CreateUploadProvider(ctx, store.UploadProvider{Name: "Directory Test", Type: store.UploadProviderType115Cookie, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(config.Default(), filepath.Join(t.TempDir(), "config.yaml"), st, nil, nil, slog.Default(), newDirectoryListingManager(st, remote))
+	return handler, st, provider
 }
 
 func jsonNumber(value int64) string {

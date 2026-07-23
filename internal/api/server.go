@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -836,6 +837,9 @@ func (s *Server) handleCreateWatchDir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	normalizeWatchDirProcessing(&input, s.snapshotConfig().Processing.OutputConfig())
+	if !s.validateWatchDirRemoteRoots(w, r, input.UploadConfigs) {
+		return
+	}
 	created, err := s.store.CreateWatchDir(r.Context(), input)
 	if err != nil {
 		if errors.Is(err, store.ErrUploadProviderNotFound) || errors.Is(err, store.ErrInvalidUploadConfig) {
@@ -857,6 +861,14 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if _, err := s.store.GetWatchDir(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrWatchDirNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	var input store.WatchDir
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -869,6 +881,9 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	normalizeWatchDirProcessing(&input, s.snapshotConfig().Processing.OutputConfig())
+	if !s.validateWatchDirRemoteRoots(w, r, input.UploadConfigs) {
+		return
+	}
 	updated, err := s.store.UpdateWatchDir(r.Context(), input)
 	if err != nil {
 		if errors.Is(err, store.ErrWatchDirNotFound) {
@@ -887,6 +902,57 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) validateWatchDirRemoteRoots(w http.ResponseWriter, r *http.Request, routes []store.UploadProviderRoute) bool {
+	if len(routes) == 0 {
+		return true
+	}
+	if err := store.ValidateUploadProviderRoutes(routes); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return false
+	}
+	remotePaths := make(map[int64]string, len(routes))
+	for _, route := range routes {
+		remotePath, err := uploadProviderBrowsePath(route.RemoteRoot)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("%w: invalid remote directory for provider %d: %v", store.ErrInvalidUploadConfig, route.ProviderID, err))
+			return false
+		}
+		remotePaths[route.ProviderID] = remotePath
+		if _, err := s.store.GetUploadProvider(r.Context(), route.ProviderID); err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrUploadProviderNotFound) {
+				status = http.StatusBadRequest
+			}
+			writeError(w, status, err)
+			return false
+		}
+	}
+	if s.uploads == nil {
+		for _, route := range routes {
+			if route.Enabled {
+				writeError(w, http.StatusServiceUnavailable, errors.New("upload manager is unavailable; remote directories cannot be validated"))
+				return false
+			}
+		}
+		return true
+	}
+	for _, route := range routes {
+		if !route.Enabled {
+			continue
+		}
+		remotePath := remotePaths[route.ProviderID]
+		if _, err := s.uploads.ListProviderDirectory(r.Context(), route.ProviderID, remotePath); err != nil {
+			status := http.StatusBadGateway
+			if errors.Is(err, store.ErrUploadProviderNotFound) {
+				status = http.StatusBadRequest
+			}
+			writeError(w, status, fmt.Errorf("remote directory %q for provider %d does not exist or cannot be accessed: %w", remotePath, route.ProviderID, err))
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeWatchDirProcessing(dir *store.WatchDir, global config.OutputProcessingConfig) {

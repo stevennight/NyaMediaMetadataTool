@@ -377,6 +377,10 @@ type RenameUndoCheckResult = { canUndo: boolean; batch: RenameHistoryBatch; item
 type DirectoryEntry = { name: string; path: string };
 type DirectoryList = { path: string; parent: string; entries: DirectoryEntry[] };
 
+type RemoteDirectoryEntry = { id: string; name: string; path: string; isDir: boolean; size: number };
+type RemoteDirectoryList = { path: string; entries: RemoteDirectoryEntry[] };
+type RemoteDirectoryPickerRequest = { provider: UploadProvider; value: string; onSelect: (path: string) => void };
+
 type EmbyAPIKey = { id: number; title: string; note: string; createdAt?: string; updatedAt?: string };
 
 type AuditLocalEpisode = {
@@ -1023,6 +1027,7 @@ export function App() {
   const [renameTemplateEditorOpen, setRenameTemplateEditorOpen] = useState(false);
   const [previewingRename, setPreviewingRename] = useState(false);
   const [directoryPicker, setDirectoryPicker] = useState<{ title: string; value: string; rootPath?: string; onSelect: (path: string) => void } | null>(null);
+  const [remoteDirectoryPicker, setRemoteDirectoryPicker] = useState<RemoteDirectoryPickerRequest | null>(null);
   const [newWatchDir, setNewWatchDir] = useState('');
   const [newWatchDirWatchEnabled, setNewWatchDirWatchEnabled] = useState(true);
   const [newWatchDirUseGlobalProcessing, setNewWatchDirUseGlobalProcessing] = useState(true);
@@ -1103,6 +1108,8 @@ export function App() {
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const lastTaskSelectionIndexRef = useRef<number | null>(null);
   const watchDirDraftInitialRef = useRef('');
+  const remoteDirectoryCacheRef = useRef(new Map<string, RemoteDirectoryList>());
+  const remoteDirectoryRequestCacheRef = useRef(new Map<string, Promise<RemoteDirectoryList>>());
   const activeModalStackRef = useRef('');
   const modalFocusReturnRef = useRef(new Map<string, HTMLElement | null>());
   const modalBusyRef = useRef({ applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey, savingWatchDir });
@@ -1141,7 +1148,7 @@ export function App() {
   const currentPageMeta = pageMeta[activePage];
   requestUploadCookieCloseRef.current = requestCloseUploadCookieModal;
   const modalStackKey = [
-    directoryPicker && 'directory', targetPathEditor && 'target-path', selectedHistoryBatch && 'history-detail', renameHistoryOpen && 'history',
+    remoteDirectoryPicker && 'remote-directory', directoryPicker && 'directory', targetPathEditor && 'target-path', selectedHistoryBatch && 'history-detail', renameHistoryOpen && 'history',
     renameTemplateEditorOpen && 'template', tmdbEpisodeDetail && 'episode-detail', addEmbyKeyOpen && 'emby-key', auditTmdbMatchOpen && 'audit-tmdb', tmdbMatchOpen && 'tmdb',
     batchEpisodeOpen && 'batch', uploadCookieProvider && 'upload-cookie', uploadProviderUsage && 'upload-provider-usage', (newUploadProviderOpen || uploadProviderModal) && 'upload-provider',
     editingWatchDir && 'edit-dir', addWatchDirOpen && 'add-dir', rescanOpen && 'rescan', selectedUploadBatch && 'upload-detail', selectedTask && 'task-detail',
@@ -1359,7 +1366,8 @@ export function App() {
     }, 0);
 
     function closeTopModal() {
-      if (directoryPicker) setDirectoryPicker(null);
+      if (remoteDirectoryPicker) setRemoteDirectoryPicker(null);
+      else if (directoryPicker) setDirectoryPicker(null);
       else if (targetPathEditor) setTargetPathEditor(null);
       else if (selectedHistoryBatch) setSelectedHistoryBatch(null);
       else if (renameHistoryOpen) setRenameHistoryOpen(false);
@@ -1759,6 +1767,21 @@ export function App() {
     }
   }
 
+  function browseRemoteDirectory(request: RemoteDirectoryPickerRequest) {
+    setError('');
+    setRemoteDirectoryPicker(request);
+  }
+
+  function clearRemoteDirectoryCache(providerID: number) {
+    const prefix = `${providerID}:`;
+    for (const key of remoteDirectoryCacheRef.current.keys()) {
+      if (key.startsWith(prefix)) remoteDirectoryCacheRef.current.delete(key);
+    }
+    for (const key of remoteDirectoryRequestCacheRef.current.keys()) {
+      if (key.startsWith(prefix)) remoteDirectoryRequestCacheRef.current.delete(key);
+    }
+  }
+
   async function browseFile(options: { title: string; value: string; displayName?: string; pattern?: string; onSelect: (path: string) => void }) {
     setError('');
     try {
@@ -1805,6 +1828,7 @@ export function App() {
       });
       if (!response.ok) throw new Error(await readErrorMessage(response));
       const saved = await response.json() as UploadProvider;
+      if (!isNew) clearRemoteDirectoryCache(saved.id);
       setUploadProviderModal(null);
       setNewUploadProviderOpen(false);
       setNotice(isNew ? 'Provider 已添加。' : 'Provider 已保存。');
@@ -1865,6 +1889,7 @@ export function App() {
       const response = await fetch(`/api/upload/providers/${provider.id}`, { method: 'DELETE' });
       if (response.status === 409) throw new Error('该 Provider 已有关联的上传历史，不能删除。请编辑并停用它。');
       if (!response.ok) throw new Error(await readErrorMessage(response));
+      clearRemoteDirectoryCache(provider.id);
       setNotice('Provider 已删除，关联的目录上传配置已移除。');
       await Promise.all([refreshUploads(), loadWatchDirs()]);
     } catch (err) {
@@ -1883,6 +1908,7 @@ export function App() {
       });
       if (!response.ok) throw new Error(await readErrorMessage(response));
       const saved = await response.json() as UploadProvider;
+      clearRemoteDirectoryCache(saved.id);
       setUploadCookieProvider(saved);
       setUploadCookieValue('');
       setCookieAuth(null);
@@ -2035,11 +2061,15 @@ export function App() {
         const next = await response.json() as CookieAuthStatus;
         if (!active) {
           // The backend may persist the cookie while this request is in flight after the modal closes.
-          if (next.state === 'authorized') await loadUploadProviders();
+          if (next.state === 'authorized') {
+            clearRemoteDirectoryCache(providerID);
+            await loadUploadProviders();
+          }
           return;
         }
         setCookieAuth(next);
         if (next.state === 'authorized') {
+          clearRemoteDirectoryCache(providerID);
           setUploadCookieProvider((current) => current && current.id === providerID ? { ...current, hasCookie: true, authDevice: next.terminal } : current);
           setNotice(`115 Cookie 授权成功，设备：${uploadAuthDeviceName(next.terminal, '115cookie', uploadProviderTypes)}。`);
           await loadUploadProviders();
@@ -3935,8 +3965,8 @@ export function App() {
         </div>
       {selectedUploadBatch && <UploadBatchDetailModal detail={selectedUploadBatch} timezone={displayTimezone} actionTargetID={uploadTargetActionID} onClose={() => setSelectedUploadBatch(null)} onRetry={(target) => void actOnUploadTarget(target, 'retry')} onCancel={(target) => void actOnUploadTarget(target, 'cancel')} />}
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} watchDirId={rescanWatchDirId} useCustomProcessing={rescanUseCustomProcessing} processing={rescanProcessing} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={(value) => { setRescanScope(value); setRescanTarget(''); setRescanWatchDirId(''); }} onTargetChange={setRescanTarget} onWatchDirIdChange={(value) => { setRescanWatchDirId(value); setRescanTarget(''); }} onUseCustomProcessingChange={(value) => { setRescanUseCustomProcessing(value); if (value) setRescanProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setRescanProcessing((value) => ({ ...value, ...patch }))} onBrowsePath={() => { const rootPath = rescanScope === 'dir' ? watchDirs.find((dir) => String(dir.id) === rescanWatchDirId)?.path ?? '' : ''; void browseDirectory({ title: '选择扫描路径', value: rescanTarget || rootPath, rootPath: rootPath || undefined, onSelect: setRescanTarget }); }} onSubmit={() => void rescan()} />}
-      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" saving={savingWatchDir} dirty={watchDirDraftDirty} path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} uploadConfigs={newWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setNewWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onClose={() => requestDiscardChanges(watchDirDraftDirty, () => setAddWatchDirOpen(false))} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
-      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" saving={savingWatchDir} dirty={watchDirDraftDirty} path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} uploadConfigs={editingWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setEditingWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onClose={() => requestDiscardChanges(watchDirDraftDirty, () => setEditingWatchDir(null))} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
+      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" saving={savingWatchDir} dirty={watchDirDraftDirty} path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} uploadConfigs={newWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setNewWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onBrowseRemoteDirectory={browseRemoteDirectory} onClose={() => requestDiscardChanges(watchDirDraftDirty, () => setAddWatchDirOpen(false))} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
+      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" saving={savingWatchDir} dirty={watchDirDraftDirty} path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} uploadConfigs={editingWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setEditingWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onBrowseRemoteDirectory={browseRemoteDirectory} onClose={() => requestDiscardChanges(watchDirDraftDirty, () => setEditingWatchDir(null))} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {uploadProviderUsage && <UploadProviderUsageModal provider={uploadProviderUsage} watchDirs={watchDirs} onClose={() => setUploadProviderUsage(null)} onEditDirectory={(dir) => { setUploadProviderUsage(null); openEditWatchDir(dir); }} />}
       {(newUploadProviderOpen || uploadProviderModal) && <UploadProviderModal provider={uploadProviderModal ?? undefined} providerTypes={uploadProviderTypes} saving={savingUploadProvider} onClose={(dirty) => requestDiscardChanges(dirty, () => { setNewUploadProviderOpen(false); setUploadProviderModal(null); })} onSubmit={(provider) => void saveUploadProvider(provider)} />}
       {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} devices={uploadAuthDevices(uploadCookieProvider.type, uploadProviderTypes)} device={uploadCookieDevice} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onDeviceChange={setUploadCookieDevice} onCookieChange={setUploadCookieValue} onClose={requestCloseUploadCookieModal} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
@@ -3950,6 +3980,7 @@ export function App() {
       {renameTemplateEditorOpen && <RenameTemplateEditorModal value={renameTemplate} matchPattern={renameMatchPattern} sample={renamePreview[0]?.currentName || renamePath} placeholders={renamePlaceholders} onChange={setRenameTemplate} onMatchPatternChange={setRenameMatchPattern} onClose={() => setRenameTemplateEditorOpen(false)} />}
       {targetPathEditor && <TargetPathEditorModal value={targetPathEditor.value} dirty={targetPathDraftDirty} saving={recalculatingRenamePaths.includes(targetPathEditor.path)} onChange={(value) => setTargetPathEditor({ ...targetPathEditor, value })} onClose={() => requestDiscardChanges(targetPathDraftDirty, () => setTargetPathEditor(null))} onSubmit={() => void applyTargetPathEdit()} />}
       {directoryPicker && <DirectoryPicker title={directoryPicker.title} initialPath={directoryPicker.value} rootPath={directoryPicker.rootPath} onClose={() => setDirectoryPicker(null)} onSelect={(path) => { directoryPicker.onSelect(path); setDirectoryPicker(null); }} />}
+      {remoteDirectoryPicker && <RemoteDirectoryPicker provider={remoteDirectoryPicker.provider} initialPath={remoteDirectoryPicker.value} cache={remoteDirectoryCacheRef.current} requests={remoteDirectoryRequestCacheRef.current} onClose={() => setRemoteDirectoryPicker(null)} onSelect={(path) => { remoteDirectoryPicker.onSelect(path); setRemoteDirectoryPicker(null); }} />}
       {confirmation && <ConfirmDialog request={confirmation} pending={confirming} onCancel={() => setConfirmation(null)} onConfirm={() => void acceptConfirmation()} />}
       </section>
     </main>
@@ -4047,10 +4078,12 @@ function nextUploadTypeSelection(current: string[], value: string, checked: bool
   return Array.from(types);
 }
 
-function UploadRouteProfile(props: { route: UploadProviderRoute; onChange: (patch: Partial<UploadProviderRoute>) => void }) {
+function UploadRouteProfile(props: { route: UploadProviderRoute; provider?: UploadProvider; onChange: (patch: Partial<UploadProviderRoute>) => void; onBrowseRemoteDirectory: (request: RemoteDirectoryPickerRequest) => void }) {
+  const needsAuthorization = props.provider?.type === '115cookie' && !props.provider.hasCookie;
+  const browseDisabled = !props.provider || needsAuthorization;
   return (
     <div className="upload-route-profile">
-      <label>远端根目录<input value={props.route.remoteRoot} onChange={(event) => props.onChange({ remoteRoot: event.target.value })} placeholder="/Anime" required /><small>当前媒体目录的根目录映射到这里；暂不支持单独映射本地子目录。</small></label><label>碰撞策略<select value={props.route.collisionPolicy} onChange={(event) => props.onChange({ collisionPolicy: event.target.value as UploadCollisionPolicy })}><option value="replace">替换同名不同大小文件</option><option value="skip">跳过同名不同大小文件</option><option value="fail">作为冲突失败</option></select></label>
+      <label>远端根目录<div className="path-input remote-root-input"><input aria-label="远端根目录" value={props.route.remoteRoot} placeholder="/Anime" readOnly required title={props.route.remoteRoot} /><button className="icon-text-button" type="button" aria-label="选择远端根目录" disabled={browseDisabled} title={needsAuthorization ? '请先授权 Provider' : '选择远端根目录'} onClick={() => props.provider && props.onBrowseRemoteDirectory({ provider: props.provider, value: props.route.remoteRoot, onSelect: (remoteRoot) => props.onChange({ remoteRoot }) })}><FolderOpen size={16} />选择</button></div><small>{needsAuthorization ? '请先授权 Provider，再选择已存在的远端目录。' : '只能从已存在的远端目录中选择；暂不支持单独映射本地子目录。'}</small></label><label>碰撞策略<select value={props.route.collisionPolicy} onChange={(event) => props.onChange({ collisionPolicy: event.target.value as UploadCollisionPolicy })}><option value="replace">替换同名不同大小文件</option><option value="skip">跳过同名不同大小文件</option><option value="fail">作为冲突失败</option></select></label>
       <details className="upload-content-details">
         <summary>上传内容 <span>{props.route.includeTypes?.length ?? 0} / {uploadTypeOptions.length}</span></summary>
         <fieldset className="upload-route-type-fieldset">
@@ -4065,7 +4098,7 @@ function UploadRouteProfile(props: { route: UploadProviderRoute; onChange: (patc
   );
 }
 
-function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; providers: UploadProvider[]; onChange: (configs: UploadProviderRoute[]) => void; onAddProvider: () => void; onAuthorizeProvider: (provider: UploadProvider) => void }) {
+function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; providers: UploadProvider[]; onChange: (configs: UploadProviderRoute[]) => void; onAddProvider: () => void; onAuthorizeProvider: (provider: UploadProvider) => void; onBrowseRemoteDirectory: (request: RemoteDirectoryPickerRequest) => void }) {
   const selectedProviderIDs = new Set(props.configs.flatMap((config) => config.providerId == null ? [] : [config.providerId]));
   const availableProviders = props.providers.filter((provider) => !selectedProviderIDs.has(provider.id));
 
@@ -4099,7 +4132,7 @@ function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; p
           return (
             <section className="directory-upload-config" key={config.id ?? `${config.providerId}-${index}`}>
               <div className="directory-upload-config-header">
-                <label>Provider<select value={config.providerId ?? ''} onChange={(event) => updateConfig(index, { providerId: Number(event.target.value) })}>
+                <label>Provider<select value={config.providerId ?? ''} onChange={(event) => updateConfig(index, { providerId: Number(event.target.value), remoteRoot: '/' })}>
                   {props.providers.map((item) => <option key={item.id} value={item.id} disabled={item.id !== config.providerId && selectedProviderIDs.has(item.id)}>{item.name} · {item.type}{item.enabled ? '' : '（已停用）'}</option>)}
                 </select></label>
                 <div className="directory-upload-config-state">
@@ -4111,7 +4144,7 @@ function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; p
                   <button className="icon-button" type="button" title="删除上传配置" aria-label="删除上传配置" onClick={() => props.onChange(props.configs.filter((_, currentIndex) => currentIndex !== index))}><Trash2 size={16} /></button>
                 </div>
               </div>
-              <UploadRouteProfile route={config} onChange={(patch) => updateConfig(index, patch)} />
+              <UploadRouteProfile route={config} provider={provider} onChange={(patch) => updateConfig(index, patch)} onBrowseRemoteDirectory={props.onBrowseRemoteDirectory} />
               {needsAuthorization && <small className="upload-config-warning">该 Provider 尚未授权，启用后上传会失败。</small>}
             </section>
           );
@@ -4594,6 +4627,7 @@ function WatchDirModal(props: {
   onUploadConfigsChange: (configs: UploadProviderRoute[]) => void;
   onAddProvider: () => void;
   onAuthorizeProvider: (provider: UploadProvider) => void;
+  onBrowseRemoteDirectory: (request: RemoteDirectoryPickerRequest) => void;
   onClose: () => void;
   onBrowsePath: () => void;
   onSubmit: () => void;
@@ -4628,7 +4662,7 @@ function WatchDirModal(props: {
               <Toggle label="接管剧集/季度图片" checked={props.processing.enableImageTakeover} onChange={(value) => props.onProcessingChange({ enableImageTakeover: value })} />
             </>
           )}
-          <DirectoryUploadConfigsEditor configs={props.uploadConfigs} providers={props.providers} onChange={props.onUploadConfigsChange} onAddProvider={props.onAddProvider} onAuthorizeProvider={props.onAuthorizeProvider} />
+          <DirectoryUploadConfigsEditor configs={props.uploadConfigs} providers={props.providers} onChange={props.onUploadConfigsChange} onAddProvider={props.onAddProvider} onAuthorizeProvider={props.onAuthorizeProvider} onBrowseRemoteDirectory={props.onBrowseRemoteDirectory} />
           {!uploadConfigsValid && <small className="upload-selection-warning">每个上传配置必须选择不同的 Provider、填写远端根目录，并至少选择一种上传内容。</small>}
         </fieldset>
         <p className="muted">保存后默认递归处理该目录。自动监听会在保存后立即热更新，无需重启服务。</p>
@@ -4974,6 +5008,138 @@ function TargetPathEditorModal(props: { value: string; dirty: boolean; saving: b
       </section>
     </div>
   );
+}
+
+function RemoteDirectoryPicker(props: { provider: UploadProvider; initialPath: string; cache: Map<string, RemoteDirectoryList>; requests: Map<string, Promise<RemoteDirectoryList>>; onSelect: (path: string) => void; onClose: () => void }) {
+  const initialPath = normalizeRemoteDirectoryPath(props.initialPath);
+  const [currentPath, setCurrentPath] = useState(initialPath);
+  const [data, setData] = useState<RemoteDirectoryList | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const requestIDRef = useRef(0);
+
+  useEffect(() => {
+    void load(initialPath);
+    return () => { requestIDRef.current++; };
+  }, []);
+
+  async function load(value: string, refresh = false) {
+    const path = normalizeRemoteDirectoryPath(value);
+    const requestID = ++requestIDRef.current;
+    const cacheKey = remoteDirectoryCacheKey(props.provider.id, path);
+    setCurrentPath(path);
+    setData(null);
+    setError('');
+
+    const cached = refresh ? null : props.cache.get(cacheKey);
+    if (cached) {
+      setCurrentPath(cached.path);
+      setData(cached);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const result = await requestRemoteDirectory(path, refresh);
+      if (requestID !== requestIDRef.current) return;
+      setCurrentPath(result.path);
+      setData(result);
+    } catch (err) {
+      if (requestID === requestIDRef.current) {
+        const detail = err instanceof Error ? err.message : '读取失败';
+        setError(`远端目录“${path}”不存在或无法访问：${detail}`);
+      }
+    } finally {
+      if (requestID === requestIDRef.current) setLoading(false);
+    }
+  }
+
+  async function requestRemoteDirectory(path: string, refresh: boolean): Promise<RemoteDirectoryList> {
+    const cacheKey = remoteDirectoryCacheKey(props.provider.id, path);
+    const pending = refresh ? null : props.requests.get(cacheKey);
+    if (pending) return pending;
+
+    const request = (async () => {
+      const params = new URLSearchParams({ path });
+      const response = await fetch(`/api/upload/providers/${props.provider.id}/directories?${params.toString()}`);
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      const result = await response.json() as Partial<RemoteDirectoryList>;
+      const canonicalPath = normalizeRemoteDirectoryPath(result.path || path);
+      const entries = asArray<RemoteDirectoryEntry>(result.entries)
+        .filter((entry) => entry.isDir && Boolean(entry.path))
+        .map((entry) => ({ ...entry, path: normalizeRemoteDirectoryPath(entry.path) }))
+        .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+      return { path: canonicalPath, entries };
+    })();
+    props.requests.set(cacheKey, request);
+    try {
+      const result = await request;
+      if (props.requests.get(cacheKey) === request) {
+        props.cache.set(cacheKey, result);
+        props.cache.set(remoteDirectoryCacheKey(props.provider.id, result.path), result);
+      }
+      return result;
+    } catch (err) {
+      if (refresh && props.requests.get(cacheKey) === request) props.cache.delete(cacheKey);
+      throw err;
+    } finally {
+      if (props.requests.get(cacheKey) === request) props.requests.delete(cacheKey);
+    }
+  }
+
+  const parentPath = remoteDirectoryParent(currentPath);
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
+      <section className="modal-card remote-directory-picker-modal" role="dialog" aria-modal="true" aria-busy={loading} aria-labelledby="remote-directory-picker-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <div><h2 id="remote-directory-picker-title">选择远端根目录</h2><small>{props.provider.name}</small></div>
+          <IconCloseButton onClick={props.onClose} />
+        </div>
+        <div className="remote-directory-toolbar">
+          <div className="remote-directory-location"><span>当前目录</span><code title={currentPath}>{currentPath}</code></div>
+          <div className="inline-actions">
+            <button className="secondary" type="button" disabled={loading || currentPath === '/'} onClick={() => void load('/')}>根目录</button>
+            <button className="secondary" type="button" disabled={loading || !parentPath} onClick={() => void load(parentPath)}>上一级</button>
+            <button className="secondary icon-text-button" type="button" disabled={loading} onClick={() => void load(currentPath, true)}><RefreshCw size={15} />刷新</button>
+          </div>
+        </div>
+        {error && <section className="error-card directory-error">{error}</section>}
+        <div className="directory-list remote-directory-list" aria-live="polite">
+          {loading && <div className="remote-directory-loading"><span className="loading-spinner" aria-hidden="true" />正在读取远端目录…</div>}
+          {!loading && data?.entries.map((entry) => <button className="directory-item remote-directory-item" type="button" key={entry.id || entry.path} onClick={() => void load(entry.path)}><FolderOpen size={17} aria-hidden="true" /><span>{entry.name}</span></button>)}
+          {!loading && data && !data.entries.length && <p className="muted">当前目录中没有子目录。</p>}
+          {!loading && !data && !error && <p className="muted">没有可显示的目录。</p>}
+        </div>
+        <div className="inline-actions modal-actions">
+          <button className="secondary" type="button" onClick={props.onClose}>取消</button>
+          <button type="button" onClick={() => data && props.onSelect(data.path)} disabled={loading || !data}>选择当前目录</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function normalizeRemoteDirectoryPath(value: string): string {
+  const segments: string[] = [];
+  for (const segment of value.trim().replace(/\\/g, '/').split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') segments.pop();
+    else segments.push(segment);
+  }
+  return `/${segments.join('/')}`;
+}
+
+function remoteDirectoryParent(value: string): string {
+  const path = normalizeRemoteDirectoryPath(value);
+  if (path === '/') return '';
+  const segments = path.split('/').filter(Boolean);
+  segments.pop();
+  return segments.length ? `/${segments.join('/')}` : '/';
+}
+
+function remoteDirectoryCacheKey(providerID: number, path: string): string {
+  return `${providerID}:${normalizeRemoteDirectoryPath(path)}`;
 }
 
 function DirectoryPicker(props: { title: string; initialPath: string; rootPath?: string; onSelect: (path: string) => void; onClose: () => void }) {

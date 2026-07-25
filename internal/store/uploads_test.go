@@ -291,6 +291,74 @@ func TestUploadTargetCompletionCreatesOneEventPerDestination(t *testing.T) {
 	}
 }
 
+func TestRetryUploadTargetResetsAutomaticRetryBudget(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	defer st.Close()
+	provider, err := st.CreateUploadProvider(ctx, UploadProvider{Name: "115 Retry", Type: UploadProviderType115Cookie, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	dir := createUploadTestWatchDir(t, st, ctx, root, []UploadProviderRoute{{
+		ProviderID: provider.ID, Enabled: true, RemoteRoot: "/Retry", CollisionPolicy: "fail", IncludeTypes: []string{"video"},
+	}})
+	seriesPath := filepath.Join(root, "Show")
+	batch, _, err := st.CollectUploadBatch(ctx, UploadCollectionInput{
+		WatchDirID:  &dir.ID,
+		SeriesKey:   "retry-show",
+		SeriesPath:  seriesPath,
+		QuietPeriod: time.Millisecond,
+		Files: []UploadCandidate{{
+			LocalPath:    filepath.Join(seriesPath, "episode.mkv"),
+			RelativePath: "episode.mkv",
+			FileType:     "video",
+			Size:         100,
+			ModifiedAt:   time.Now().Add(-time.Minute),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SealDueUploadBatches(ctx, time.Now(), time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	target, err := st.ClaimNextUploadTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RescheduleUploadTarget(ctx, target.ID, "temporary", time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	target, err = st.ClaimNextUploadTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Attempts != 2 {
+		t.Fatalf("expected two automatic attempts before manual retry, got %#v", target)
+	}
+	if err := st.FailUploadTarget(ctx, target.ID, "automatic retry budget exhausted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RetryUploadTarget(ctx, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := st.GetUploadBatchDetail(ctx, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Batch.Status != UploadBatchPending || len(detail.Targets) != 1 || detail.Targets[0].Status != UploadTargetPending || detail.Targets[0].Attempts != 0 {
+		t.Fatalf("manual retry did not reset target retry budget: %#v", detail)
+	}
+	reclaimed, err := st.ClaimNextUploadTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed.ID != target.ID || reclaimed.Attempts != 1 {
+		t.Fatalf("new automatic retry cycle did not start at attempt one: %#v", reclaimed)
+	}
+}
+
 func TestCollectUploadBatchSeparatesWatchDirectoriesWithSameSeriesKey(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

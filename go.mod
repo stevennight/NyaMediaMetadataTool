@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/SheltonZhu/115driver v1.2.3
+	github.com/aliyun/aliyun-oss-go-sdk v3.0.2+incompatible
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/pkg/sftp v1.13.7
 	github.com/wailsapp/wails/v2 v2.13.0
@@ -16,7 +17,6 @@ require (
 require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/aead/ecdh v0.2.0 // indirect
-	github.com/aliyun/aliyun-oss-go-sdk v3.0.2+incompatible // indirect
 	github.com/andreburgaud/crypt2go v1.1.0 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect

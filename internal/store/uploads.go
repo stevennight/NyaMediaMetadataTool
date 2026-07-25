@@ -971,7 +971,7 @@ func (s *Store) RetryUploadTarget(ctx context.Context, targetID int64) error {
 	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE upload_batch_targets
-SET status = ?, error_summary = '', available_at = ?, started_at = NULL, finished_at = NULL, updated_at = CURRENT_TIMESTAMP
+SET status = ?, attempts = 0, error_summary = '', available_at = ?, started_at = NULL, finished_at = NULL, updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND status IN (?, ?)
 `, UploadTargetPending, formatStoreTime(time.Now().UTC()), targetID, UploadTargetFailed, UploadTargetCanceled)
 	if err != nil {

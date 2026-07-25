@@ -8,18 +8,28 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	ec115 "github.com/SheltonZhu/115driver/pkg/crypto/ec115"
 	pan115 "github.com/SheltonZhu/115driver/pkg/driver"
+	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 )
 
 const (
 	upload115TokenSalt           = "Qclm8MGWUv59TnrR0XPg"
 	max115UploadInitSignAttempts = 3
+	singleRequest115UploadLimit  = 16 * 1024 * 1024
+	multipart115PartSize         = 16 * 1024 * 1024
+	max115OSSOperationAttempts   = 3
+	max115MultipartParts         = 10000
+	oss115TokenRefreshWindow     = 15 * time.Minute
+	uncertain115CommitMarker     = "115 remote commit result is uncertain"
 )
 
 type upload115Cipher interface {
@@ -28,8 +38,53 @@ type upload115Cipher interface {
 	Decrypt(cipherText []byte) ([]byte, error)
 }
 
+type uncertain115CommitError struct {
+	stage string
+	err   error
+}
+
+func (err *uncertain115CommitError) Error() string {
+	return fmt.Sprintf("%s during %s: %v", uncertain115CommitMarker, err.stage, err.err)
+}
+
+func (err *uncertain115CommitError) Unwrap() error {
+	return err.err
+}
+
 func newECDH115UploadCipher() (upload115Cipher, error) {
 	return ec115.NewEcdhCipher()
+}
+
+func new115OSSHTTPClient() *http.Client {
+	transport := new115HTTPTransport()
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func new115APIHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: new115HTTPTransport(),
+		Timeout:   time.Minute,
+	}
+}
+
+func new115HTTPTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   15 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.MaxIdleConns = 32
+	transport.MaxIdleConnsPerHost = 8
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	transport.ExpectContinueTimeout = time.Second
+	return transport
 }
 
 type appVersion115Response struct {
@@ -119,9 +174,9 @@ func (p *cookie115Provider) rapidUploadOrByMultipart(ctx context.Context, dirID 
 		return err
 	}
 
-	available, err := p.client.UploadAvailable()
+	available, err := p.uploadAvailable(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("get upload information: %w", err)
 	}
 	if !available || p.client.UploadMetaInfo == nil {
 		return errors.New("115 upload is not available")
@@ -132,15 +187,18 @@ func (p *cookie115Provider) rapidUploadOrByMultipart(ctx context.Context, dirID 
 
 	digest, err := p.client.GetDigestResult(&context115Reader{ctx: ctx, reader: file})
 	if err != nil {
-		return err
+		return fmt.Errorf("hash local file: %w", err)
 	}
 	fastInfo, err := p.rapidUpload(ctx, digest.Size, fileName, dirID, digest.PreID, digest.QuickID, appVersion, file)
 	if err != nil {
-		return err
+		if isRetryable115Error(err) {
+			return &uncertain115CommitError{stage: "rapid upload initialization", err: err}
+		}
+		return fmt.Errorf("initialize rapid upload: %w", err)
 	}
 	matched, err := fastInfo.Ok()
 	if err != nil {
-		return err
+		return fmt.Errorf("read rapid upload result: %w", err)
 	}
 	if matched {
 		return nil
@@ -151,10 +209,243 @@ func (p *cookie115Provider) rapidUploadOrByMultipart(ctx context.Context, dirID 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	if digest.Size <= pan115.KB {
-		return p.client.UploadByOSS(&fastInfo.UploadOSSParams, file, dirID)
+	if digest.Size <= singleRequest115UploadLimit {
+		if err := p.uploadByOSSSingle(ctx, &fastInfo.UploadOSSParams, file); err != nil {
+			return fmt.Errorf("upload to OSS with one request: %w", err)
+		}
+		return nil
 	}
-	return p.client.UploadByMultipart(&fastInfo.UploadOSSParams, digest.Size, file, dirID)
+	if err := p.uploadByOSSMultipart(ctx, &fastInfo.UploadOSSParams, digest.Size, file); err != nil {
+		return fmt.Errorf("upload to OSS with multipart: %w", err)
+	}
+	return nil
+}
+
+func (p *cookie115Provider) uploadAvailable(ctx context.Context) (bool, error) {
+	if p.client.UserID != 0 && strings.TrimSpace(p.client.Userkey) != "" && p.client.UploadMetaInfo != nil {
+		return true, nil
+	}
+	result := pan115.UploadInfoResp{}
+	request := p.client.NewRequest().
+		SetContext(ctx).
+		ForceContentType("application/json;charset=UTF-8").
+		SetResult(&result)
+	response, err := request.Post(pan115.ApiUploadInfo)
+	if err := pan115.CheckErr(err, &result, response); err != nil {
+		return false, err
+	}
+	p.client.Userkey = result.Userkey
+	p.client.UserID = result.UserID
+	p.client.UploadMetaInfo = &result.UploadMetaInfo
+	return p.client.UserID != 0 && strings.TrimSpace(p.client.Userkey) != "", nil
+}
+
+func (p *cookie115Provider) uploadByOSSSingle(ctx context.Context, params *pan115.UploadOSSParams, reader io.Reader) error {
+	token, err := p.get115OSSToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get OSS credentials: %w", err)
+	}
+	bucket, err := p.new115OSSBucket(params, token, false)
+	if err != nil {
+		return err
+	}
+	operationCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	options := append(pan115.OssOption(params, token), oss.WithContext(operationCtx))
+	if err := bucket.PutObject(params.Object, reader, options...); err != nil {
+		return &uncertain115CommitError{stage: "single-request OSS upload", err: err}
+	}
+	return nil
+}
+
+func (p *cookie115Provider) uploadByOSSMultipart(ctx context.Context, params *pan115.UploadOSSParams, fileSize int64, file *os.File) error {
+	token, err := p.get115OSSToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get OSS credentials: %w", err)
+	}
+	bucket, err := p.new115OSSBucket(params, token, true)
+	if err != nil {
+		return err
+	}
+
+	initOptions := []oss.Option{
+		oss.SetHeader(pan115.OssSecurityTokenHeaderName, token.SecurityToken),
+		oss.UserAgentHeader(pan115.OSSUserAgent),
+		oss.EnableSha1(),
+		oss.Sequential(),
+	}
+	var uploadSession oss.InitiateMultipartUploadResult
+	for attempt := 1; attempt <= max115OSSOperationAttempts; attempt++ {
+		operationCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		options := append(append([]oss.Option{}, initOptions...), oss.WithContext(operationCtx))
+		uploadSession, err = bucket.InitiateMultipartUpload(params.Object, options...)
+		cancel()
+		if err == nil {
+			break
+		}
+		if !isRetryable115Error(err) || attempt == max115OSSOperationAttempts {
+			return fmt.Errorf("initialize OSS multipart upload: %w", err)
+		}
+		if waitErr := p.waitUploadRetry(ctx, attempt); waitErr != nil {
+			return waitErr
+		}
+	}
+
+	partSize := multipart115PartSizeFor(fileSize)
+	partCount := int((fileSize + partSize - 1) / partSize)
+	parts := make([]oss.UploadPart, 0, partCount)
+	for partNumber := 1; partNumber <= partCount; partNumber++ {
+		token, bucket, err = p.refresh115OSSBucket(ctx, params, token, bucket, true)
+		if err != nil {
+			p.abort115MultipartUpload(bucket, uploadSession, token)
+			return fmt.Errorf("refresh OSS credentials before part %d/%d: %w", partNumber, partCount, err)
+		}
+		offset := int64(partNumber-1) * partSize
+		remaining := fileSize - offset
+		currentPartSize := partSize
+		if remaining < currentPartSize {
+			currentPartSize = remaining
+		}
+
+		var uploadedPart oss.UploadPart
+		for attempt := 1; attempt <= max115OSSOperationAttempts; attempt++ {
+			section := io.NewSectionReader(file, offset, currentPartSize)
+			operationCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			options := []oss.Option{
+				oss.SetHeader(pan115.OssSecurityTokenHeaderName, token.SecurityToken),
+				oss.UserAgentHeader(pan115.OSSUserAgent),
+				oss.WithContext(operationCtx),
+			}
+			uploadedPart, err = bucket.UploadPart(uploadSession, section, currentPartSize, partNumber, options...)
+			cancel()
+			if err == nil {
+				break
+			}
+			if !isRetryable115Error(err) || attempt == max115OSSOperationAttempts {
+				p.abort115MultipartUpload(bucket, uploadSession, token)
+				return fmt.Errorf("upload OSS part %d/%d: %w", partNumber, partCount, err)
+			}
+			if waitErr := p.waitUploadRetry(ctx, attempt); waitErr != nil {
+				p.abort115MultipartUpload(bucket, uploadSession, token)
+				return waitErr
+			}
+		}
+		parts = append(parts, uploadedPart)
+	}
+
+	token, bucket, err = p.refresh115OSSBucket(ctx, params, token, bucket, true)
+	if err != nil {
+		return fmt.Errorf("refresh OSS credentials before completion: %w", err)
+	}
+	var callbackBody []byte
+	completeCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	completeOptions := append(
+		pan115.OssOption(params, token),
+		oss.CallbackResult(&callbackBody),
+		oss.WithContext(completeCtx),
+	)
+	if _, err := bucket.CompleteMultipartUpload(uploadSession, parts, completeOptions...); err != nil {
+		return &uncertain115CommitError{stage: "OSS multipart completion", err: err}
+	}
+	result := pan115.UploadResult{}
+	if err := json.Unmarshal(callbackBody, &result); err != nil {
+		return &uncertain115CommitError{stage: "OSS multipart callback decoding", err: err}
+	}
+	if err := result.Err(string(callbackBody)); err != nil {
+		return &uncertain115CommitError{stage: "115 OSS callback", err: err}
+	}
+	return nil
+}
+
+func (p *cookie115Provider) new115OSSBucket(params *pan115.UploadOSSParams, token *pan115.UploadOSSTokenResp, integrityChecks bool) (*oss.Bucket, error) {
+	ossHTTPClient := p.ossHTTPClient
+	if ossHTTPClient == nil {
+		ossHTTPClient = new115OSSHTTPClient()
+		p.ossHTTPClient = ossHTTPClient
+	}
+	options := []oss.ClientOption{oss.HTTPClient(ossHTTPClient)}
+	if integrityChecks {
+		options = append(options, oss.EnableMD5(true), oss.EnableCRC(true))
+	}
+	client, err := oss.New(
+		p.client.GetOSSEndpoint(p.client.UseInternalUpload),
+		token.AccessKeyID,
+		token.AccessKeySecret,
+		options...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create OSS client: %w", err)
+	}
+	bucket, err := client.Bucket(params.Bucket)
+	if err != nil {
+		return nil, fmt.Errorf("open OSS bucket: %w", err)
+	}
+	return bucket, nil
+}
+
+func (p *cookie115Provider) refresh115OSSBucket(ctx context.Context, params *pan115.UploadOSSParams, currentToken *pan115.UploadOSSTokenResp, currentBucket *oss.Bucket, integrityChecks bool) (*pan115.UploadOSSTokenResp, *oss.Bucket, error) {
+	latestToken, err := p.get115OSSToken(ctx)
+	if err != nil {
+		return currentToken, currentBucket, err
+	}
+	if currentToken != nil &&
+		latestToken.AccessKeyID == currentToken.AccessKeyID &&
+		latestToken.AccessKeySecret == currentToken.AccessKeySecret &&
+		latestToken.SecurityToken == currentToken.SecurityToken {
+		return currentToken, currentBucket, nil
+	}
+	latestBucket, err := p.new115OSSBucket(params, latestToken, integrityChecks)
+	if err != nil {
+		return currentToken, currentBucket, err
+	}
+	return latestToken, latestBucket, nil
+}
+
+func (p *cookie115Provider) abort115MultipartUpload(bucket *oss.Bucket, uploadSession oss.InitiateMultipartUploadResult, token *pan115.UploadOSSTokenResp) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = bucket.AbortMultipartUpload(
+		uploadSession,
+		oss.SetHeader(pan115.OssSecurityTokenHeaderName, token.SecurityToken),
+		oss.UserAgentHeader(pan115.OSSUserAgent),
+		oss.WithContext(ctx),
+	)
+}
+
+func multipart115PartSizeFor(fileSize int64) int64 {
+	partSize := int64(multipart115PartSize)
+	minimumForPartLimit := (fileSize + max115MultipartParts - 1) / max115MultipartParts
+	if minimumForPartLimit > partSize {
+		partSize = minimumForPartLimit
+	}
+	return partSize
+}
+
+func (p *cookie115Provider) get115OSSToken(ctx context.Context) (*pan115.UploadOSSTokenResp, error) {
+	p.ossTokenMu.Lock()
+	defer p.ossTokenMu.Unlock()
+	if p.ossToken != nil && time.Now().Add(oss115TokenRefreshWindow).Before(p.ossTokenExpiresAt) {
+		copyOfToken := *p.ossToken
+		return &copyOfToken, nil
+	}
+	result := pan115.UploadOSSTokenResp{}
+	request := p.client.NewRequest().
+		SetContext(ctx).
+		ForceContentType("application/json;charset=UTF-8").
+		SetResult(&result)
+	response, err := request.Get(pan115.ApiUploadOSSToken)
+	if err := pan115.CheckErr(err, &result, response); err != nil {
+		return nil, err
+	}
+	expiresAt := result.Expiration
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().Add(50 * time.Minute)
+	}
+	p.ossToken = &result
+	p.ossTokenExpiresAt = expiresAt
+	copyOfToken := result
+	return &copyOfToken, nil
 }
 
 func (p *cookie115Provider) rapidUpload(ctx context.Context, fileSize int64, fileName string, dirID string, preID string, fileID string, appVersion string, reader io.ReadSeeker) (*pan115.UploadInitResp, error) {

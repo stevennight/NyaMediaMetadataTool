@@ -51,6 +51,10 @@ type Provider interface {
 	Upload(ctx context.Context, localPath string, remotePath string, size int64, collisionPolicy string) (RemoteFile, error)
 }
 
+type ProviderVerifier interface {
+	Verify(ctx context.Context, remotePath string, size int64) (RemoteFile, bool, error)
+}
+
 type ProviderFactory func(ctx context.Context, target store.UploadBatchTarget) (Provider, error)
 
 type Manager struct {
@@ -373,8 +377,39 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 	if err != nil {
 		return err
 	}
+	failedTransfers := 0
+	var firstFailure error
+	recordFailure := func(transferID int64, transferErr error) error {
+		if err := m.store.FailUploadTransfer(ctx, transferID, transferErr.Error()); err != nil {
+			return fmt.Errorf("mark transfer %d failed: %w", transferID, err)
+		}
+		failedTransfers++
+		if firstFailure == nil {
+			firstFailure = transferErr
+		}
+		return nil
+	}
 	for _, transfer := range transfers {
 		if transfer.Status == store.UploadTransferCompleted {
+			continue
+		}
+		if transfer.Status == store.UploadTransferFailed && strings.Contains(transfer.ErrorSummary, uncertain115CommitMarker) {
+			verificationErr := fmt.Errorf("%s: remote file is still not confirmed", uncertain115CommitMarker)
+			if verifier, ok := client.(ProviderVerifier); ok {
+				remote, found, err := verifier.Verify(ctx, transfer.RemotePath, transfer.BytesTotal)
+				if err == nil && found {
+					if err := m.store.CompleteUploadTransfer(ctx, transfer.ID, remote.ID); err != nil {
+						return err
+					}
+					continue
+				}
+				if err != nil {
+					verificationErr = fmt.Errorf("%s: verify remote file: %w", uncertain115CommitMarker, err)
+				}
+			}
+			if err := recordFailure(transfer.ID, verificationErr); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := m.store.StartUploadTransfer(ctx, transfer.ID); err != nil {
@@ -382,22 +417,36 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 		}
 		info, err := os.Stat(transfer.LocalPath)
 		if err != nil {
-			_ = m.store.FailUploadTransfer(ctx, transfer.ID, err.Error())
-			return fmt.Errorf("stat local file %s: %w", transfer.LocalPath, err)
+			transferErr := fmt.Errorf("stat local file %s: %w", transfer.LocalPath, err)
+			if err := recordFailure(transfer.ID, transferErr); err != nil {
+				return err
+			}
+			continue
 		}
 		if info.IsDir() || info.Size() != transfer.BytesTotal {
-			err := fmt.Errorf("local file changed after batch snapshot: %s", transfer.LocalPath)
-			_ = m.store.FailUploadTransfer(ctx, transfer.ID, err.Error())
-			return err
+			transferErr := fmt.Errorf("local file changed after batch snapshot: %s", transfer.LocalPath)
+			if err := recordFailure(transfer.ID, transferErr); err != nil {
+				return err
+			}
+			continue
 		}
 		remote, err := client.Upload(ctx, transfer.LocalPath, transfer.RemotePath, transfer.BytesTotal, target.CollisionPolicy)
 		if err != nil {
-			_ = m.store.FailUploadTransfer(ctx, transfer.ID, err.Error())
-			return fmt.Errorf("upload %s: %w", transfer.LocalPath, err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			transferErr := fmt.Errorf("upload %s: %w", transfer.LocalPath, err)
+			if err := recordFailure(transfer.ID, transferErr); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := m.store.CompleteUploadTransfer(ctx, transfer.ID, remote.ID); err != nil {
 			return err
 		}
+	}
+	if failedTransfers > 0 {
+		return fmt.Errorf("%d file(s) failed; first failure: %w", failedTransfers, firstFailure)
 	}
 	return m.store.CompleteUploadTarget(ctx, target.ID)
 }

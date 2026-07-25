@@ -30,6 +30,34 @@ type fakeUpload struct {
 	Size       int64
 }
 
+type waitReportingProvider struct {
+	fakeProvider
+	reporter      func(string, time.Time)
+	checkStarted  chan struct{}
+	continueCheck chan struct{}
+}
+
+func (p *waitReportingProvider) setWaitReporter(reporter func(string, time.Time)) {
+	p.reporter = reporter
+}
+
+func (p *waitReportingProvider) Check(ctx context.Context) error {
+	waitingUntil := time.Now().Add(time.Minute)
+	if p.reporter != nil {
+		p.reporter("115 已触发访问保护，正在等待冷却后重试", waitingUntil)
+	}
+	close(p.checkStarted)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.continueCheck:
+		if p.reporter != nil {
+			p.reporter("", time.Time{})
+		}
+		return nil
+	}
+}
+
 func (p *fakeProvider) Check(context.Context) error { return nil }
 
 func (p *fakeProvider) List(context.Context, string) ([]RemoteEntry, error) { return nil, nil }
@@ -57,6 +85,98 @@ func (p *fakeProvider) Verify(_ context.Context, remotePath string, size int64) 
 		return RemoteFile{}, false, nil
 	}
 	return p.verifyFile(remotePath, size)
+}
+
+func TestProcessTargetPublishesAndClearsRuntimeWaitState(t *testing.T) {
+	ctx := context.Background()
+	st := openUploadTestStore(t)
+	defer st.Close()
+
+	root := t.TempDir()
+	showPath := filepath.Join(root, "Show")
+	if err := os.MkdirAll(showPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(showPath, "S01E01.mkv")
+	if err := os.WriteFile(mediaPath, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(mediaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRecord, err := st.CreateUploadProvider(ctx, store.UploadProvider{
+		Name: "115 Wait", Type: store.UploadProviderType115Cookie, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := st.CreateWatchDir(ctx, store.WatchDir{
+		Path: root, Recursive: true, WatchEnabled: true, UseGlobalProcessing: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir.UploadConfigs = []store.UploadProviderRoute{{
+		ProviderID: providerRecord.ID, Enabled: true, RemoteRoot: "/Archive", CollisionPolicy: "fail", IncludeTypes: []string{"video"},
+	}}
+	if _, err := st.UpdateWatchDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &waitReportingProvider{
+		checkStarted:  make(chan struct{}),
+		continueCheck: make(chan struct{}),
+	}
+	manager := NewWithFactory(Options{QuietPeriod: time.Millisecond, MaxAttempts: 1}, st, slog.Default(), func(context.Context, store.UploadBatchTarget) (Provider, error) {
+		return provider, nil
+	})
+	if err := manager.RecordMediaProcessed(ctx, store.Task{ID: 1}, store.MediaFile{
+		Path: mediaPath, Size: info.Size(), ModifiedAt: info.ModTime(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SealDueUploadBatches(ctx, time.Now(), time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	target, err := st.ClaimNextUploadTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfers, err := st.ListUploadTransfersByTarget(ctx, target.ID)
+	if err != nil || len(transfers) != 1 {
+		t.Fatalf("transfers=%#v err=%v", transfers, err)
+	}
+
+	processDone := make(chan error, 1)
+	go func() {
+		processDone <- manager.processTarget(ctx, target)
+	}()
+	select {
+	case <-provider.checkStarted:
+	case <-time.After(time.Second):
+		t.Fatal("provider check did not publish its wait state")
+	}
+
+	state, ok := manager.TransferRuntimeStates()[transfers[0].ID]
+	if !ok || state.Phase != "waiting" ||
+		state.StatusMessage != "115 已触发访问保护，正在等待冷却后重试" ||
+		state.WaitingUntil == "" {
+		t.Fatalf("unexpected transfer runtime state: %#v ok=%v", state, ok)
+	}
+
+	close(provider.continueCheck)
+	select {
+	case err := <-processDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("target processing did not resume after the wait")
+	}
+	if _, ok := manager.TransferRuntimeStates()[transfers[0].ID]; ok {
+		t.Fatal("completed transfer retained stale runtime wait state")
+	}
 }
 
 func TestWorkerUploadsOneBatchToEveryEnabledProvider(t *testing.T) {

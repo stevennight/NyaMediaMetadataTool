@@ -212,6 +212,9 @@ func TestCollectUploadBatchCoalescesFilesAndTargets(t *testing.T) {
 	if detail.Batch.Status != UploadBatchPending || len(detail.Files) != 2 || len(detail.Targets) != 2 || len(detail.Transfers) != 4 {
 		t.Fatalf("unexpected sealed detail: %#v files=%d targets=%d transfers=%d", detail.Batch, len(detail.Files), len(detail.Targets), len(detail.Transfers))
 	}
+	if detail.Batch.TransferCount != 4 || detail.Batch.CompletedTransfers != 0 || detail.Batch.FailedTransfers != 0 {
+		t.Fatalf("unexpected initial transfer progress: %#v", detail.Batch)
+	}
 	if detail.Targets[0].ProviderID != first.ID {
 		t.Fatalf("unexpected first target: %#v", detail.Targets[0])
 	}
@@ -279,7 +282,8 @@ func TestUploadTargetCompletionCreatesOneEventPerDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Batch.Status != UploadBatchCompleted || detail.Batch.CompletedTargets != 2 {
+	if detail.Batch.Status != UploadBatchCompleted || detail.Batch.CompletedTargets != 2 ||
+		detail.Batch.TransferCount != 2 || detail.Batch.CompletedTransfers != 2 || detail.Batch.FailedTransfers != 0 {
 		t.Fatalf("batch did not complete: %#v", detail.Batch)
 	}
 	events, err := st.ListUploadEvents(ctx, "pending", 10)
@@ -327,8 +331,28 @@ func TestRetryUploadTargetResetsAutomaticRetryBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	transfers, err := st.ListUploadTransfersByTarget(ctx, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transfers) != 1 {
+		t.Fatalf("unexpected transfers: %#v", transfers)
+	}
+	if err := st.StartUploadTransfer(ctx, transfers[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FailUploadTransfer(ctx, transfers[0].ID, "temporary"); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.RescheduleUploadTarget(ctx, target.ID, "temporary", time.Now().Add(-time.Second)); err != nil {
 		t.Fatal(err)
+	}
+	rescheduled, err := st.GetUploadBatch(ctx, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rescheduled.FailedTargets != 0 || rescheduled.FailedTransfers != 0 {
+		t.Fatalf("automatic retry was counted as a terminal failure: %#v", rescheduled)
 	}
 	target, err = st.ClaimNextUploadTarget(ctx)
 	if err != nil {
@@ -340,6 +364,13 @@ func TestRetryUploadTargetResetsAutomaticRetryBudget(t *testing.T) {
 	if err := st.FailUploadTarget(ctx, target.ID, "automatic retry budget exhausted"); err != nil {
 		t.Fatal(err)
 	}
+	failed, err := st.GetUploadBatch(ctx, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.FailedTargets != 1 || failed.FailedTransfers != 1 {
+		t.Fatalf("terminal upload failure was not reflected in progress: %#v", failed)
+	}
 	if err := st.RetryUploadTarget(ctx, target.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +378,8 @@ func TestRetryUploadTargetResetsAutomaticRetryBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Batch.Status != UploadBatchPending || len(detail.Targets) != 1 || detail.Targets[0].Status != UploadTargetPending || detail.Targets[0].Attempts != 0 {
+	if detail.Batch.Status != UploadBatchPending || detail.Batch.FailedTargets != 0 || detail.Batch.FailedTransfers != 0 ||
+		len(detail.Targets) != 1 || detail.Targets[0].Status != UploadTargetPending || detail.Targets[0].Attempts != 0 {
 		t.Fatalf("manual retry did not reset target retry budget: %#v", detail)
 	}
 	reclaimed, err := st.ClaimNextUploadTarget(ctx)

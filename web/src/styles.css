@@ -415,6 +415,55 @@ h1 {
   gap: 12px;
 }
 
+.task-table.upload-batch-table {
+  min-width: 1040px;
+}
+
+.upload-batch-progress {
+  display: grid;
+  min-width: 170px;
+  gap: 5px;
+}
+
+.upload-batch-progress-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.upload-batch-progress-label strong {
+  font-size: 13px;
+}
+
+.upload-batch-progress progress {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  accent-color: var(--primary);
+}
+
+.upload-batch-progress.has-failures progress {
+  accent-color: var(--danger);
+}
+
+.upload-batch-progress > small,
+.upload-batch-progress.empty > span {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.upload-batch-progress-failed {
+  color: var(--danger);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .upload-provider-table td small {
   display: block;
   margin-top: 4px;
@@ -800,6 +849,26 @@ h1 {
   margin-top: 22px;
 }
 
+.upload-detail-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.upload-detail-section-header > small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.upload-file-status-tabs {
+  margin-bottom: 0;
+}
+
+.upload-file-status-tabs .status-tab {
+  min-width: 82px;
+}
+
 .upload-detail-section .pill {
   margin-right: 6px;
 }
@@ -855,6 +924,24 @@ h1 {
   gap: 6px;
 }
 
+.upload-transfer-state {
+  display: grid;
+  flex: 1 1 150px;
+  min-width: 0;
+  gap: 4px;
+}
+
+.upload-transfer-activity {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.upload-transfer-activity.waiting {
+  color: var(--warning);
+}
+
 .upload-transfer-item small {
   min-width: 64px;
   max-width: 140px;
@@ -902,6 +989,10 @@ h1 {
   width: 30%;
   min-width: 260px;
   white-space: normal;
+}
+
+.upload-file-pagination {
+  margin-top: 0;
 }
 
 .card {

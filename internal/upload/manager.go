@@ -55,6 +55,18 @@ type ProviderVerifier interface {
 	Verify(ctx context.Context, remotePath string, size int64) (RemoteFile, bool, error)
 }
 
+// TransferRuntimeState is ephemeral progress information for an active
+// transfer. Persistent transfer status remains owned by the store.
+type TransferRuntimeState struct {
+	Phase         string `json:"phase,omitempty"`
+	StatusMessage string `json:"statusMessage,omitempty"`
+	WaitingUntil  string `json:"waitingUntil,omitempty"`
+}
+
+type providerWaitReporter interface {
+	setWaitReporter(func(message string, until time.Time))
+}
+
 type ProviderFactory func(ctx context.Context, target store.UploadBatchTarget) (Provider, error)
 
 type Manager struct {
@@ -70,6 +82,11 @@ type Manager struct {
 	active    map[int64]context.CancelFunc
 	authMu    sync.Mutex
 	authFlows map[string]*cookie115AuthFlow
+
+	cookie115GuardMu sync.Mutex
+	cookie115Guards  map[int64]*cookie115RequestGuard
+	runtimeMu        sync.RWMutex
+	transferRuntime  map[int64]TransferRuntimeState
 }
 
 func New(st *store.Store, logger *slog.Logger) *Manager {
@@ -87,13 +104,15 @@ func NewWithFactory(options Options, st *store.Store, logger *slog.Logger, facto
 func newManager(options Options, st *store.Store, logger *slog.Logger, factory ProviderFactory) *Manager {
 	options = normalizeOptions(options)
 	manager := &Manager{
-		options:   options,
-		store:     st,
-		logger:    logger,
-		active:    make(map[int64]context.CancelFunc),
-		authFlows: make(map[string]*cookie115AuthFlow),
-		builders:  make(map[string]ProviderBuilder),
-		providers: providerDescriptorMap(),
+		options:         options,
+		store:           st,
+		logger:          logger,
+		active:          make(map[int64]context.CancelFunc),
+		authFlows:       make(map[string]*cookie115AuthFlow),
+		builders:        make(map[string]ProviderBuilder),
+		providers:       providerDescriptorMap(),
+		cookie115Guards: make(map[int64]*cookie115RequestGuard),
+		transferRuntime: make(map[int64]TransferRuntimeState),
 	}
 	manager.registerBuiltInProviders()
 	if factory == nil {
@@ -162,8 +181,62 @@ func (m *Manager) registerBuiltInProviders() {
 		if strings.TrimSpace(cookieValue) == "" {
 			return nil, fmt.Errorf("115 Cookie is not configured for destination %q", target.ProviderName)
 		}
-		return newCookie115Provider(cookieValue, target.UserAgent)
+		provider, err := newCookie115Provider(cookieValue, target.UserAgent)
+		if err != nil {
+			return nil, err
+		}
+		provider.requestGuard = m.cookie115RequestGuard(target.ProviderID)
+		return provider, nil
 	})
+}
+
+func (m *Manager) cookie115RequestGuard(providerID int64) *cookie115RequestGuard {
+	if providerID <= 0 {
+		return newCookie115RequestGuard()
+	}
+	m.cookie115GuardMu.Lock()
+	defer m.cookie115GuardMu.Unlock()
+	guard := m.cookie115Guards[providerID]
+	if guard == nil {
+		guard = newCookie115RequestGuard()
+		m.cookie115Guards[providerID] = guard
+	}
+	return guard
+}
+
+func (m *Manager) TransferRuntimeStates() map[int64]TransferRuntimeState {
+	m.runtimeMu.RLock()
+	defer m.runtimeMu.RUnlock()
+	result := make(map[int64]TransferRuntimeState, len(m.transferRuntime))
+	for transferID, state := range m.transferRuntime {
+		result[transferID] = state
+	}
+	return result
+}
+
+func (m *Manager) setTransferRuntime(transferID int64, phase string, message string, waitingUntil time.Time) {
+	if transferID <= 0 {
+		return
+	}
+	state := TransferRuntimeState{
+		Phase:         strings.TrimSpace(phase),
+		StatusMessage: strings.TrimSpace(message),
+	}
+	if !waitingUntil.IsZero() {
+		state.WaitingUntil = waitingUntil.UTC().Format(time.RFC3339Nano)
+	}
+	m.runtimeMu.Lock()
+	m.transferRuntime[transferID] = state
+	m.runtimeMu.Unlock()
+}
+
+func (m *Manager) clearTransferRuntime(transferID int64) {
+	if transferID <= 0 {
+		return
+	}
+	m.runtimeMu.Lock()
+	delete(m.transferRuntime, transferID)
+	m.runtimeMu.Unlock()
 }
 
 // ProviderDescriptors reports the actual runtime registry, so an installed
@@ -370,13 +443,54 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 	if err != nil {
 		return err
 	}
-	if err := client.Check(ctx); err != nil {
-		return fmt.Errorf("check provider %s: %w", target.ProviderName, err)
-	}
 	transfers, err := m.store.ListUploadTransfersByTarget(ctx, target.ID)
 	if err != nil {
 		return err
 	}
+
+	var activeTransferID int64
+	var activePhase string
+	var activeMessage string
+	setActiveTransfer := func(transferID int64, phase string, message string) {
+		if activeTransferID != 0 && activeTransferID != transferID {
+			m.clearTransferRuntime(activeTransferID)
+		}
+		activeTransferID = transferID
+		activePhase = phase
+		activeMessage = message
+		m.setTransferRuntime(transferID, phase, message, time.Time{})
+	}
+	clearActiveTransfer := func() {
+		m.clearTransferRuntime(activeTransferID)
+		activeTransferID = 0
+		activePhase = ""
+		activeMessage = ""
+	}
+	defer clearActiveTransfer()
+
+	for _, transfer := range transfers {
+		if transfer.Status != store.UploadTransferCompleted {
+			setActiveTransfer(transfer.ID, "checking", "正在检查 115 上传服务")
+			break
+		}
+	}
+	if reporter, ok := client.(providerWaitReporter); ok {
+		reporter.setWaitReporter(func(message string, until time.Time) {
+			if activeTransferID == 0 {
+				return
+			}
+			if until.IsZero() {
+				m.setTransferRuntime(activeTransferID, activePhase, activeMessage, time.Time{})
+				return
+			}
+			m.setTransferRuntime(activeTransferID, "waiting", message, until)
+		})
+		defer reporter.setWaitReporter(nil)
+	}
+	if err := client.Check(ctx); err != nil {
+		return fmt.Errorf("check provider %s: %w", target.ProviderName, err)
+	}
+
 	failedTransfers := 0
 	var firstFailure error
 	recordFailure := func(transferID int64, transferErr error) error {
@@ -394,6 +508,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			continue
 		}
 		if transfer.Status == store.UploadTransferFailed && strings.Contains(transfer.ErrorSummary, uncertain115CommitMarker) {
+			setActiveTransfer(transfer.ID, "verifying", "正在确认 115 远端文件")
 			verificationErr := fmt.Errorf("%s: remote file is still not confirmed", uncertain115CommitMarker)
 			if verifier, ok := client.(ProviderVerifier); ok {
 				remote, found, err := verifier.Verify(ctx, transfer.RemotePath, transfer.BytesTotal)
@@ -412,6 +527,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			}
 			continue
 		}
+		setActiveTransfer(transfer.ID, "preparing", "正在准备上传")
 		if err := m.store.StartUploadTransfer(ctx, transfer.ID); err != nil {
 			return fmt.Errorf("start transfer %d: %w", transfer.ID, err)
 		}
@@ -430,6 +546,9 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			}
 			continue
 		}
+		activePhase = "uploading"
+		activeMessage = "正在上传到 115"
+		m.setTransferRuntime(transfer.ID, activePhase, activeMessage, time.Time{})
 		remote, err := client.Upload(ctx, transfer.LocalPath, transfer.RemotePath, transfer.BytesTotal, target.CollisionPolicy)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -444,6 +563,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 		if err := m.store.CompleteUploadTransfer(ctx, transfer.ID, remote.ID); err != nil {
 			return err
 		}
+		clearActiveTransfer()
 	}
 	if failedTransfers > 0 {
 		return fmt.Errorf("%d file(s) failed; first failure: %w", failedTransfers, firstFailure)

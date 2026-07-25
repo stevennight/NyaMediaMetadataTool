@@ -106,8 +106,17 @@ func (p *cookie115Provider) resolve115AppVersion(ctx context.Context) (string, e
 		return p.appVersion, p.appVersionResolutionErr
 	}
 
+	if err := p.waitRequest(ctx); err != nil {
+		return fallback115AppVersion, err
+	}
 	version, err := fetch115AppVersion(ctx, p.client, p.appVersionEndpoint)
 	version = strings.TrimSpace(version)
+	var statusErr *http115StatusError
+	if err == nil {
+		p.observe115HTTPStatus(http.StatusOK, 0)
+	} else if errors.As(err, &statusErr) {
+		p.observe115HTTPStatus(statusErr.statusCode, statusErr.retryAfter)
+	}
 	if err != nil || version == "" {
 		version = fallback115AppVersion
 	}
@@ -143,7 +152,10 @@ func fetch115AppVersion(ctx context.Context, client *pan115.Pan115Client, endpoi
 	}
 	defer response.RawBody().Close()
 	if response.IsError() {
-		return "", fmt.Errorf("115 app version API returned HTTP %d", response.StatusCode())
+		return "", &http115StatusError{
+			statusCode: response.StatusCode(),
+			retryAfter: parse115RetryAfter(response.Header().Get("Retry-After"), time.Now()),
+		}
 	}
 
 	result := appVersion115Response{}
@@ -191,14 +203,14 @@ func (p *cookie115Provider) rapidUploadOrByMultipart(ctx context.Context, dirID 
 	}
 	fastInfo, err := p.rapidUpload(ctx, digest.Size, fileName, dirID, digest.PreID, digest.QuickID, appVersion, file)
 	if err != nil {
-		if isRetryable115Error(err) {
+		if isRetryable115Error(err) && !is115RateLimitError(err) {
 			return &uncertain115CommitError{stage: "rapid upload initialization", err: err}
 		}
 		return fmt.Errorf("initialize rapid upload: %w", err)
 	}
 	matched, err := fastInfo.Ok()
 	if err != nil {
-		return fmt.Errorf("read rapid upload result: %w", err)
+		return &uncertain115CommitError{stage: "interpret rapid upload initialization response", err: err}
 	}
 	if matched {
 		return nil
@@ -225,13 +237,16 @@ func (p *cookie115Provider) uploadAvailable(ctx context.Context) (bool, error) {
 	if p.client.UserID != 0 && strings.TrimSpace(p.client.Userkey) != "" && p.client.UploadMetaInfo != nil {
 		return true, nil
 	}
+	if err := p.waitRequest(ctx); err != nil {
+		return false, err
+	}
 	result := pan115.UploadInfoResp{}
 	request := p.client.NewRequest().
 		SetContext(ctx).
 		ForceContentType("application/json;charset=UTF-8").
 		SetResult(&result)
 	response, err := request.Post(pan115.ApiUploadInfo)
-	if err := pan115.CheckErr(err, &result, response); err != nil {
+	if err := p.check115APIResponse(err, &result, response); err != nil {
 		return false, err
 	}
 	p.client.Userkey = result.Userkey
@@ -369,7 +384,7 @@ func (p *cookie115Provider) new115OSSBucket(params *pan115.UploadOSSParams, toke
 		options = append(options, oss.EnableMD5(true), oss.EnableCRC(true))
 	}
 	client, err := oss.New(
-		p.client.GetOSSEndpoint(p.client.UseInternalUpload),
+		p.client.GetOSSEndpoint(false),
 		token.AccessKeyID,
 		token.AccessKeySecret,
 		options...,
@@ -429,13 +444,16 @@ func (p *cookie115Provider) get115OSSToken(ctx context.Context) (*pan115.UploadO
 		copyOfToken := *p.ossToken
 		return &copyOfToken, nil
 	}
+	if err := p.waitRequest(ctx); err != nil {
+		return nil, err
+	}
 	result := pan115.UploadOSSTokenResp{}
 	request := p.client.NewRequest().
 		SetContext(ctx).
 		ForceContentType("application/json;charset=UTF-8").
 		SetResult(&result)
 	response, err := request.Get(pan115.ApiUploadOSSToken)
-	if err := pan115.CheckErr(err, &result, response); err != nil {
+	if err := p.check115APIResponse(err, &result, response); err != nil {
 		return nil, err
 	}
 	expiresAt := result.Expiration
@@ -486,6 +504,9 @@ func (p *cookie115Provider) rapidUpload(ctx context.Context, fileSize int64, fil
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if err := p.waitRequest(ctx); err != nil {
+			return nil, err
+		}
 		nowMilli := p.nowMilli
 		if nowMilli == nil {
 			nowMilli = func() int64 { return pan115.NowMilli().ToInt64() }
@@ -514,26 +535,35 @@ func (p *cookie115Provider) rapidUpload(ctx context.Context, fileSize int64, fil
 			SetHeaderVerbatim("Content-Type", "application/x-www-form-urlencoded").
 			SetDoNotParseResponse(true).
 			Post(pan115.ApiUploadInit)
-		if err != nil {
-			return nil, err
+		if statusErr := p.check115HTTPStatus(err, response); statusErr != nil {
+			if response != nil && response.RawBody() != nil {
+				_ = response.RawBody().Close()
+			}
+			return nil, statusErr
 		}
 		if response == nil || response.RawBody() == nil {
-			return nil, errors.New("115 upload init returned no response")
+			return nil, &uncertain115CommitError{
+				stage: "rapid upload initialization response",
+				err:   errors.New("115 upload init returned no response"),
+			}
 		}
 		body, readErr := io.ReadAll(response.RawBody())
 		closeErr := response.RawBody().Close()
 		if readErr != nil {
-			return nil, readErr
+			return nil, &uncertain115CommitError{stage: "read rapid upload initialization response", err: readErr}
 		}
 		if closeErr != nil {
-			return nil, closeErr
+			return nil, &uncertain115CommitError{stage: "close rapid upload initialization response", err: closeErr}
 		}
 		decrypted, err := ecCipher.Decrypt(body)
 		if err != nil {
-			return nil, err
+			return nil, &uncertain115CommitError{stage: "decrypt rapid upload initialization response", err: err}
 		}
 		result := pan115.UploadInitResp{}
-		if err := pan115.CheckErr(json.Unmarshal(decrypted, &result), &result, response); err != nil {
+		if err := json.Unmarshal(decrypted, &result); err != nil {
+			return nil, &uncertain115CommitError{stage: "decode rapid upload initialization response", err: err}
+		}
+		if err := p.check115APIResponse(nil, &result, response); err != nil {
 			return nil, err
 		}
 		result.SHA1 = fileID

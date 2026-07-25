@@ -28,6 +28,14 @@ func (passthrough115UploadCipher) Decrypt(cipherText []byte) ([]byte, error) {
 	return append([]byte(nil), cipherText...), nil
 }
 
+type failingDecrypt115UploadCipher struct {
+	passthrough115UploadCipher
+}
+
+func (failingDecrypt115UploadCipher) Decrypt([]byte) ([]byte, error) {
+	return nil, errors.New("invalid encrypted response")
+}
+
 func TestCookie115DynamicVersionDrivesUserAgentFormAndToken(t *testing.T) {
 	provider, err := newCookie115Provider("UID=user;CID=cid;SEID=seid;KID=kid", "")
 	if err != nil {
@@ -37,6 +45,7 @@ func TestCookie115DynamicVersionDrivesUserAgentFormAndToken(t *testing.T) {
 	provider.client.Userkey = "upload-user-key"
 	provider.newUploadCipher = func() (upload115Cipher, error) { return passthrough115UploadCipher{}, nil }
 	provider.nowMilli = func() int64 { return 1721867000123 }
+	provider.requestInterval = func() time.Duration { return 0 }
 
 	versionRequests := 0
 	initRequests := 0
@@ -160,6 +169,7 @@ func TestCookie115UploadInitCompletesSignChallenge(t *testing.T) {
 	provider.client.Userkey = "upload-user-key"
 	provider.newUploadCipher = func() (upload115Cipher, error) { return passthrough115UploadCipher{}, nil }
 	provider.nowMilli = func() int64 { return 1721867000123 }
+	provider.requestInterval = func() time.Duration { return 0 }
 
 	forms := make([]url.Values, 0, 2)
 	provider.client.Client.SetTransport(roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -217,6 +227,170 @@ func TestCookie115UploadInitHonorsContextCancellation(t *testing.T) {
 	_, err = provider.rapidUpload(ctx, 6, "small.bin", "7", "PREID", "FILEID", fallback115AppVersion, strings.NewReader("abcdef"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("rapid upload error=%v, want context canceled", err)
+	}
+}
+
+func TestCookie115UploadInitMarksInvalidHTTP200ResponseAsUncertain(t *testing.T) {
+	tests := []struct {
+		name      string
+		cipher    upload115Cipher
+		body      string
+		wantStage string
+	}{
+		{
+			name:      "invalid encrypted response",
+			cipher:    failingDecrypt115UploadCipher{},
+			body:      "not-valid-ciphertext",
+			wantStage: "decrypt rapid upload initialization response",
+		},
+		{
+			name:      "invalid JSON response",
+			cipher:    passthrough115UploadCipher{},
+			body:      "not-json",
+			wantStage: "decode rapid upload initialization response",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider, err := newCookie115Provider("UID=user;CID=cid;SEID=seid;KID=kid", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider.client.UserID = 123456
+			provider.client.Userkey = "upload-user-key"
+			provider.newUploadCipher = func() (upload115Cipher, error) { return test.cipher, nil }
+			provider.nowMilli = func() int64 { return 1721867000123 }
+			provider.requestInterval = func() time.Duration { return 0 }
+			provider.client.Client.SetTransport(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return jsonHTTPResponse(request, http.StatusOK, test.body), nil
+			}))
+
+			_, err = provider.rapidUpload(
+				context.Background(),
+				6,
+				"small.bin",
+				"7",
+				"PREID",
+				"FILEID",
+				fallback115AppVersion,
+				strings.NewReader("abcdef"),
+			)
+			var uncertain *uncertain115CommitError
+			if !errors.As(err, &uncertain) {
+				t.Fatalf("rapid upload error=%v, want uncertain115CommitError", err)
+			}
+			if uncertain.stage != test.wantStage {
+				t.Fatalf("uncertain stage=%q, want %q", uncertain.stage, test.wantStage)
+			}
+		})
+	}
+}
+
+func TestCookie115UploadMarksUnknownRapidStatusAsUncertain(t *testing.T) {
+	provider, err := newCookie115Provider("UID=user;CID=cid;SEID=seid;KID=kid", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.client.UserID = 123456
+	provider.client.Userkey = "upload-user-key"
+	provider.client.UploadMetaInfo = &pan115.UploadMetaInfo{
+		SizeLimit:     1024,
+		UploadAllowed: true,
+	}
+	provider.appVersion = fallback115AppVersion
+	provider.appVersionResolved = true
+	provider.newUploadCipher = func() (upload115Cipher, error) { return passthrough115UploadCipher{}, nil }
+	provider.nowMilli = func() int64 { return 1721867000123 }
+	provider.requestInterval = func() time.Duration { return 0 }
+	provider.client.Client.SetTransport(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return jsonHTTPResponse(request, http.StatusOK, `{"status":9,"statuscode":0}`), nil
+	}))
+
+	const contents = "abcdef"
+	file := writeCookie115TestFile(t, contents)
+	err = provider.rapidUploadOrByMultipart(
+		context.Background(),
+		"42",
+		"small.bin",
+		int64(len(contents)),
+		file,
+	)
+	var uncertain *uncertain115CommitError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("upload error=%v, want uncertain115CommitError", err)
+	}
+}
+
+func TestCookie115UploadProtocolGuardsEveryAPIRequest(t *testing.T) {
+	provider, err := newCookie115Provider("UID=user;CID=cid;SEID=seid;KID=kid", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.newUploadCipher = func() (upload115Cipher, error) { return passthrough115UploadCipher{}, nil }
+	provider.nowMilli = func() int64 { return 1721867000123 }
+
+	guardCalls := 0
+	provider.requestInterval = func() time.Duration {
+		guardCalls++
+		return 0
+	}
+	requestOrder := make([]string, 0, 4)
+	assertGuarded := func(name string, wantCalls int) {
+		t.Helper()
+		if guardCalls != wantCalls {
+			t.Fatalf("%s request observed %d guard calls, want %d", name, guardCalls, wantCalls)
+		}
+		requestOrder = append(requestOrder, name)
+	}
+	provider.client.Client.SetTransport(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case request.URL.Host == "appversion.115.com":
+			assertGuarded("version", 1)
+			return jsonHTTPResponse(request, http.StatusOK, `{"state":true,"data":{"win":{"version_code":"36.1.2.3"}}}`), nil
+		case request.URL.Host == "proapi.115.com" && request.URL.Path == "/app/uploadinfo":
+			assertGuarded("upload-info", 2)
+			return jsonHTTPResponse(request, http.StatusOK, `{"state":true,"user_id":123456,"userkey":"upload-user-key","size_limit":1073741824,"upload_allowed":true}`), nil
+		case request.URL.Host == "uplb.115.com" && request.URL.Path == "/4.0/initupload.php":
+			assertGuarded("init", 3)
+			return jsonHTTPResponse(request, http.StatusOK, `{"status":2,"statuscode":0,"pickcode":"matched"}`), nil
+		case request.URL.Host == "uplb.115.com" && request.URL.Path == "/3.0/gettoken.php":
+			assertGuarded("token", 4)
+			return jsonHTTPResponse(request, http.StatusOK, `{"StatusCode":"200","AccessKeyID":"access","AccessKeySecret":"secret","SecurityToken":"security"}`), nil
+		default:
+			t.Fatalf("unexpected 115 endpoint: %s", request.URL)
+			return nil, nil
+		}
+	}))
+
+	version, err := provider.resolve115AppVersion(context.Background())
+	if err != nil {
+		t.Fatalf("resolve app version: %v", err)
+	}
+	if available, err := provider.uploadAvailable(context.Background()); err != nil || !available {
+		t.Fatalf("upload available=(%v, %v)", available, err)
+	}
+	if _, err := provider.rapidUpload(
+		context.Background(),
+		6,
+		"small.bin",
+		"7",
+		"PREID",
+		"FILEID",
+		version,
+		strings.NewReader("abcdef"),
+	); err != nil {
+		t.Fatalf("rapid upload init: %v", err)
+	}
+	if _, err := provider.get115OSSToken(context.Background()); err != nil {
+		t.Fatalf("get OSS token: %v", err)
+	}
+
+	if got := strings.Join(requestOrder, ","); got != "version,upload-info,init,token" {
+		t.Fatalf("request order=%q", got)
+	}
+	if guardCalls != 4 {
+		t.Fatalf("guard calls=%d, want 4", guardCalls)
 	}
 }
 

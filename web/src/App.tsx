@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import {
   Activity,
@@ -236,6 +236,9 @@ type UploadBatch = {
   targetCount: number;
   completedTargets: number;
   failedTargets: number;
+  transferCount: number;
+  completedTransfers: number;
+  failedTransfers: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -279,6 +282,9 @@ type UploadTransfer = {
   bytesTotal: number;
   bytesTransferred: number;
   errorSummary: string;
+  phase?: string;
+  statusMessage?: string;
+  waitingUntil?: string;
 };
 
 type UploadBatchDetail = {
@@ -484,6 +490,8 @@ function outputProcessingFromConfig(config: AppConfig | null): OutputProcessingC
 }
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
 type UploadStatusFilter = 'all' | 'collecting' | 'pending' | 'running' | 'completed' | 'partial' | 'failed' | 'canceled';
+type UploadFileStatus = 'running' | 'pending' | 'failed' | 'canceled' | 'completed';
+type UploadFileStatusFilter = 'all' | UploadFileStatus;
 type UploadView = 'batches' | 'providers';
 type AuditTab = 'missing' | 'emby' | 'files';
 type ConfirmationRequest = {
@@ -634,6 +642,15 @@ const uploadStatusFilters: { value: UploadStatusFilter; label: string }[] = [
   { value: 'failed', label: '失败' },
   { value: 'canceled', label: '已取消' }
 ];
+const uploadFileStatusFilters: { value: UploadFileStatusFilter; label: string }[] = [
+  { value: 'all', label: '全部' },
+  { value: 'running', label: '上传中' },
+  { value: 'pending', label: '等待中' },
+  { value: 'failed', label: '失败' },
+  { value: 'canceled', label: '已取消' },
+  { value: 'completed', label: '已完成' }
+];
+const uploadFileStatusOrder: UploadFileStatus[] = ['running', 'pending', 'failed', 'canceled', 'completed'];
 
 const fallback115AuthDevices: UploadAuthDevice[] = [
   { code: 'web', name: '网页端' },
@@ -662,6 +679,8 @@ function uploadAuthDeviceName(code: string, providerType: string, descriptors: U
 const taskListRefreshIntervalMs = 5000;
 const taskDetailRefreshIntervalMs = 5000;
 const uploadListRefreshIntervalMs = 5000;
+const uploadDetailRefreshIntervalMs = 2000;
+const uploadDetailPageSize = 20;
 const desktopNotificationPollIntervalMs = 10000;
 const defaultRenameTemplate = '{show} - S{season:00}E{episode:00} - {title}';
 const auditPreferencesKey = 'nya.audit.preferences';
@@ -917,14 +936,100 @@ function uploadTargetScheduleLabel(target: UploadBatchTarget, timezone: string) 
   return isReady ? `已可执行，等待调度（${formatted}）` : `可执行时间：${formatted}`;
 }
 
+function uploadTransferIsWaiting(transfer: UploadTransfer) {
+  const phase = transfer.phase?.trim().toLowerCase() ?? '';
+  return Boolean(transfer.waitingUntil)
+    || phase.includes('wait')
+    || phase.includes('throttl')
+    || phase.includes('rate_limit');
+}
+
+function uploadTransferHasActivePhase(transfer: UploadTransfer) {
+  return Boolean(transfer.phase?.trim()) && !uploadTransferIsWaiting(transfer);
+}
+
+function effectiveUploadTransferStatus(transfer: UploadTransfer, target?: UploadBatchTarget): UploadFileStatus {
+  if (transfer.status === 'completed') return 'completed';
+  if (target?.status === 'failed') return 'failed';
+  if (target?.status === 'canceled') return 'canceled';
+  if (uploadTransferIsWaiting(transfer)) return 'pending';
+  if (uploadTransferHasActivePhase(transfer)) return 'running';
+  if (transfer.status === 'failed' && ['waiting', 'pending', 'running'].includes(target?.status ?? '')) return 'pending';
+  if (transfer.status === 'failed') return 'failed';
+  if (transfer.status === 'running') return 'running';
+  if (transfer.status === 'canceled') return 'canceled';
+  return 'pending';
+}
+
+function aggregateUploadFileStatus(transfers: UploadTransfer[], targetsByID: ReadonlyMap<number, UploadBatchTarget>): UploadFileStatus {
+  const statuses = new Set(transfers.map((transfer) => effectiveUploadTransferStatus(transfer, targetsByID.get(transfer.batchTargetId))));
+  return uploadFileStatusOrder.find((status) => statuses.has(status)) ?? 'pending';
+}
+
 function uploadTransferDisplay(transfer: UploadTransfer, target?: UploadBatchTarget) {
-  if (transfer.status === 'failed' && target?.status === 'pending') {
+  const status = effectiveUploadTransferStatus(transfer, target);
+  if (status === 'pending' && transfer.status === 'failed' && target?.status === 'pending' && !uploadTransferIsWaiting(transfer)) {
     return { className: uploadStatusPillClass('pending'), label: '等待自动重试' };
   }
-  if (transfer.status === 'failed' && target?.status === 'failed' && target.retryable) {
+  if (status === 'pending' && uploadTransferIsWaiting(transfer)) {
+    return { className: uploadStatusPillClass('pending'), label: '等待中' };
+  }
+  if (status === 'failed' && target?.retryable) {
     return { className: uploadStatusPillClass('failed'), label: '失败（可重试）' };
   }
-  return { className: uploadStatusPillClass(transfer.status), label: uploadStatusLabel(transfer.status) };
+  return { className: uploadStatusPillClass(status), label: uploadStatusLabel(status) };
+}
+
+function uploadTransferPhaseLabel(phase?: string) {
+  const normalized = phase?.trim().toLowerCase() ?? '';
+  switch (normalized) {
+    case '':
+      return '';
+    case 'waiting':
+    case 'rate_limit_wait':
+    case 'throttle_wait':
+    case 'throttled':
+      return '等待请求间隔';
+    case 'checking':
+      return '检查远端文件';
+    case 'preparing':
+      return '准备上传';
+    case 'hashing':
+      return '计算文件摘要';
+    case 'rapid_upload':
+      return '尝试秒传';
+    case 'upload_info':
+      return '获取上传信息';
+    case 'uploading':
+    case 'oss_upload':
+      return '上传数据';
+    case 'verifying':
+      return '验证远端文件';
+    case 'completing':
+      return '提交上传结果';
+    default:
+      return phase?.trim() ?? '';
+  }
+}
+
+function formatUploadWaitingCountdown(waitingUntil: string | undefined, now: number) {
+  const deadline = waitingUntil ? parseStoredTime(waitingUntil) : null;
+  if (!deadline) return '';
+  const remainingSeconds = Math.ceil((deadline.getTime() - now) / 1000);
+  if (remainingSeconds <= 0) return '即将继续';
+  if (remainingSeconds < 60) return `${remainingSeconds} 秒后继续`;
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = remainingSeconds % 60;
+  if (minutes < 60) return `${minutes} 分 ${seconds} 秒后继续`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} 小时 ${minutes % 60} 分后继续`;
+}
+
+function uploadTransferActivity(transfer: UploadTransfer, now: number) {
+  const countdown = formatUploadWaitingCountdown(transfer.waitingUntil, now);
+  const phase = uploadTransferPhaseLabel(transfer.phase) || (countdown ? '等待请求间隔' : '');
+  const message = transfer.statusMessage?.trim() ?? '';
+  return [phase, message && message !== phase ? message : '', countdown].filter(Boolean).join(' · ');
 }
 
 function renameStatusLabel(status: string) {
@@ -1123,6 +1228,7 @@ export function App() {
   const renamePreviewAbortRef = useRef<AbortController | null>(null);
   const refreshingUploadsRef = useRef(false);
   const refreshingUploadProvidersRef = useRef(false);
+  const uploadDetailRequestRef = useRef(0);
   const missingAuditRequestRef = useRef(0);
   const embyAuditRequestRef = useRef(0);
   const fileAuditRequestRef = useRef(0);
@@ -1713,9 +1819,12 @@ export function App() {
       const previous = observed.get(batch.id);
       observed.set(batch.id, batch.status);
       if (!previous || previous === batch.status || !['completed', 'partial', 'failed'].includes(batch.status)) continue;
-      const failed = batch.status === 'failed' || batch.status === 'partial';
+      const failed = batch.failedTargets > 0 || batch.status === 'failed';
+      const partiallyCompleted = batch.status === 'partial' && !failed;
       const name = batch.seriesPath.split(/[\\/]/).pop() || batch.seriesKey || `上传批次 #${batch.id}`;
-      void notifyDesktop(failed ? '上传批次需要处理' : '上传批次完成', failed ? `${name}：${batch.failedTargets} 个目标失败` : name).catch(() => {});
+      const title = failed ? '上传批次需要处理' : partiallyCompleted ? '上传批次部分完成' : '上传批次完成';
+      const message = failed && batch.failedTargets > 0 ? `${name}：${batch.failedTargets} 个目标失败` : name;
+      void notifyDesktop(title, message).catch(() => {});
     }
   }
 
@@ -1833,12 +1942,21 @@ export function App() {
     }
   }
 
-  async function loadUploadBatchDetail(batchID: number) {
+  async function loadUploadBatchDetail(batchID: number, options: { open?: boolean; signal?: AbortSignal } = {}) {
+    const requestID = ++uploadDetailRequestRef.current;
+    const open = options.open ?? true;
     try {
-      const response = await fetch(`/api/uploads/${batchID}`);
+      const response = await fetch(`/api/uploads/${batchID}`, { signal: options.signal });
       if (!response.ok) throw new Error(await readErrorMessage(response));
-      setSelectedUploadBatch(await response.json() as UploadBatchDetail);
+      const detail = await response.json() as UploadBatchDetail;
+      if (requestID !== uploadDetailRequestRef.current) return;
+      if (open) {
+        setSelectedUploadBatch(detail);
+      } else {
+        setSelectedUploadBatch((current) => current?.batch.id === batchID ? detail : current);
+      }
     } catch (err) {
+      if (options.signal?.aborted || requestID !== uploadDetailRequestRef.current) return;
       setError(err instanceof Error ? err.message : '加载上传批次详情失败');
     }
   }
@@ -1999,7 +2117,7 @@ export function App() {
       const response = await fetch(`/api/uploads/targets/${target.id}/${action}`, { method: 'POST' });
       if (!response.ok) throw new Error(await readErrorMessage(response));
       setNotice(action === 'retry' ? '上传目标已重新排队。' : '上传目标已取消。');
-      if (selectedUploadBatch) await loadUploadBatchDetail(selectedUploadBatch.batch.id);
+      if (selectedUploadBatch) await loadUploadBatchDetail(selectedUploadBatch.batch.id, { open: false });
       await refreshUploads();
     } catch (err) {
       setError(err instanceof Error ? err.message : '更新上传目标失败');
@@ -2071,8 +2189,21 @@ export function App() {
   useEffect(() => {
     if (!selectedUploadBatch) return;
     const batchID = selectedUploadBatch.batch.id;
-    const interval = window.setInterval(() => void loadUploadBatchDetail(batchID), uploadListRefreshIntervalMs);
-    return () => window.clearInterval(interval);
+    let active = true;
+    let timer: number | undefined;
+    let abortController: AbortController | null = null;
+    async function pollUploadBatchDetail() {
+      abortController = new AbortController();
+      await loadUploadBatchDetail(batchID, { open: false, signal: abortController.signal });
+      abortController = null;
+      if (active) timer = window.setTimeout(() => void pollUploadBatchDetail(), uploadDetailRefreshIntervalMs);
+    }
+    timer = window.setTimeout(() => void pollUploadBatchDetail(), uploadDetailRefreshIntervalMs);
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+      abortController?.abort();
+    };
   }, [selectedUploadBatch?.batch.id]);
 
   useEffect(() => {
@@ -3873,8 +4004,8 @@ export function App() {
                 <div className="filter-actions"><button type="submit" disabled={refreshingUploads}>过滤</button><button className="secondary" type="button" disabled={refreshingUploads} onClick={resetUploadFilters}>重置</button></div>
               </form>
               <div className="task-table-wrap">
-                <table className="task-table">
-                  <thead><tr><th>ID</th><th>状态</th><th>番剧目录</th><th>文件</th><th>目标</th><th>完成</th><th>失败</th><th>可上传时间</th><th>操作</th></tr></thead>
+                <table className="task-table upload-batch-table">
+                  <thead><tr><th>ID</th><th>状态</th><th>番剧目录</th><th>文件</th><th>目标</th><th>进度</th><th>可上传时间</th><th>操作</th></tr></thead>
                   <tbody>
                     {uploadBatches.length ? uploadBatches.map((batch) => (
                       <tr key={batch.id} tabIndex={0} onClick={() => void loadUploadBatchDetail(batch.id)} onKeyDown={(event) => { if (event.target !== event.currentTarget || !['Enter', ' '].includes(event.key)) return; event.preventDefault(); void loadUploadBatchDetail(batch.id); }} title="按 Enter 或空格打开详情">
@@ -3883,12 +4014,11 @@ export function App() {
                         <td className="path-cell">{batch.seriesPath}</td>
                         <td>{batch.fileCount}</td>
                         <td>{batch.targetCount}</td>
-                        <td>{batch.completedTargets}</td>
-                        <td>{batch.failedTargets}</td>
+                        <td><UploadBatchProgress batch={batch} /></td>
                         <td>{formatStoredTime(batch.readyAt, displayTimezone)}</td>
                         <td><button className="secondary" type="button" onClick={(event) => { event.stopPropagation(); void loadUploadBatchDetail(batch.id); }}>详情</button></td>
                       </tr>
-                    )) : <tr><td colSpan={9} className="empty-cell">暂无上传批次。</td></tr>}
+                    )) : <tr><td colSpan={8} className="empty-cell">暂无上传批次。</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -4249,9 +4379,92 @@ function UploadCookieModal(props: { provider: UploadProvider; devices: UploadAut
   );
 }
 
+function UploadBatchProgress(props: { batch: UploadBatch }) {
+  const transferCount = Math.max(0, Number(props.batch.transferCount) || 0);
+  const completedTransfers = Math.min(transferCount, Math.max(0, Number(props.batch.completedTransfers) || 0));
+  const failedTransfers = Math.max(0, Number(props.batch.failedTransfers) || 0);
+  const targetSummary = `目标 ${props.batch.completedTargets}/${props.batch.targetCount}${props.batch.failedTargets ? `，失败 ${props.batch.failedTargets}` : ''}`;
+  if (transferCount === 0) {
+    const emptyLabel = props.batch.status === 'collecting'
+      ? '正在收集文件'
+      : props.batch.status === 'completed'
+        ? '无需传输'
+        : props.batch.status === 'canceled'
+          ? '已取消'
+          : ['failed', 'partial'].includes(props.batch.status)
+            ? '没有可完成的传输'
+            : '等待传输信息';
+    return (
+      <div className="upload-batch-progress empty">
+        <span>{emptyLabel}</span>
+        <small>{targetSummary}</small>
+      </div>
+    );
+  }
+  const collecting = props.batch.status === 'collecting';
+  const hasFailures = failedTransfers > 0 || props.batch.failedTargets > 0;
+  return (
+    <div className={hasFailures ? 'upload-batch-progress has-failures' : 'upload-batch-progress'}>
+      <div className="upload-batch-progress-label">
+        <span><strong>{completedTransfers}</strong> / {transferCount}</span>
+        {failedTransfers > 0 && <span className="upload-batch-progress-failed">失败 {failedTransfers}</span>}
+      </div>
+      {collecting
+        ? <progress max={transferCount} aria-label="批次仍在收集文件，传输总数可能变化" />
+        : <progress max={transferCount} value={completedTransfers} aria-label={`已完成 ${completedTransfers} / ${transferCount} 个传输`} />}
+      <small>{targetSummary}</small>
+    </div>
+  );
+}
+
 function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: string; actionTargetID: number | null; onClose: () => void; onRetry: (target: UploadBatchTarget) => void; onCancel: (target: UploadBatchTarget) => void }) {
-  const targetsByID = new Map(props.detail.targets.map((target) => [target.id, target]));
+  const [fileStatusFilter, setFileStatusFilter] = useState<UploadFileStatusFilter>('all');
+  const [filePage, setFilePage] = useState(1);
+  const [countdownNow, setCountdownNow] = useState(() => Date.now());
+  const targetsByID = useMemo(() => new Map(props.detail.targets.map((target) => [target.id, target])), [props.detail.targets]);
+  const transfersByFileID = useMemo(() => {
+    const grouped = new Map<number, UploadTransfer[]>();
+    for (const transfer of props.detail.transfers) {
+      const transfers = grouped.get(transfer.batchFileId);
+      if (transfers) transfers.push(transfer);
+      else grouped.set(transfer.batchFileId, [transfer]);
+    }
+    return grouped;
+  }, [props.detail.transfers]);
+  const fileRows = useMemo(() => props.detail.files.map((file, index) => {
+    const transfers = transfersByFileID.get(file.id) ?? [];
+    return { file, transfers, status: aggregateUploadFileStatus(transfers, targetsByID), index };
+  }).sort((left, right) => {
+    const statusOrder = uploadFileStatusOrder.indexOf(left.status) - uploadFileStatusOrder.indexOf(right.status);
+    if (statusOrder !== 0) return statusOrder;
+    const pathOrder = left.file.relativePath.localeCompare(right.file.relativePath, undefined, { numeric: true, sensitivity: 'base' });
+    return pathOrder || left.index - right.index;
+  }), [props.detail.files, targetsByID, transfersByFileID]);
+  const filteredFileRows = useMemo(
+    () => fileStatusFilter === 'all' ? fileRows : fileRows.filter((row) => row.status === fileStatusFilter),
+    [fileRows, fileStatusFilter]
+  );
+  const filePageCount = Math.max(1, Math.ceil(filteredFileRows.length / uploadDetailPageSize));
+  const safeFilePage = Math.min(filePage, filePageCount);
+  const pagedFileRows = filteredFileRows.slice((safeFilePage - 1) * uploadDetailPageSize, safeFilePage * uploadDetailPageSize);
+  const waitingTransferCount = props.detail.transfers.filter(uploadTransferIsWaiting).length;
   const waitingRetryCount = props.detail.targets.filter((target) => target.status === 'pending' && target.errorSummary).length;
+
+  useEffect(() => {
+    setFileStatusFilter('all');
+    setFilePage(1);
+  }, [props.detail.batch.id]);
+
+  useEffect(() => {
+    if (filePage > filePageCount) setFilePage(filePageCount);
+  }, [filePage, filePageCount]);
+
+  useEffect(() => {
+    setCountdownNow(Date.now());
+    const interval = window.setInterval(() => setCountdownNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [props.detail.batch.id]);
+
   return (
     <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
       <section className="modal-card upload-batch-detail-modal" role="dialog" aria-modal="true" aria-labelledby="upload-batch-detail-title" onClick={(event) => event.stopPropagation()}>
@@ -4261,10 +4474,14 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
           <Row label="可上传时间" value={formatStoredTime(props.detail.batch.readyAt, props.timezone)} />
           <Row label="文件 / 目标" value={`${props.detail.files.length} / ${props.detail.targets.length}`} />
         </div>
-        <p className={waitingRetryCount ? 'upload-detail-refresh-note retrying' : 'upload-detail-refresh-note'} role="status">
-          <RefreshCw size={14} aria-hidden="true" />
-          {waitingRetryCount ? `${waitingRetryCount} 个目标正在等待自动重试；会保留上次错误供排查。` : '详情每 5 秒自动刷新。'}
-        </p>
+        {(waitingTransferCount > 0 || waitingRetryCount > 0) && (
+          <p className="upload-detail-refresh-note retrying" role="status">
+            <RefreshCw size={14} aria-hidden="true" />
+            {waitingTransferCount > 0
+              ? `${waitingTransferCount} 个传输正在等待 115 请求间隔；倒计时见文件状态。`
+              : `${waitingRetryCount} 个目标正在等待自动重试；会保留上次错误供排查。`}
+          </p>
+        )}
         <section className="upload-detail-section">
           <h3>目标</h3>
           <div className="task-table-wrap">
@@ -4284,15 +4501,34 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
           </div>
         </section>
         <section className="upload-detail-section">
-          <h3>文件</h3>
+          <div className="upload-detail-section-header">
+            <h3>文件</h3>
+            <small>显示 {filteredFileRows.length} / {fileRows.length}</small>
+          </div>
+          <div className="task-status-tabs upload-file-status-tabs" role="group" aria-label="文件传输状态过滤">
+            {uploadFileStatusFilters.map((status) => (
+              <button
+                className={fileStatusFilter === status.value ? 'status-tab active' : 'status-tab'}
+                type="button"
+                key={status.value}
+                aria-pressed={fileStatusFilter === status.value}
+                onClick={() => {
+                  setFileStatusFilter(status.value);
+                  setFilePage(1);
+                }}
+              >
+                {status.label}
+              </button>
+            ))}
+          </div>
           <div className="task-table-wrap">
             <table className="task-table upload-file-table">
               <thead><tr><th>相对路径</th><th>类型</th><th>大小</th><th>传输状态</th><th>最近错误</th></tr></thead>
-              <tbody>{props.detail.files.map((file) => {
-                const transfers = props.detail.transfers.filter((transfer) => transfer.batchFileId === file.id);
+              <tbody>{pagedFileRows.length ? pagedFileRows.map(({ file, transfers }) => {
                 const transferErrors = transfers.flatMap((transfer) => {
                   const target = targetsByID.get(transfer.batchTargetId);
-                  const summary = transfer.errorSummary || (transfer.status === 'failed' ? target?.errorSummary : '');
+                  const status = effectiveUploadTransferStatus(transfer, target);
+                  const summary = transfer.errorSummary || (['failed', 'canceled'].includes(status) ? target?.errorSummary : '');
                   return summary ? [{ transfer, target, summary }] : [];
                 });
                 return <tr key={file.id}>
@@ -4302,12 +4538,26 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
                   <td>{transfers.length ? <div className="upload-transfer-list">{transfers.map((transfer) => {
                     const target = targetsByID.get(transfer.batchTargetId);
                     const display = uploadTransferDisplay(transfer, target);
-                    return <div className="upload-transfer-item" key={transfer.id}><small title={target?.remoteRoot}>{target?.providerName || `目标 #${transfer.batchTargetId}`}</small><span className={display.className}>{display.label}</span></div>;
+                    const activity = uploadTransferActivity(transfer, countdownNow);
+                    return <div className="upload-transfer-item" key={transfer.id}>
+                      <small title={target?.remoteRoot}>{target?.providerName || `目标 #${transfer.batchTargetId}`}</small>
+                      <div className="upload-transfer-state">
+                        <span className={display.className}>{display.label}</span>
+                        {activity && <span className={uploadTransferIsWaiting(transfer) ? 'upload-transfer-activity waiting' : 'upload-transfer-activity'}>{activity}</span>}
+                      </div>
+                    </div>;
                   })}</div> : '-'}</td>
                   <td className="upload-error-cell">{transferErrors.length ? <div className="upload-transfer-errors">{transferErrors.map(({ transfer, target, summary }) => <div className="upload-transfer-error" key={transfer.id}><strong>{target?.providerName || `目标 #${transfer.batchTargetId}`}</strong><span>{summary}</span></div>)}</div> : '-'}</td>
                 </tr>;
-              })}</tbody>
+              }) : <tr><td colSpan={5} className="empty-cell">{fileStatusFilter === 'all' ? '暂无上传文件。' : '当前状态下没有文件。'}</td></tr>}</tbody>
             </table>
+          </div>
+          <div className="pagination-bar upload-file-pagination">
+            <span aria-live="polite">共 {filteredFileRows.length} 条，第 {safeFilePage} / {filePageCount} 页</span>
+            <div className="inline-actions">
+              <button className="secondary" type="button" disabled={safeFilePage <= 1} onClick={() => setFilePage(safeFilePage - 1)}>上一页</button>
+              <button className="secondary" type="button" disabled={safeFilePage >= filePageCount} onClick={() => setFilePage(safeFilePage + 1)}>下一页</button>
+            </div>
           </div>
         </section>
       </section>

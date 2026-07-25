@@ -16,6 +16,7 @@ import (
 
 	pan115 "github.com/SheltonZhu/115driver/pkg/driver"
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
+	"github.com/go-resty/resty/v2"
 
 	"NyaMediaMetadataTool/internal/store"
 )
@@ -26,14 +27,125 @@ const (
 )
 
 const (
-	min115RequestInterval = 250 * time.Millisecond
-	max115RequestInterval = 750 * time.Millisecond
-	max115ListRetries     = 3
-	max115UploadAttempts  = 3
-	list115PageSize       = 1150
+	min115RequestInterval       = 2 * time.Second
+	max115RequestInterval       = 5 * time.Second
+	initial115RateLimitCooldown = 15 * time.Second
+	max115RateLimitCooldown     = 5 * time.Minute
+	max115ListRetries           = 3
+	max115UploadAttempts        = 3
+	list115PageSize             = 1150
 )
 
 var err115RemoteFileNotVisible = errors.New("115 uploaded file is not visible yet")
+
+type cookie115RequestGuard struct {
+	mu                 sync.Mutex
+	lastRequest        time.Time
+	blockedUntil       time.Time
+	rateLimitStrikes   int
+	rateLimitDelayFunc func(int) time.Duration
+}
+
+func newCookie115RequestGuard() *cookie115RequestGuard {
+	return &cookie115RequestGuard{}
+}
+
+func (guard *cookie115RequestGuard) wait(ctx context.Context, interval time.Duration, reporter func(message string, until time.Time)) error {
+	reported := false
+	defer func() {
+		if reported && reporter != nil {
+			reporter("", time.Time{})
+		}
+	}()
+
+	for {
+		now := time.Now()
+		notBefore := now
+		message := "为避免 115 请求过于频繁，正在等待请求间隔"
+
+		guard.mu.Lock()
+		if !guard.lastRequest.IsZero() {
+			notBefore = guard.lastRequest.Add(interval)
+		}
+		if guard.blockedUntil.After(notBefore) {
+			notBefore = guard.blockedUntil
+			message = "115 已触发访问保护，正在等待冷却后重试"
+		}
+		if !notBefore.After(now) {
+			guard.lastRequest = now
+			guard.mu.Unlock()
+			return nil
+		}
+		guard.mu.Unlock()
+
+		if reporter != nil {
+			reporter(message, notBefore)
+			reported = true
+		}
+		timer := time.NewTimer(time.Until(notBefore))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (guard *cookie115RequestGuard) observeHTTPStatus(status int, retryAfter time.Duration) {
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+
+	now := time.Now()
+	if status != http.StatusMethodNotAllowed && status != http.StatusTooManyRequests {
+		if status >= http.StatusOK && status < http.StatusBadRequest && !guard.blockedUntil.After(now) {
+			guard.rateLimitStrikes = 0
+		}
+		return
+	}
+
+	guard.rateLimitStrikes++
+	delay := rateLimit115Cooldown(guard.rateLimitStrikes)
+	if guard.rateLimitDelayFunc != nil {
+		delay = guard.rateLimitDelayFunc(guard.rateLimitStrikes)
+	}
+	if retryAfter > delay {
+		delay = retryAfter
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	if delay > max115RateLimitCooldown {
+		delay = max115RateLimitCooldown
+	}
+	blockedUntil := now.Add(delay)
+	if blockedUntil.After(guard.blockedUntil) {
+		guard.blockedUntil = blockedUntil
+	}
+}
+
+func (guard *cookie115RequestGuard) cooldownUntil() time.Time {
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	return guard.blockedUntil
+}
+
+func rateLimit115Cooldown(strikes int) time.Duration {
+	if strikes < 1 {
+		strikes = 1
+	}
+	delay := initial115RateLimitCooldown
+	for index := 1; index < strikes && delay < max115RateLimitCooldown; index++ {
+		if delay > max115RateLimitCooldown/2 {
+			return max115RateLimitCooldown
+		}
+		delay *= 2
+	}
+	if delay > max115RateLimitCooldown {
+		return max115RateLimitCooldown
+	}
+	return delay
+}
 
 type cookie115Provider struct {
 	client                  *pan115.Pan115Client
@@ -45,9 +157,9 @@ type cookie115Provider struct {
 	appVersionResolutionErr error
 	newUploadCipher         func() (upload115Cipher, error)
 	nowMilli                func() int64
-	requestMu               sync.Mutex
-	lastRequest             time.Time
+	requestGuard            *cookie115RequestGuard
 	requestInterval         func() time.Duration
+	waitReporter            func(message string, until time.Time)
 	directoryMu             sync.RWMutex
 	directoryIDs            map[string]string
 	uploadContent           func(context.Context, string, string, int64, *os.File) error
@@ -91,6 +203,7 @@ func newCookie115Provider(cookieValue string, userAgent string) (*cookie115Provi
 		appVersion:          fallback115AppVersion,
 		newUploadCipher:     newECDH115UploadCipher,
 		nowMilli:            func() int64 { return pan115.NowMilli().ToInt64() },
+		requestGuard:        newCookie115RequestGuard(),
 		directoryIDs:        map[string]string{"/": "0"},
 		ossHTTPClient:       new115OSSHTTPClient(),
 	}, nil
@@ -102,10 +215,7 @@ func (p *cookie115Provider) Check(ctx context.Context) error {
 	}
 	var err error
 	for attempt := 0; attempt < max115ListRetries; attempt++ {
-		if err = p.waitRequest(ctx); err != nil {
-			return err
-		}
-		err = check115FileAPI(ctx, p.client)
+		err = p.check115FileAPI(ctx)
 		if err == nil {
 			return nil
 		}
@@ -123,15 +233,24 @@ func (p *cookie115Provider) Check(ctx context.Context) error {
 
 type http115StatusError struct {
 	statusCode int
+	retryAfter time.Duration
 }
 
 func (err *http115StatusError) Error() string {
-	return fmt.Sprintf("115 file API returned HTTP %d", err.statusCode)
+	switch err.statusCode {
+	case http.StatusMethodNotAllowed, http.StatusTooManyRequests:
+		return fmt.Sprintf("115 request was temporarily blocked (HTTP %d)", err.statusCode)
+	default:
+		return fmt.Sprintf("115 API returned HTTP %d", err.statusCode)
+	}
 }
 
-func check115FileAPI(ctx context.Context, client *pan115.Pan115Client) error {
+func (p *cookie115Provider) check115FileAPI(ctx context.Context) error {
+	if err := p.waitRequest(ctx); err != nil {
+		return err
+	}
 	result := pan115.FileListResp{}
-	response, err := client.NewRequest().
+	response, err := p.client.NewRequest().
 		SetContext(ctx).
 		SetQueryParams(map[string]string{
 			"aid":              "1",
@@ -150,22 +269,66 @@ func check115FileAPI(ctx context.Context, client *pan115.Pan115Client) error {
 		SetResult(&result).
 		ForceContentType("application/json;charset=UTF-8").
 		Get(pan115.ApiFileList)
-	if err != nil {
-		return err
-	}
-	if response == nil {
-		return errors.New("115 file API returned no response")
-	}
-	if response.IsError() && isRetryable115Status(response.StatusCode()) {
-		return &http115StatusError{statusCode: response.StatusCode()}
-	}
-	if err := pan115.CheckErr(nil, &result, response); err != nil {
+	if err := p.check115APIResponse(err, &result, response); err != nil {
 		return err
 	}
 	if !result.State {
 		return errors.New("115 file API returned an invalid response")
 	}
 	return nil
+}
+
+func (p *cookie115Provider) check115APIResponse(requestErr error, result pan115.ResultWithErr, response *resty.Response) error {
+	if err := p.check115HTTPStatus(requestErr, response); err != nil {
+		return err
+	}
+	if err := pan115.CheckErr(nil, result, response); err != nil {
+		return err
+	}
+	p.observe115HTTPStatus(response.StatusCode(), 0)
+	return nil
+}
+
+func (p *cookie115Provider) check115HTTPStatus(requestErr error, response *resty.Response) error {
+	if requestErr != nil {
+		return requestErr
+	}
+	if response == nil {
+		return errors.New("115 API returned no response")
+	}
+	status := response.StatusCode()
+	if response.IsError() {
+		retryAfter := parse115RetryAfter(response.Header().Get("Retry-After"), time.Now())
+		p.observe115HTTPStatus(status, retryAfter)
+		return &http115StatusError{statusCode: status, retryAfter: retryAfter}
+	}
+	return nil
+}
+
+func (p *cookie115Provider) observe115HTTPStatus(status int, retryAfter time.Duration) {
+	guard := p.requestGuard
+	if guard == nil {
+		guard = newCookie115RequestGuard()
+		p.requestGuard = guard
+	}
+	guard.observeHTTPStatus(status, retryAfter)
+}
+
+func parse115RetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if retryAt, err := http.ParseTime(value); err == nil && retryAt.After(now) {
+		return retryAt.Sub(now)
+	}
+	return 0
 }
 
 func (p *cookie115Provider) List(ctx context.Context, remotePath string) ([]RemoteEntry, error) {
@@ -221,9 +384,6 @@ func (p *cookie115Provider) Upload(ctx context.Context, localPath string, remote
 		case "fail":
 			return RemoteFile{}, fmt.Errorf("115 target already exists with a different size: %s", remotePath)
 		default:
-			if err := p.waitRequest(ctx); err != nil {
-				return RemoteFile{}, err
-			}
 			if err := p.delete115(ctx, existing.FileID); err != nil {
 				return RemoteFile{}, fmt.Errorf("replace existing 115 file %s: %w", remotePath, err)
 			}
@@ -338,14 +498,15 @@ func (p *cookie115Provider) waitUploadRetry(ctx context.Context, attempt int) er
 	if delay <= 0 {
 		return ctx.Err()
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
+	until := time.Now().Add(delay)
+	message := "网络请求暂时失败，正在等待重试"
+	if p.requestGuard != nil {
+		if blockedUntil := p.requestGuard.cooldownUntil(); blockedUntil.After(until) {
+			until = blockedUntil
+			message = "115 已触发访问保护，正在等待冷却后重试"
+		}
 	}
+	return p.waitUntil(ctx, until, message)
 }
 
 func (p *cookie115Provider) ensureDirectory(ctx context.Context, remotePath string) (string, error) {
@@ -375,9 +536,6 @@ func (p *cookie115Provider) ensureDirectory(ctx context.Context, remotePath stri
 			currentID = child.FileID
 			p.cacheDirectoryID(currentPath, currentID)
 			continue
-		}
-		if err := p.waitRequest(ctx); err != nil {
-			return "", err
 		}
 		createdID, err := p.mkdir115(ctx, currentID, segment)
 		if err == nil && strings.TrimSpace(createdID) != "" {
@@ -419,7 +577,7 @@ func (p *cookie115Provider) resolveDirectory(ctx context.Context, remotePath str
 		SetResult(&result).
 		ForceContentType("application/json;charset=UTF-8").
 		Get(pan115.ApiDirName2CID)
-	if err := pan115.CheckErr(err, &result, response); err != nil {
+	if err := p.check115APIResponse(err, &result, response); err != nil {
 		return "", fmt.Errorf("resolve 115 directory %s: %w", remotePath, err)
 	}
 	id := fmt.Sprintf("%v", result.CategoryID)
@@ -431,6 +589,9 @@ func (p *cookie115Provider) resolveDirectory(ctx context.Context, remotePath str
 }
 
 func (p *cookie115Provider) mkdir115(ctx context.Context, parentID string, name string) (string, error) {
+	if err := p.waitRequest(ctx); err != nil {
+		return "", err
+	}
 	result := pan115.MkdirResp{}
 	response, err := p.client.NewRequest().
 		SetContext(ctx).
@@ -438,13 +599,16 @@ func (p *cookie115Provider) mkdir115(ctx context.Context, parentID string, name 
 		SetResult(&result).
 		ForceContentType("application/json;charset=UTF-8").
 		Post(pan115.ApiDirAdd)
-	if err := pan115.CheckErr(err, &result, response); err != nil {
+	if err := p.check115APIResponse(err, &result, response); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%v", result.CategoryID), nil
 }
 
 func (p *cookie115Provider) delete115(ctx context.Context, fileID string) error {
+	if err := p.waitRequest(ctx); err != nil {
+		return err
+	}
 	result := pan115.BasicResp{}
 	response, err := p.client.NewRequest().
 		SetContext(ctx).
@@ -452,7 +616,7 @@ func (p *cookie115Provider) delete115(ctx context.Context, fileID string) error 
 		SetResult(&result).
 		ForceContentType("application/json;charset=UTF-8").
 		Post(pan115.ApiFileDelete)
-	return pan115.CheckErr(err, &result, response)
+	return p.check115APIResponse(err, &result, response)
 }
 
 func (p *cookie115Provider) cachedDirectoryID(remotePath string) (string, bool) {
@@ -556,7 +720,7 @@ func (p *cookie115Provider) listPage(ctx context.Context, parentID string, provi
 			SetResult(&result).
 			ForceContentType("application/json;charset=UTF-8").
 			Get(pan115.ApiFileList)
-		err = pan115.CheckErr(requestErr, &result, response)
+		err = p.check115APIResponse(requestErr, &result, response)
 		if err == nil && string(result.CategoryID) != parentID {
 			err = fmt.Errorf("115 directory response CID %q does not match requested CID %q", result.CategoryID, parentID)
 		}
@@ -595,38 +759,46 @@ func (p *cookie115Provider) waitForFile(ctx context.Context, parentID string, na
 		if attempt == 3 {
 			break
 		}
-		timer := time.NewTimer(time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return RemoteFile{}, ctx.Err()
-		case <-timer.C:
+		if err := p.waitUntil(ctx, time.Now().Add(time.Second), "上传已提交，正在等待 115 文件可见"); err != nil {
+			return RemoteFile{}, err
 		}
 	}
 	return RemoteFile{}, fmt.Errorf("%w: %s", err115RemoteFileNotVisible, name)
 }
 
 func (p *cookie115Provider) waitRequest(ctx context.Context) error {
-	p.requestMu.Lock()
-	defer p.requestMu.Unlock()
-	if !p.lastRequest.IsZero() {
-		interval := random115RequestInterval()
-		if p.requestInterval != nil {
-			interval = p.requestInterval()
-		}
-		waitFor := p.lastRequest.Add(interval).Sub(time.Now())
-		if waitFor > 0 {
-			timer := time.NewTimer(waitFor)
-			defer timer.Stop()
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-timer.C:
-			}
-		}
+	interval := random115RequestInterval()
+	if p.requestInterval != nil {
+		interval = p.requestInterval()
 	}
-	p.lastRequest = time.Now()
-	return nil
+	guard := p.requestGuard
+	if guard == nil {
+		guard = newCookie115RequestGuard()
+		p.requestGuard = guard
+	}
+	return guard.wait(ctx, interval, p.waitReporter)
+}
+
+func (p *cookie115Provider) waitUntil(ctx context.Context, until time.Time, message string) error {
+	if !until.After(time.Now()) {
+		return ctx.Err()
+	}
+	if p.waitReporter != nil {
+		p.waitReporter(message, until)
+		defer p.waitReporter("", time.Time{})
+	}
+	timer := time.NewTimer(time.Until(until))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (p *cookie115Provider) setWaitReporter(reporter func(message string, until time.Time)) {
+	p.waitReporter = reporter
 }
 
 func random115RequestInterval() time.Duration {
@@ -664,6 +836,15 @@ func isRetryable115Error(err error) bool {
 		}
 	}
 	return false
+}
+
+func is115RateLimitError(err error) bool {
+	var statusErr *http115StatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.statusCode == http.StatusMethodNotAllowed ||
+		statusErr.statusCode == http.StatusTooManyRequests
 }
 
 func isRetryable115Status(status int) bool {

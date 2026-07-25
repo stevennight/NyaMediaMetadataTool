@@ -75,7 +75,7 @@ func TestCheck115FileAPIRejectsMalformedResponse(t *testing.T) {
 		return jsonHTTPResponse(request, http.StatusOK, `not-json`), nil
 	}))
 
-	err = check115FileAPI(context.Background(), provider.client)
+	err = provider.check115FileAPI(context.Background())
 	if err == nil {
 		t.Fatal("malformed response should not pass the provider check")
 	}
@@ -96,7 +96,7 @@ func TestCheck115FileAPIHonorsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err = check115FileAPI(ctx, provider.client)
+	err = provider.check115FileAPI(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("check error=%v, want context canceled", err)
 	}
@@ -126,8 +126,112 @@ func TestCookie115CheckRetriesHTTPStatusErrors(t *testing.T) {
 	}
 }
 
+func TestCookie115ListPageReportsHTML405WithoutLeakingResponseBody(t *testing.T) {
+	provider, err := newCookie115Provider("UID=user;CID=cid;SEID=seid;KID=kid", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.requestInterval = func() time.Duration { return 0 }
+	provider.uploadRetryDelay = func(int) time.Duration { return 0 }
+	provider.requestGuard.rateLimitDelayFunc = func(int) time.Duration { return 0 }
+	requests := 0
+	provider.client.Client.SetTransport(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		response := jsonHTTPResponse(request, http.StatusMethodNotAllowed, `<!doctype html><title>405</title><p>blocked by WAF</p>`)
+		response.Header.Set("Content-Type", "text/html; charset=utf-8")
+		return response, nil
+	}))
+
+	_, err = provider.listPage(context.Background(), "3480384768003015802", "test path", 0)
+	if err == nil {
+		t.Fatal("HTML 405 should fail the directory request")
+	}
+	message := strings.ToLower(err.Error())
+	if !strings.Contains(message, "http 405") {
+		t.Fatalf("directory error=%v, want structured HTTP status", err)
+	}
+	if strings.Contains(message, "<!doctype") || strings.Contains(message, "unexpected error") {
+		t.Fatalf("directory error leaked the WAF page instead of reporting the status: %v", err)
+	}
+	if requests != max115ListRetries {
+		t.Fatalf("requests=%d, want %d retries", requests, max115ListRetries)
+	}
+}
+
+func TestCookie115RequestGuardRechecksCooldownWhileWaiting(t *testing.T) {
+	guard := newCookie115RequestGuard()
+	guard.lastRequest = time.Now()
+	guard.rateLimitDelayFunc = func(int) time.Duration { return 80 * time.Millisecond }
+
+	waitStarted := make(chan struct{}, 1)
+	waitDone := make(chan error, 1)
+	startedAt := time.Now()
+	go func() {
+		waitDone <- guard.wait(context.Background(), 20*time.Millisecond, func(_ string, until time.Time) {
+			if !until.IsZero() {
+				select {
+				case waitStarted <- struct{}{}:
+				default:
+				}
+			}
+		})
+	}()
+
+	select {
+	case <-waitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("request guard did not enter its initial interval wait")
+	}
+	guard.observeHTTPStatus(http.StatusMethodNotAllowed, 0)
+
+	select {
+	case err := <-waitDone:
+		t.Fatalf("request guard ignored a cooldown observed while waiting: %v", err)
+	case <-time.After(45 * time.Millisecond):
+	}
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request guard did not finish after the adaptive cooldown")
+	}
+	if elapsed := time.Since(startedAt); elapsed < 65*time.Millisecond {
+		t.Fatalf("request guard waited only %s after an 80ms cooldown", elapsed)
+	}
+}
+
+func TestRateLimit115CooldownAndRetryAfter(t *testing.T) {
+	wantCooldowns := []time.Duration{
+		15 * time.Second,
+		30 * time.Second,
+		time.Minute,
+		2 * time.Minute,
+		4 * time.Minute,
+		5 * time.Minute,
+		5 * time.Minute,
+	}
+	for index, want := range wantCooldowns {
+		if got := rateLimit115Cooldown(index + 1); got != want {
+			t.Fatalf("strike %d cooldown=%s, want %s", index+1, got, want)
+		}
+	}
+
+	now := time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC)
+	if got := parse115RetryAfter("90", now); got != 90*time.Second {
+		t.Fatalf("numeric Retry-After=%s", got)
+	}
+	if got := parse115RetryAfter(now.Add(2*time.Minute).Format(http.TimeFormat), now); got != 2*time.Minute {
+		t.Fatalf("date Retry-After=%s", got)
+	}
+	if got := parse115RetryAfter("invalid", now); got != 0 {
+		t.Fatalf("invalid Retry-After=%s", got)
+	}
+}
+
 func TestRetryable115ErrorUsesStructuredHTTPStatus(t *testing.T) {
-	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+	for _, status := range []int{http.StatusMethodNotAllowed, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
 		if !isRetryable115Error(&http115StatusError{statusCode: status}) {
 			t.Fatalf("HTTP %d should be retryable", status)
 		}

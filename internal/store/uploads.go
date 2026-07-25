@@ -108,19 +108,22 @@ type UploadProviderRoute struct {
 }
 
 type UploadBatch struct {
-	ID               int64  `json:"id"`
-	WatchDirID       *int64 `json:"watchDirId"`
-	SeriesKey        string `json:"seriesKey"`
-	SeriesPath       string `json:"seriesPath"`
-	Status           string `json:"status"`
-	Revision         int    `json:"revision"`
-	ReadyAt          string `json:"readyAt"`
-	FileCount        int    `json:"fileCount"`
-	TargetCount      int    `json:"targetCount"`
-	CompletedTargets int    `json:"completedTargets"`
-	FailedTargets    int    `json:"failedTargets"`
-	CreatedAt        string `json:"createdAt"`
-	UpdatedAt        string `json:"updatedAt"`
+	ID                 int64  `json:"id"`
+	WatchDirID         *int64 `json:"watchDirId"`
+	SeriesKey          string `json:"seriesKey"`
+	SeriesPath         string `json:"seriesPath"`
+	Status             string `json:"status"`
+	Revision           int    `json:"revision"`
+	ReadyAt            string `json:"readyAt"`
+	FileCount          int    `json:"fileCount"`
+	TargetCount        int    `json:"targetCount"`
+	CompletedTargets   int    `json:"completedTargets"`
+	FailedTargets      int    `json:"failedTargets"`
+	TransferCount      int    `json:"transferCount"`
+	CompletedTransfers int    `json:"completedTransfers"`
+	FailedTransfers    int    `json:"failedTransfers"`
+	CreatedAt          string `json:"createdAt"`
+	UpdatedAt          string `json:"updatedAt"`
 }
 
 type UploadBatchFile struct {
@@ -1406,7 +1409,19 @@ SELECT b.id, b.watch_dir_id, b.series_key, b.series_path, b.status, b.revision, 
        (SELECT COUNT(*) FROM upload_batch_files f WHERE f.batch_id = b.id),
        (SELECT COUNT(*) FROM upload_batch_targets t WHERE t.batch_id = b.id),
        (SELECT COUNT(*) FROM upload_batch_targets t WHERE t.batch_id = b.id AND t.status = 'completed'),
-       (SELECT COUNT(*) FROM upload_batch_targets t WHERE t.batch_id = b.id AND t.status IN ('failed', 'canceled')),
+       (SELECT COUNT(*) FROM upload_batch_targets t WHERE t.batch_id = b.id AND t.status = 'failed'),
+       (SELECT COUNT(*)
+          FROM upload_transfers tr
+          JOIN upload_batch_targets t ON t.id = tr.batch_target_id
+         WHERE t.batch_id = b.id),
+       (SELECT COUNT(*)
+          FROM upload_transfers tr
+          JOIN upload_batch_targets t ON t.id = tr.batch_target_id
+         WHERE t.batch_id = b.id AND tr.status = 'completed'),
+       (SELECT COUNT(*)
+          FROM upload_transfers tr
+          JOIN upload_batch_targets t ON t.id = tr.batch_target_id
+         WHERE t.batch_id = b.id AND t.status = 'failed' AND tr.status = 'failed'),
        b.created_at, b.updated_at
 FROM upload_batches b`
 
@@ -1464,7 +1479,24 @@ type uploadBatchScanner interface {
 func scanUploadBatch(scanner uploadBatchScanner) (UploadBatch, error) {
 	var item UploadBatch
 	var watchDirID sql.NullInt64
-	err := scanner.Scan(&item.ID, &watchDirID, &item.SeriesKey, &item.SeriesPath, &item.Status, &item.Revision, &item.ReadyAt, &item.FileCount, &item.TargetCount, &item.CompletedTargets, &item.FailedTargets, &item.CreatedAt, &item.UpdatedAt)
+	err := scanner.Scan(
+		&item.ID,
+		&watchDirID,
+		&item.SeriesKey,
+		&item.SeriesPath,
+		&item.Status,
+		&item.Revision,
+		&item.ReadyAt,
+		&item.FileCount,
+		&item.TargetCount,
+		&item.CompletedTargets,
+		&item.FailedTargets,
+		&item.TransferCount,
+		&item.CompletedTransfers,
+		&item.FailedTransfers,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+	)
 	if watchDirID.Valid {
 		item.WatchDirID = &watchDirID.Int64
 	}

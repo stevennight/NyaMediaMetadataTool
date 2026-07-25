@@ -17,6 +17,20 @@ import (
 
 const uploadProvidersPrefix = "/api/upload/providers/"
 
+type uploadTransferDetailResponse struct {
+	store.UploadTransfer
+	Phase         string `json:"phase,omitempty"`
+	StatusMessage string `json:"statusMessage,omitempty"`
+	WaitingUntil  string `json:"waitingUntil,omitempty"`
+}
+
+type uploadBatchDetailResponse struct {
+	Batch     store.UploadBatch              `json:"batch"`
+	Files     []store.UploadBatchFile        `json:"files"`
+	Targets   []store.UploadBatchTarget      `json:"targets"`
+	Transfers []uploadTransferDetailResponse `json:"transfers"`
+}
+
 func (s *Server) handleUploadSummary(w http.ResponseWriter, r *http.Request) {
 	summary, err := s.store.GetUploadSummary(r.Context())
 	if err != nil {
@@ -55,7 +69,26 @@ func (s *Server) handleUploadBatchDetail(w http.ResponseWriter, r *http.Request)
 		writeUploadStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, detail)
+	runtimeStates := map[int64]upload.TransferRuntimeState{}
+	if s.uploads != nil {
+		runtimeStates = s.uploads.TransferRuntimeStates()
+	}
+	transfers := make([]uploadTransferDetailResponse, 0, len(detail.Transfers))
+	for _, transfer := range detail.Transfers {
+		state := runtimeStates[transfer.ID]
+		transfers = append(transfers, uploadTransferDetailResponse{
+			UploadTransfer: transfer,
+			Phase:          state.Phase,
+			StatusMessage:  state.StatusMessage,
+			WaitingUntil:   state.WaitingUntil,
+		})
+	}
+	writeJSON(w, http.StatusOK, uploadBatchDetailResponse{
+		Batch:     detail.Batch,
+		Files:     detail.Files,
+		Targets:   detail.Targets,
+		Transfers: transfers,
+	})
 }
 
 func (s *Server) handleUploadTargetAction(w http.ResponseWriter, r *http.Request) {

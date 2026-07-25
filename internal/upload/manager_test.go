@@ -159,22 +159,28 @@ func TestFailedProviderDoesNotPreventOtherTargetCompletion(t *testing.T) {
 	if _, err := st.SealDueUploadBatches(ctx, time.Now(), time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
-	for range 2 {
-		target, err := st.ClaimNextUploadTarget(ctx)
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		manager.worker(workerCtx)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	var summary store.UploadSummary
+	for time.Now().Before(deadline) {
+		summary, err = st.GetUploadSummary(ctx)
 		if err != nil {
+			cancelWorker()
+			<-workerDone
 			t.Fatal(err)
 		}
-		err = manager.processTarget(ctx, target)
-		if err != nil {
-			if err := st.FailUploadTarget(ctx, target.ID, err.Error()); err != nil {
-				t.Fatal(err)
-			}
+		if summary.Failed == 1 {
+			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	summary, err := st.GetUploadSummary(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cancelWorker()
+	<-workerDone
 	if summary.Completed != 0 || summary.Failed != 1 || len(providers[okProvider.ID].uploads) != 1 {
 		t.Fatalf("unexpected terminal states: summary=%#v good=%#v", summary, providers[okProvider.ID].uploads)
 	}

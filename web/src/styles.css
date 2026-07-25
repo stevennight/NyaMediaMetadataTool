@@ -804,6 +804,106 @@ h1 {
   margin-right: 6px;
 }
 
+.upload-detail-refresh-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 16px 0 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  padding: 9px 11px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.upload-detail-refresh-note.retrying {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.upload-target-status,
+.upload-transfer-list,
+.upload-transfer-errors {
+  display: grid;
+  gap: 7px;
+}
+
+.upload-target-status {
+  min-width: 180px;
+}
+
+.upload-target-status .pill,
+.upload-transfer-item .pill {
+  justify-self: start;
+  margin-right: 0;
+}
+
+.upload-target-status small,
+.upload-transfer-item small {
+  color: var(--text-muted);
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.upload-transfer-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.upload-transfer-item small {
+  min-width: 64px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-error-cell {
+  min-width: 260px;
+  max-width: 420px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.upload-transfer-error {
+  display: grid;
+  gap: 2px;
+}
+
+.upload-transfer-error strong {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.upload-transfer-error span {
+  color: var(--danger);
+}
+
+.task-table.upload-file-table {
+  min-width: 1080px;
+}
+
+.task-table.upload-file-table th:first-child,
+.task-table.upload-file-table td:first-child {
+  width: 36%;
+  min-width: 300px;
+  white-space: normal;
+}
+
+.task-table.upload-file-table th:last-child,
+.task-table.upload-file-table td:last-child {
+  width: 30%;
+  min-width: 260px;
+  white-space: normal;
+}
+
 .card {
   padding: 24px;
 }

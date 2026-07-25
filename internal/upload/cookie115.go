@@ -18,7 +18,10 @@ import (
 	"NyaMediaMetadataTool/internal/store"
 )
 
-const default115UserAgent = "Mozilla/5.0"
+const (
+	fallback115AppVersion = "35.6.0.3"
+	default115UserAgent   = "Mozilla/5.0 115Browser/" + fallback115AppVersion
+)
 
 const (
 	min115RequestInterval = 2 * time.Second
@@ -28,10 +31,18 @@ const (
 )
 
 type cookie115Provider struct {
-	client          *pan115.Pan115Client
-	requestMu       sync.Mutex
-	lastRequest     time.Time
-	requestInterval func() time.Duration
+	client                  *pan115.Pan115Client
+	configuredUserAgent     string
+	appVersionEndpoint      string
+	appVersionMu            sync.Mutex
+	appVersion              string
+	appVersionResolved      bool
+	appVersionResolutionErr error
+	newUploadCipher         func() (upload115Cipher, error)
+	nowMilli                func() int64
+	requestMu               sync.Mutex
+	lastRequest             time.Time
+	requestInterval         func() time.Duration
 }
 
 func (m *Manager) defaultProviderFactory(ctx context.Context, target store.UploadBatchTarget) (Provider, error) {
@@ -52,12 +63,21 @@ func newCookie115Provider(cookieValue string, userAgent string) (*cookie115Provi
 	if err := credential.FromCookie(strings.TrimSpace(cookieValue)); err != nil {
 		return nil, fmt.Errorf("parse 115 Cookie: %w", err)
 	}
-	if strings.TrimSpace(userAgent) == "" {
+	userAgent = strings.TrimSpace(userAgent)
+	configuredUserAgent := userAgent
+	if userAgent == "" {
 		userAgent = default115UserAgent
 	}
 	client := pan115.New().SetUserAgent(userAgent)
 	client.ImportCredential(credential)
-	return &cookie115Provider{client: client}, nil
+	return &cookie115Provider{
+		client:              client,
+		configuredUserAgent: configuredUserAgent,
+		appVersionEndpoint:  pan115.ApiGetVersion,
+		appVersion:          fallback115AppVersion,
+		newUploadCipher:     newECDH115UploadCipher,
+		nowMilli:            func() int64 { return pan115.NowMilli().ToInt64() },
+	}, nil
 }
 
 func (p *cookie115Provider) Check(ctx context.Context) error {
@@ -197,7 +217,7 @@ func (p *cookie115Provider) Upload(ctx context.Context, localPath string, remote
 	if err := p.waitRequest(ctx); err != nil {
 		return RemoteFile{}, err
 	}
-	if err := p.client.RapidUploadOrByMultipart(parentID, name, size, file); err != nil {
+	if err := p.rapidUploadOrByMultipart(ctx, parentID, name, size, file); err != nil {
 		return RemoteFile{}, fmt.Errorf("115 upload %s: %w", remotePath, err)
 	}
 	return p.waitForFile(ctx, parentID, name, size)

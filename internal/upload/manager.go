@@ -330,25 +330,34 @@ func (m *Manager) worker(ctx context.Context) {
 		targetCtx, cancel := context.WithCancel(ctx)
 		m.trackTarget(target.ID, cancel)
 		err = m.processTarget(targetCtx, target)
+		wasCanceled := errors.Is(targetCtx.Err(), context.Canceled)
 		cancel()
 		m.untrackTarget(target.ID)
 		if err == nil {
 			continue
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(targetCtx.Err(), context.Canceled) {
+		if errors.Is(err, context.Canceled) || wasCanceled {
 			continue
 		}
-		m.logger.Warn("upload target failed", "targetID", target.ID, "provider", target.ProviderName, "error", err)
-		if target.Attempts < m.options.MaxAttempts {
-			delay := retryDelay(target.Attempts)
-			if retryErr := m.store.RescheduleUploadTarget(ctx, target.ID, err.Error(), time.Now().Add(delay)); retryErr != nil {
-				m.logger.Warn("reschedule upload target failed", "targetID", target.ID, "error", retryErr)
-			}
-			continue
+		m.handleTargetFailure(ctx, target, err)
+	}
+}
+
+func (m *Manager) handleTargetFailure(ctx context.Context, target store.UploadBatchTarget, uploadErr error) {
+	m.logger.Warn("upload target failed", "targetID", target.ID, "provider", target.ProviderName, "error", uploadErr)
+	if target.Attempts < m.options.MaxAttempts {
+		delay := retryDelay(target.Attempts)
+		if retryErr := m.store.RescheduleUploadTarget(ctx, target.ID, uploadErr.Error(), time.Now().Add(delay)); retryErr == nil {
+			return
+		} else {
+			m.logger.Warn("reschedule upload target failed", "targetID", target.ID, "error", retryErr)
+			uploadErr = fmt.Errorf("%w; reschedule upload target: %v", uploadErr, retryErr)
 		}
-		if failErr := m.store.FailUploadTarget(ctx, target.ID, err.Error()); failErr != nil {
-			m.logger.Warn("mark upload target failed", "targetID", target.ID, "error", failErr)
-		}
+	}
+	// A failed reschedule must not leave a target looking active forever. If
+	// this write also fails, startup recovery still resets running work.
+	if failErr := m.store.FailUploadTarget(ctx, target.ID, uploadErr.Error()); failErr != nil {
+		m.logger.Warn("mark upload target failed", "targetID", target.ID, "error", failErr)
 	}
 }
 

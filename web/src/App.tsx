@@ -900,6 +900,33 @@ function uploadStatusLabel(status: string) {
   return uploadStatusFilters.find((item) => item.value === status)?.label ?? status;
 }
 
+function uploadTargetStatusLabel(target: UploadBatchTarget) {
+  if (target.status === 'pending' && target.errorSummary) return '等待自动重试';
+  return uploadStatusLabel(target.status);
+}
+
+function uploadTargetScheduleLabel(target: UploadBatchTarget, timezone: string) {
+  if (target.status !== 'pending') return '';
+  if (!target.availableAt) return target.errorSummary ? '等待自动重试调度' : '等待调度';
+  const availableAt = parseStoredTime(target.availableAt);
+  const formatted = formatStoredTime(target.availableAt, timezone);
+  const isReady = Boolean(availableAt && availableAt.getTime() <= Date.now());
+  if (target.errorSummary) {
+    return isReady ? `重试时间已到（${formatted}）` : `下次尝试：${formatted}`;
+  }
+  return isReady ? `已可执行，等待调度（${formatted}）` : `可执行时间：${formatted}`;
+}
+
+function uploadTransferDisplay(transfer: UploadTransfer, target?: UploadBatchTarget) {
+  if (transfer.status === 'failed' && target?.status === 'pending') {
+    return { className: uploadStatusPillClass('pending'), label: '等待自动重试' };
+  }
+  if (transfer.status === 'failed' && target?.status === 'failed' && target.retryable) {
+    return { className: uploadStatusPillClass('failed'), label: '失败（可重试）' };
+  }
+  return { className: uploadStatusPillClass(transfer.status), label: uploadStatusLabel(transfer.status) };
+}
+
 function renameStatusLabel(status: string) {
   switch (status) {
     case 'ok': return '可执行';
@@ -4223,6 +4250,8 @@ function UploadCookieModal(props: { provider: UploadProvider; devices: UploadAut
 }
 
 function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: string; actionTargetID: number | null; onClose: () => void; onRetry: (target: UploadBatchTarget) => void; onCancel: (target: UploadBatchTarget) => void }) {
+  const targetsByID = new Map(props.detail.targets.map((target) => [target.id, target]));
+  const waitingRetryCount = props.detail.targets.filter((target) => target.status === 'pending' && target.errorSummary).length;
   return (
     <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
       <section className="modal-card upload-batch-detail-modal" role="dialog" aria-modal="true" aria-labelledby="upload-batch-detail-title" onClick={(event) => event.stopPropagation()}>
@@ -4232,8 +4261,55 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
           <Row label="可上传时间" value={formatStoredTime(props.detail.batch.readyAt, props.timezone)} />
           <Row label="文件 / 目标" value={`${props.detail.files.length} / ${props.detail.targets.length}`} />
         </div>
-        <section className="upload-detail-section"><h3>目标</h3><div className="task-table-wrap"><table className="task-table"><thead><tr><th>目标</th><th>状态</th><th>尝试</th><th>错误</th><th>操作</th></tr></thead><tbody>{props.detail.targets.map((target) => <tr key={target.id}><td><strong>{target.providerName}</strong><small>{target.remoteRoot}</small></td><td><span className={uploadStatusPillClass(target.status)}>{uploadStatusLabel(target.status)}</span></td><td>{target.attempts}</td><td className="path-cell">{target.errorSummary || '-'}</td><td><div className="inline-actions">{['failed', 'canceled'].includes(target.status) && target.retryable && <button className="secondary" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onRetry(target)}>{props.actionTargetID === target.id ? '处理中' : '重试'}</button>}{['failed', 'canceled'].includes(target.status) && !target.retryable && <span className="pill ignored">不可重试</span>}{['waiting', 'pending'].includes(target.status) && <button className="danger" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onCancel(target)}>{props.actionTargetID === target.id ? '处理中' : '取消'}</button>}</div></td></tr>)}</tbody></table></div></section>
-        <section className="upload-detail-section"><h3>文件</h3><div className="task-table-wrap"><table className="task-table"><thead><tr><th>相对路径</th><th>类型</th><th>大小</th><th>传输状态</th></tr></thead><tbody>{props.detail.files.map((file) => { const transfers = props.detail.transfers.filter((transfer) => transfer.batchFileId === file.id); return <tr key={file.id}><td className="path-cell">{file.relativePath}</td><td>{file.fileType}</td><td>{formatUploadBytes(file.size)}</td><td>{transfers.length ? transfers.map((transfer) => <span className={uploadStatusPillClass(transfer.status)} key={transfer.id}>{uploadStatusLabel(transfer.status)}</span>) : '-'}</td></tr>; })}</tbody></table></div></section>
+        <p className={waitingRetryCount ? 'upload-detail-refresh-note retrying' : 'upload-detail-refresh-note'} role="status">
+          <RefreshCw size={14} aria-hidden="true" />
+          {waitingRetryCount ? `${waitingRetryCount} 个目标正在等待自动重试；会保留上次错误供排查。` : '详情每 5 秒自动刷新。'}
+        </p>
+        <section className="upload-detail-section">
+          <h3>目标</h3>
+          <div className="task-table-wrap">
+            <table className="task-table upload-target-table">
+              <thead><tr><th>目标</th><th>状态 / 调度</th><th>尝试</th><th>最近错误</th><th>操作</th></tr></thead>
+              <tbody>{props.detail.targets.map((target) => {
+                const scheduleLabel = uploadTargetScheduleLabel(target, props.timezone);
+                return <tr key={target.id}>
+                  <td><strong>{target.providerName}</strong><small>{target.remoteRoot}</small></td>
+                  <td><div className="upload-target-status"><span className={uploadStatusPillClass(target.status)}>{uploadTargetStatusLabel(target)}</span>{scheduleLabel && <small>{scheduleLabel}</small>}</div></td>
+                  <td>{target.attempts}</td>
+                  <td className="path-cell upload-error-cell">{target.errorSummary || '-'}</td>
+                  <td><div className="inline-actions">{['failed', 'canceled'].includes(target.status) && target.retryable && <button className="secondary" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onRetry(target)}>{props.actionTargetID === target.id ? '处理中' : '重试'}</button>}{['failed', 'canceled'].includes(target.status) && !target.retryable && <span className="pill ignored">不可重试</span>}{['waiting', 'pending'].includes(target.status) && <button className="danger" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onCancel(target)}>{props.actionTargetID === target.id ? '处理中' : '取消'}</button>}</div></td>
+                </tr>;
+              })}</tbody>
+            </table>
+          </div>
+        </section>
+        <section className="upload-detail-section">
+          <h3>文件</h3>
+          <div className="task-table-wrap">
+            <table className="task-table upload-file-table">
+              <thead><tr><th>相对路径</th><th>类型</th><th>大小</th><th>传输状态</th><th>最近错误</th></tr></thead>
+              <tbody>{props.detail.files.map((file) => {
+                const transfers = props.detail.transfers.filter((transfer) => transfer.batchFileId === file.id);
+                const transferErrors = transfers.flatMap((transfer) => {
+                  const target = targetsByID.get(transfer.batchTargetId);
+                  const summary = transfer.errorSummary || (transfer.status === 'failed' ? target?.errorSummary : '');
+                  return summary ? [{ transfer, target, summary }] : [];
+                });
+                return <tr key={file.id}>
+                  <td className="path-cell">{file.relativePath}</td>
+                  <td>{file.fileType}</td>
+                  <td>{formatUploadBytes(file.size)}</td>
+                  <td>{transfers.length ? <div className="upload-transfer-list">{transfers.map((transfer) => {
+                    const target = targetsByID.get(transfer.batchTargetId);
+                    const display = uploadTransferDisplay(transfer, target);
+                    return <div className="upload-transfer-item" key={transfer.id}><small title={target?.remoteRoot}>{target?.providerName || `目标 #${transfer.batchTargetId}`}</small><span className={display.className}>{display.label}</span></div>;
+                  })}</div> : '-'}</td>
+                  <td className="upload-error-cell">{transferErrors.length ? <div className="upload-transfer-errors">{transferErrors.map(({ transfer, target, summary }) => <div className="upload-transfer-error" key={transfer.id}><strong>{target?.providerName || `目标 #${transfer.batchTargetId}`}</strong><span>{summary}</span></div>)}</div> : '-'}</td>
+                </tr>;
+              })}</tbody>
+            </table>
+          </div>
+        </section>
       </section>
     </div>
   );

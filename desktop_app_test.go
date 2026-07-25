@@ -210,6 +210,48 @@ func TestCloseServiceWaitsForInFlightStartAndClosesResult(t *testing.T) {
 	}
 }
 
+func TestCloseServiceReturnsWhenCloserIgnoresCancellation(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	app := NewDesktopApp(appdata.Paths{}, "test", logger)
+	app.shutdownTimeout = 40 * time.Millisecond
+	startedService := &appcore.Service{}
+	app.serviceStarter = func() (*appcore.Service, error) {
+		return startedService, nil
+	}
+	releaseCloser := make(chan struct{})
+	app.serviceCloser = func(context.Context, *appcore.Service) error {
+		<-releaseCloser
+		return nil
+	}
+	if service, err := app.ensureService(); err != nil || service != startedService {
+		t.Fatalf("ensureService() = %p, %v", service, err)
+	}
+
+	startedAt := time.Now()
+	app.closeService()
+	elapsed := time.Since(startedAt)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("closeService blocked for %s after its timeout", elapsed)
+	}
+	close(releaseCloser)
+}
+
+func TestCancelRenamePreviewsHonorsShutdownDeadline(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	app := NewDesktopApp(appdata.Paths{}, "test", logger)
+	app.previewWG.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	startedAt := time.Now()
+	app.cancelRenamePreviews(ctx)
+	elapsed := time.Since(startedAt)
+	app.previewWG.Done()
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("cancelRenamePreviews blocked for %s after its deadline", elapsed)
+	}
+}
+
 func TestSecondInstanceBeforeStartupIsFocusedAfterContextPublish(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	app := NewDesktopApp(appdata.Paths{}, "test", logger)

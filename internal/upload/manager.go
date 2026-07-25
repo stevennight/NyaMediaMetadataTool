@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -58,13 +59,18 @@ type ProviderVerifier interface {
 // TransferRuntimeState is ephemeral progress information for an active
 // transfer. Persistent transfer status remains owned by the store.
 type TransferRuntimeState struct {
-	Phase         string `json:"phase,omitempty"`
-	StatusMessage string `json:"statusMessage,omitempty"`
-	WaitingUntil  string `json:"waitingUntil,omitempty"`
+	Phase            string `json:"phase,omitempty"`
+	StatusMessage    string `json:"statusMessage,omitempty"`
+	WaitingUntil     string `json:"waitingUntil,omitempty"`
+	BytesTransferred int64  `json:"bytesTransferred,omitempty"`
 }
 
 type providerWaitReporter interface {
 	setWaitReporter(func(message string, until time.Time))
+}
+
+type providerProgressReporter interface {
+	setProgressReporter(func(bytesTransferred int64))
 }
 
 type ProviderFactory func(ctx context.Context, target store.UploadBatchTarget) (Provider, error)
@@ -218,15 +224,31 @@ func (m *Manager) setTransferRuntime(transferID int64, phase string, message str
 	if transferID <= 0 {
 		return
 	}
-	state := TransferRuntimeState{
-		Phase:         strings.TrimSpace(phase),
-		StatusMessage: strings.TrimSpace(message),
-	}
+	m.runtimeMu.Lock()
+	state := m.transferRuntime[transferID]
+	state.Phase = strings.TrimSpace(phase)
+	state.StatusMessage = strings.TrimSpace(message)
+	state.WaitingUntil = ""
 	if !waitingUntil.IsZero() {
 		state.WaitingUntil = waitingUntil.UTC().Format(time.RFC3339Nano)
 	}
-	m.runtimeMu.Lock()
 	m.transferRuntime[transferID] = state
+	m.runtimeMu.Unlock()
+}
+
+func (m *Manager) setTransferProgress(transferID int64, bytesTransferred int64) {
+	if transferID <= 0 {
+		return
+	}
+	if bytesTransferred < 0 {
+		bytesTransferred = 0
+	}
+	m.runtimeMu.Lock()
+	state, ok := m.transferRuntime[transferID]
+	if ok && bytesTransferred != state.BytesTransferred {
+		state.BytesTransferred = bytesTransferred
+		m.transferRuntime[transferID] = state
+	}
 	m.runtimeMu.Unlock()
 }
 
@@ -448,44 +470,75 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 		return err
 	}
 
+	var activeMu sync.RWMutex
 	var activeTransferID int64
+	var activeTransferBytesTotal int64
 	var activePhase string
 	var activeMessage string
-	setActiveTransfer := func(transferID int64, phase string, message string) {
-		if activeTransferID != 0 && activeTransferID != transferID {
-			m.clearTransferRuntime(activeTransferID)
-		}
+	setActiveTransfer := func(transferID int64, bytesTotal int64, phase string, message string) {
+		activeMu.Lock()
+		previousTransferID := activeTransferID
 		activeTransferID = transferID
+		activeTransferBytesTotal = bytesTotal
 		activePhase = phase
 		activeMessage = message
+		activeMu.Unlock()
+		if previousTransferID != 0 && previousTransferID != transferID {
+			m.clearTransferRuntime(previousTransferID)
+		}
 		m.setTransferRuntime(transferID, phase, message, time.Time{})
 	}
 	clearActiveTransfer := func() {
-		m.clearTransferRuntime(activeTransferID)
+		activeMu.Lock()
+		transferID := activeTransferID
 		activeTransferID = 0
+		activeTransferBytesTotal = 0
 		activePhase = ""
 		activeMessage = ""
+		activeMu.Unlock()
+		m.clearTransferRuntime(transferID)
 	}
 	defer clearActiveTransfer()
 
 	for _, transfer := range transfers {
 		if transfer.Status != store.UploadTransferCompleted {
-			setActiveTransfer(transfer.ID, "checking", "正在检查 115 上传服务")
+			setActiveTransfer(transfer.ID, transfer.BytesTotal, "checking", "正在检查 115 上传服务")
 			break
 		}
 	}
 	if reporter, ok := client.(providerWaitReporter); ok {
 		reporter.setWaitReporter(func(message string, until time.Time) {
-			if activeTransferID == 0 {
+			activeMu.RLock()
+			defer activeMu.RUnlock()
+			transferID := activeTransferID
+			phase := activePhase
+			activeStatusMessage := activeMessage
+			if transferID == 0 {
 				return
 			}
 			if until.IsZero() {
-				m.setTransferRuntime(activeTransferID, activePhase, activeMessage, time.Time{})
+				m.setTransferRuntime(transferID, phase, activeStatusMessage, time.Time{})
 				return
 			}
-			m.setTransferRuntime(activeTransferID, "waiting", message, until)
+			m.setTransferRuntime(transferID, "waiting", message, until)
 		})
 		defer reporter.setWaitReporter(nil)
+	}
+	if reporter, ok := client.(providerProgressReporter); ok {
+		reporter.setProgressReporter(func(bytesTransferred int64) {
+			activeMu.RLock()
+			defer activeMu.RUnlock()
+			transferID := activeTransferID
+			bytesTotal := activeTransferBytesTotal
+			if transferID == 0 {
+				return
+			}
+			if bytesTotal > 0 && bytesTransferred > bytesTotal {
+				bytesTransferred = bytesTotal
+			}
+			m.setTransferProgress(transferID, bytesTransferred)
+		})
+		defer reporter.setProgressReporter(nil)
 	}
 	if err := client.Check(ctx); err != nil {
 		return fmt.Errorf("check provider %s: %w", target.ProviderName, err)
@@ -508,7 +561,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			continue
 		}
 		if transfer.Status == store.UploadTransferFailed && strings.Contains(transfer.ErrorSummary, uncertain115CommitMarker) {
-			setActiveTransfer(transfer.ID, "verifying", "正在确认 115 远端文件")
+			setActiveTransfer(transfer.ID, transfer.BytesTotal, "verifying", "正在确认 115 远端文件")
 			verificationErr := fmt.Errorf("%s: remote file is still not confirmed", uncertain115CommitMarker)
 			if verifier, ok := client.(ProviderVerifier); ok {
 				remote, found, err := verifier.Verify(ctx, transfer.RemotePath, transfer.BytesTotal)
@@ -527,7 +580,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			}
 			continue
 		}
-		setActiveTransfer(transfer.ID, "preparing", "正在准备上传")
+		setActiveTransfer(transfer.ID, transfer.BytesTotal, "preparing", "正在准备上传")
 		if err := m.store.StartUploadTransfer(ctx, transfer.ID); err != nil {
 			return fmt.Errorf("start transfer %d: %w", transfer.ID, err)
 		}
@@ -546,9 +599,11 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			}
 			continue
 		}
+		activeMu.Lock()
 		activePhase = "uploading"
 		activeMessage = "正在上传到 115"
-		m.setTransferRuntime(transfer.ID, activePhase, activeMessage, time.Time{})
+		activeMu.Unlock()
+		m.setTransferRuntime(transfer.ID, "uploading", "正在上传到 115", time.Time{})
 		remote, err := client.Upload(ctx, transfer.LocalPath, transfer.RemotePath, transfer.BytesTotal, target.CollisionPolicy)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -646,6 +701,14 @@ func collectCandidates(mediaPath string, seriesPath string, watchRoot string, ar
 	for _, item := range candidates {
 		items = append(items, item)
 	}
+	sort.Slice(items, func(left, right int) bool {
+		leftPath := strings.ToLower(items[left].RelativePath)
+		rightPath := strings.ToLower(items[right].RelativePath)
+		if leftPath == rightPath {
+			return items[left].RelativePath < items[right].RelativePath
+		}
+		return leftPath < rightPath
+	})
 	return items, nil
 }
 

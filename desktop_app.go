@@ -46,15 +46,19 @@ type DesktopApp struct {
 	serviceStarter func() (*appcore.Service, error)
 	serviceCloser  func(context.Context, *appcore.Service) error
 
-	forceClose atomic.Bool
-	closeOnce  sync.Once
-	previewMu  sync.Mutex
-	previewWG  sync.WaitGroup
-	previews   map[string]context.CancelFunc
-	previewEnd bool
+	forceClose      atomic.Bool
+	closeOnce       sync.Once
+	closeDone       chan struct{}
+	shutdownTimeout time.Duration
+	previewMu       sync.Mutex
+	previewWG       sync.WaitGroup
+	previews        map[string]context.CancelFunc
+	previewEnd      bool
 }
 
 var errDesktopServiceClosed = errors.New("desktop service is shutting down")
+
+const defaultDesktopShutdownTimeout = 10 * time.Second
 
 type DesktopRuntimeInfo struct {
 	Desktop    bool   `json:"desktop"`
@@ -78,12 +82,14 @@ type DesktopRenamePreviewEvent struct {
 func NewDesktopApp(paths appdata.Paths, version string, logger *slog.Logger) *DesktopApp {
 	initCtx, cancelInit := context.WithCancel(context.Background())
 	app := &DesktopApp{
-		paths:          paths,
-		version:        version,
-		logger:         logger,
-		focusWindow:    focusDesktopWindow,
-		serviceInitCtx: initCtx,
-		serviceCancel:  cancelInit,
+		paths:           paths,
+		version:         version,
+		logger:          logger,
+		focusWindow:     focusDesktopWindow,
+		serviceInitCtx:  initCtx,
+		serviceCancel:   cancelInit,
+		closeDone:       make(chan struct{}),
+		shutdownTimeout: defaultDesktopShutdownTimeout,
 	}
 	app.serviceStarter = app.startDesktopService
 	app.serviceCloser = func(ctx context.Context, service *appcore.Service) error {
@@ -131,11 +137,12 @@ func (a *DesktopApp) beforeClose(ctx context.Context) bool {
 	}
 
 	message := fmt.Sprintf(
-		"仍有 %d 个媒体任务、%d 个上传任务、%d 个前台操作和 %d 个后台扫描等待或正在执行。退出会取消可中断操作，并等待正在写入文件的操作安全结束；队列任务会在下次启动时恢复。",
+		"仍有 %d 个媒体任务、%d 个上传任务、%d 个前台操作和 %d 个后台扫描等待或正在执行。退出会立即取消可中断操作，并最多等待 %d 秒完成收尾；未完成的队列任务会在下次启动时恢复。",
 		active.Tasks,
 		active.Uploads,
 		active.Mutations,
 		active.Background,
+		int(a.desktopShutdownTimeout()/time.Second),
 	)
 	choice, dialogErr := wailsRuntime.MessageDialog(ctx, wailsRuntime.MessageDialogOptions{
 		Type:          wailsRuntime.QuestionDialog,
@@ -158,19 +165,48 @@ func (a *DesktopApp) beforeClose(ctx context.Context) bool {
 
 func (a *DesktopApp) shutdown(ctx context.Context) {
 	a.clearRuntimeContext()
-	a.cancelRenamePreviews()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), a.desktopShutdownTimeout())
+	defer cancel()
+	closeDone := a.beginCloseService()
+	a.cancelRenamePreviews(shutdownCtx)
 	wailsRuntime.CleanupNotifications(ctx)
-	a.closeService()
+	select {
+	case <-closeDone:
+	case <-shutdownCtx.Done():
+		a.logger.Warn("desktop shutdown exceeded time limit", "timeout", a.desktopShutdownTimeout())
+	}
 }
 
 func (a *DesktopApp) closeService() {
+	ctx, cancel := context.WithTimeout(context.Background(), a.desktopShutdownTimeout())
+	defer cancel()
+	closeDone := a.beginCloseService()
+	select {
+	case <-closeDone:
+	case <-ctx.Done():
+		a.logger.Warn("desktop service close exceeded time limit", "timeout", a.desktopShutdownTimeout())
+	}
+}
+
+func (a *DesktopApp) beginCloseService() <-chan struct{} {
 	a.closeOnce.Do(func() {
 		a.serviceMu.Lock()
 		a.serviceClosing = true
 		cancelInit := a.serviceCancel
 		a.serviceMu.Unlock()
-		cancelInit()
+		if cancelInit != nil {
+			cancelInit()
+		}
+		go a.finishServiceClose()
+	})
+	return a.closeDone
+}
 
+func (a *DesktopApp) finishServiceClose() {
+	ctx, cancel := context.WithTimeout(context.Background(), a.desktopShutdownTimeout())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
 		// If initialisation is in flight this waits for it. If it has not
 		// started, the no-op consumes the Once and prevents a later start.
 		a.serviceOnce.Do(func() {})
@@ -180,20 +216,32 @@ func (a *DesktopApp) closeService() {
 		a.service = nil
 		a.serviceMu.Unlock()
 		if service == nil {
-			a.serviceMu.Lock()
-			a.serviceClosed = true
-			a.serviceMu.Unlock()
+			result <- nil
 			return
 		}
-		ctx, cancel := shutdownContext()
-		defer cancel()
-		if err := a.serviceCloser(ctx, service); err != nil {
-			a.logger.Error("shutdown desktop service", "error", err)
-		}
-		a.serviceMu.Lock()
-		a.serviceClosed = true
-		a.serviceMu.Unlock()
-	})
+		result <- a.serviceCloser(ctx, service)
+	}()
+
+	var closeErr error
+	select {
+	case closeErr = <-result:
+	case <-ctx.Done():
+		closeErr = ctx.Err()
+	}
+	if closeErr != nil {
+		a.logger.Warn("shutdown desktop service", "error", closeErr)
+	}
+	a.serviceMu.Lock()
+	a.serviceClosed = true
+	a.serviceMu.Unlock()
+	close(a.closeDone)
+}
+
+func (a *DesktopApp) desktopShutdownTimeout() time.Duration {
+	if a.shutdownTimeout <= 0 {
+		return defaultDesktopShutdownTimeout
+	}
+	return a.shutdownTimeout
 }
 
 func (a *DesktopApp) ensureService() (*appcore.Service, error) {
@@ -437,7 +485,7 @@ func (a *DesktopApp) CancelRenamePreview(requestID string) bool {
 	return true
 }
 
-func (a *DesktopApp) cancelRenamePreviews() {
+func (a *DesktopApp) cancelRenamePreviews(ctx context.Context) {
 	a.previewMu.Lock()
 	a.previewEnd = true
 	cancels := make([]context.CancelFunc, 0, len(a.previews))
@@ -448,7 +496,16 @@ func (a *DesktopApp) cancelRenamePreviews() {
 	for _, cancel := range cancels {
 		cancel()
 	}
-	a.previewWG.Wait()
+	done := make(chan struct{})
+	go func() {
+		a.previewWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		a.logger.Warn("rename previews did not stop before shutdown timeout")
+	}
 }
 
 func runRenamePreview(ctx context.Context, cfg config.Config, input renamer.PreviewRequest, emit func(DesktopRenamePreviewEvent)) error {

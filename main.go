@@ -1,13 +1,11 @@
 package main
 
 import (
-	"context"
 	"io"
 	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
 
 	"NyaMediaMetadataTool/internal/appdata"
 	"NyaMediaMetadataTool/web"
@@ -123,8 +121,4 @@ func desktopOutputAvailable(output *os.File) bool {
 	}
 	_, err := output.Stat()
 	return err == nil
-}
-
-func shutdownContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 5*time.Minute)
 }

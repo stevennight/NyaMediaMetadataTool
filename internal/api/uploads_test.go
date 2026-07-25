@@ -18,6 +18,25 @@ import (
 	"NyaMediaMetadataTool/internal/upload"
 )
 
+func TestUploadTransferWithRuntimeProgress(t *testing.T) {
+	transfer := store.UploadTransfer{BytesTotal: 100, BytesTransferred: 0}
+	got := uploadTransferWithRuntimeProgress(transfer, upload.TransferRuntimeState{BytesTransferred: 45})
+	if got.BytesTransferred != 45 {
+		t.Fatalf("runtime progress=%d, want 45", got.BytesTransferred)
+	}
+
+	got = uploadTransferWithRuntimeProgress(transfer, upload.TransferRuntimeState{BytesTransferred: 150})
+	if got.BytesTransferred != 100 {
+		t.Fatalf("clamped runtime progress=%d, want 100", got.BytesTransferred)
+	}
+
+	completed := store.UploadTransfer{BytesTotal: 100, BytesTransferred: 100}
+	got = uploadTransferWithRuntimeProgress(completed, upload.TransferRuntimeState{BytesTransferred: 40})
+	if got.BytesTransferred != 100 {
+		t.Fatalf("persisted progress regressed to %d", got.BytesTransferred)
+	}
+}
+
 func TestUploadProviderCookieNeverAppearsInProviderResponse(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

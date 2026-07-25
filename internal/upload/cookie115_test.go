@@ -424,6 +424,9 @@ func writeCookie115TestFile(t *testing.T, contents string) *os.File {
 	if _, err := file.WriteString(contents); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
 	return file
 }
 

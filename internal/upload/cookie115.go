@@ -160,6 +160,7 @@ type cookie115Provider struct {
 	requestGuard            *cookie115RequestGuard
 	requestInterval         func() time.Duration
 	waitReporter            func(message string, until time.Time)
+	progressReporter        func(bytesTransferred int64)
 	directoryMu             sync.RWMutex
 	directoryIDs            map[string]string
 	uploadContent           func(context.Context, string, string, int64, *os.File) error
@@ -759,9 +760,6 @@ func (p *cookie115Provider) waitForFile(ctx context.Context, parentID string, na
 		if attempt == 3 {
 			break
 		}
-		if err := p.waitUntil(ctx, time.Now().Add(time.Second), "上传已提交，正在等待 115 文件可见"); err != nil {
-			return RemoteFile{}, err
-		}
 	}
 	return RemoteFile{}, fmt.Errorf("%w: %s", err115RemoteFileNotVisible, name)
 }
@@ -799,6 +797,10 @@ func (p *cookie115Provider) waitUntil(ctx context.Context, until time.Time, mess
 
 func (p *cookie115Provider) setWaitReporter(reporter func(message string, until time.Time)) {
 	p.waitReporter = reporter
+}
+
+func (p *cookie115Provider) setProgressReporter(reporter func(bytesTransferred int64)) {
+	p.progressReporter = reporter
 }
 
 func random115RequestInterval() time.Duration {

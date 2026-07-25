@@ -948,6 +948,29 @@ function uploadTransferHasActivePhase(transfer: UploadTransfer) {
   return Boolean(transfer.phase?.trim()) && !uploadTransferIsWaiting(transfer);
 }
 
+function uploadTransferIsActive(transfer: UploadTransfer) {
+  return !['completed', 'canceled'].includes(transfer.status)
+    && (uploadTransferIsWaiting(transfer) || uploadTransferHasActivePhase(transfer));
+}
+
+function uploadTransferQueueOrder(transfers: UploadTransfer[]) {
+  const incompleteIDs = transfers
+    .filter((transfer) => transfer.status !== 'completed')
+    .map((transfer) => transfer.id);
+  const candidateIDs = incompleteIDs.length ? incompleteIDs : transfers.map((transfer) => transfer.id);
+  return candidateIDs.length ? Math.min(...candidateIDs) : Number.MAX_SAFE_INTEGER;
+}
+
+function uploadTransferProgress(transfer: UploadTransfer) {
+  if (!uploadTransferIsActive(transfer) || transfer.bytesTotal <= 0 || transfer.bytesTransferred <= 0) return null;
+  const bytesTransferred = Math.min(transfer.bytesTransferred, transfer.bytesTotal);
+  return {
+    bytesTransferred,
+    bytesTotal: transfer.bytesTotal,
+    percent: Math.min(100, Math.max(0, Math.round((bytesTransferred / transfer.bytesTotal) * 100)))
+  };
+}
+
 function effectiveUploadTransferStatus(transfer: UploadTransfer, target?: UploadBatchTarget): UploadFileStatus {
   if (transfer.status === 'completed') return 'completed';
   if (target?.status === 'failed') return 'failed';
@@ -4433,12 +4456,20 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
   }, [props.detail.transfers]);
   const fileRows = useMemo(() => props.detail.files.map((file, index) => {
     const transfers = transfersByFileID.get(file.id) ?? [];
-    return { file, transfers, status: aggregateUploadFileStatus(transfers, targetsByID), index };
+    return {
+      file,
+      transfers,
+      status: aggregateUploadFileStatus(transfers, targetsByID),
+      active: transfers.some(uploadTransferIsActive),
+      queueOrder: uploadTransferQueueOrder(transfers),
+      index
+    };
   }).sort((left, right) => {
+    if (left.active !== right.active) return left.active ? -1 : 1;
     const statusOrder = uploadFileStatusOrder.indexOf(left.status) - uploadFileStatusOrder.indexOf(right.status);
     if (statusOrder !== 0) return statusOrder;
-    const pathOrder = left.file.relativePath.localeCompare(right.file.relativePath, undefined, { numeric: true, sensitivity: 'base' });
-    return pathOrder || left.index - right.index;
+    const queueOrder = left.queueOrder - right.queueOrder;
+    return queueOrder || left.index - right.index;
   }), [props.detail.files, targetsByID, transfersByFileID]);
   const filteredFileRows = useMemo(
     () => fileStatusFilter === 'all' ? fileRows : fileRows.filter((row) => row.status === fileStatusFilter),
@@ -4447,6 +4478,7 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
   const filePageCount = Math.max(1, Math.ceil(filteredFileRows.length / uploadDetailPageSize));
   const safeFilePage = Math.min(filePage, filePageCount);
   const pagedFileRows = filteredFileRows.slice((safeFilePage - 1) * uploadDetailPageSize, safeFilePage * uploadDetailPageSize);
+  const visibleActiveSignature = filteredFileRows.filter((row) => row.active).map((row) => row.file.id).join(',');
   const waitingTransferCount = props.detail.transfers.filter(uploadTransferIsWaiting).length;
   const waitingRetryCount = props.detail.targets.filter((target) => target.status === 'pending' && target.errorSummary).length;
 
@@ -4458,6 +4490,10 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
   useEffect(() => {
     if (filePage > filePageCount) setFilePage(filePageCount);
   }, [filePage, filePageCount]);
+
+  useEffect(() => {
+    if (visibleActiveSignature) setFilePage(1);
+  }, [visibleActiveSignature]);
 
   useEffect(() => {
     setCountdownNow(Date.now());
@@ -4539,12 +4575,16 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
                     const target = targetsByID.get(transfer.batchTargetId);
                     const display = uploadTransferDisplay(transfer, target);
                     const activity = uploadTransferActivity(transfer, countdownNow);
+                    const progress = uploadTransferProgress(transfer);
                     return <div className="upload-transfer-item" key={transfer.id}>
-                      <small title={target?.remoteRoot}>{target?.providerName || `目标 #${transfer.batchTargetId}`}</small>
                       <div className="upload-transfer-state">
                         <span className={display.className}>{display.label}</span>
                         {activity && <span className={uploadTransferIsWaiting(transfer) ? 'upload-transfer-activity waiting' : 'upload-transfer-activity'}>{activity}</span>}
                       </div>
+                      {progress && <div className="upload-transfer-progress">
+                        <progress max={progress.bytesTotal} value={progress.bytesTransferred} aria-label={`已上传 ${progress.percent}%`} />
+                        <small>{formatUploadBytes(progress.bytesTransferred)} / {formatUploadBytes(progress.bytesTotal)} · {progress.percent}%</small>
+                      </div>}
                     </div>;
                   })}</div> : '-'}</td>
                   <td className="upload-error-cell">{transferErrors.length ? <div className="upload-transfer-errors">{transferErrors.map(({ transfer, target, summary }) => <div className="upload-transfer-error" key={transfer.id}><strong>{target?.providerName || `目标 #${transfer.batchTargetId}`}</strong><span>{summary}</span></div>)}</div> : '-'}</td>

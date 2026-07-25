@@ -910,17 +910,15 @@ h1 {
   margin-right: 0;
 }
 
-.upload-target-status small,
-.upload-transfer-item small {
+.upload-target-status small {
   color: var(--text-muted);
   line-height: 1.4;
   white-space: normal;
 }
 
 .upload-transfer-item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  display: grid;
+  min-width: 220px;
   gap: 6px;
 }
 
@@ -942,11 +940,24 @@ h1 {
   color: var(--warning);
 }
 
-.upload-transfer-item small {
-  min-width: 64px;
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.upload-transfer-progress {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.upload-transfer-progress progress {
+  width: 100%;
+  min-width: 120px;
+  height: 8px;
+  accent-color: var(--primary);
+}
+
+.upload-transfer-progress small {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.3;
   white-space: nowrap;
 }
 

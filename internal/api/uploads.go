@@ -76,6 +76,7 @@ func (s *Server) handleUploadBatchDetail(w http.ResponseWriter, r *http.Request)
 	transfers := make([]uploadTransferDetailResponse, 0, len(detail.Transfers))
 	for _, transfer := range detail.Transfers {
 		state := runtimeStates[transfer.ID]
+		transfer = uploadTransferWithRuntimeProgress(transfer, state)
 		transfers = append(transfers, uploadTransferDetailResponse{
 			UploadTransfer: transfer,
 			Phase:          state.Phase,
@@ -89,6 +90,17 @@ func (s *Server) handleUploadBatchDetail(w http.ResponseWriter, r *http.Request)
 		Targets:   detail.Targets,
 		Transfers: transfers,
 	})
+}
+
+func uploadTransferWithRuntimeProgress(transfer store.UploadTransfer, state upload.TransferRuntimeState) store.UploadTransfer {
+	bytesTransferred := state.BytesTransferred
+	if transfer.BytesTotal > 0 && bytesTransferred > transfer.BytesTotal {
+		bytesTransferred = transfer.BytesTotal
+	}
+	if bytesTransferred > transfer.BytesTransferred {
+		transfer.BytesTransferred = bytesTransferred
+	}
+	return transfer
 }
 
 func (s *Server) handleUploadTargetAction(w http.ResponseWriter, r *http.Request) {

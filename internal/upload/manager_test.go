@@ -32,13 +32,20 @@ type fakeUpload struct {
 
 type waitReportingProvider struct {
 	fakeProvider
-	reporter      func(string, time.Time)
-	checkStarted  chan struct{}
-	continueCheck chan struct{}
+	reporter         func(string, time.Time)
+	progressReporter func(int64)
+	checkStarted     chan struct{}
+	continueCheck    chan struct{}
+	uploadStarted    chan struct{}
+	continueUpload   chan struct{}
 }
 
 func (p *waitReportingProvider) setWaitReporter(reporter func(string, time.Time)) {
 	p.reporter = reporter
+}
+
+func (p *waitReportingProvider) setProgressReporter(reporter func(int64)) {
+	p.progressReporter = reporter
 }
 
 func (p *waitReportingProvider) Check(ctx context.Context) error {
@@ -56,6 +63,21 @@ func (p *waitReportingProvider) Check(ctx context.Context) error {
 		}
 		return nil
 	}
+}
+
+func (p *waitReportingProvider) Upload(ctx context.Context, localPath string, remotePath string, size int64, collisionPolicy string) (RemoteFile, error) {
+	if p.uploadStarted != nil {
+		if p.progressReporter != nil {
+			p.progressReporter(size / 2)
+		}
+		close(p.uploadStarted)
+		select {
+		case <-ctx.Done():
+			return RemoteFile{}, ctx.Err()
+		case <-p.continueUpload:
+		}
+	}
+	return p.fakeProvider.Upload(ctx, localPath, remotePath, size, collisionPolicy)
 }
 
 func (p *fakeProvider) Check(context.Context) error { return nil }
@@ -85,6 +107,20 @@ func (p *fakeProvider) Verify(_ context.Context, remotePath string, size int64) 
 		return RemoteFile{}, false, nil
 	}
 	return p.verifyFile(remotePath, size)
+}
+
+func TestSetTransferProgressAllowsMultipartRetryRollback(t *testing.T) {
+	manager := NewWithFactory(Options{}, nil, slog.Default(), nil)
+	const transferID int64 = 42
+	manager.setTransferRuntime(transferID, "uploading", "正在上传到 115", time.Time{})
+
+	manager.setTransferProgress(transferID, 16*1024*1024)
+	manager.setTransferProgress(transferID, 0)
+
+	state, ok := manager.TransferRuntimeStates()[transferID]
+	if !ok || state.BytesTransferred != 0 {
+		t.Fatalf("runtime state=%#v ok=%v, want retry rollback to zero", state, ok)
+	}
 }
 
 func TestProcessTargetPublishesAndClearsRuntimeWaitState(t *testing.T) {
@@ -125,8 +161,10 @@ func TestProcessTargetPublishesAndClearsRuntimeWaitState(t *testing.T) {
 	}
 
 	provider := &waitReportingProvider{
-		checkStarted:  make(chan struct{}),
-		continueCheck: make(chan struct{}),
+		checkStarted:   make(chan struct{}),
+		continueCheck:  make(chan struct{}),
+		uploadStarted:  make(chan struct{}),
+		continueUpload: make(chan struct{}),
 	}
 	manager := NewWithFactory(Options{QuietPeriod: time.Millisecond, MaxAttempts: 1}, st, slog.Default(), func(context.Context, store.UploadBatchTarget) (Provider, error) {
 		return provider, nil
@@ -166,6 +204,16 @@ func TestProcessTargetPublishesAndClearsRuntimeWaitState(t *testing.T) {
 	}
 
 	close(provider.continueCheck)
+	select {
+	case <-provider.uploadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("provider upload did not publish progress")
+	}
+	state, ok = manager.TransferRuntimeStates()[transfers[0].ID]
+	if !ok || state.Phase != "uploading" || state.BytesTransferred != info.Size()/2 || state.WaitingUntil != "" {
+		t.Fatalf("unexpected transfer progress state: %#v ok=%v", state, ok)
+	}
+	close(provider.continueUpload)
 	select {
 	case err := <-processDone:
 		if err != nil {
@@ -602,6 +650,9 @@ func TestCollectCandidatesSkipsSeriesArtifactsOutsideSeasonWatchRoot(t *testing.
 	}
 	if _, ok := got["tvshow-nfo"]; ok {
 		t.Fatalf("series artifact outside the watch root must be skipped: %#v", candidates)
+	}
+	if len(candidates) != 2 || candidates[0].RelativePath != "S01E01.mkv" || candidates[1].RelativePath != "season.nfo" {
+		t.Fatalf("upload candidates are not in stable queue order: %#v", candidates)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ec115 "github.com/SheltonZhu/115driver/pkg/crypto/ec115"
@@ -30,6 +31,8 @@ const (
 	max115MultipartParts         = 10000
 	oss115TokenRefreshWindow     = 15 * time.Minute
 	uncertain115CommitMarker     = "115 remote commit result is uncertain"
+	min115ProgressReportBytes    = 1 * 1024 * 1024
+	min115ProgressReportInterval = 250 * time.Millisecond
 )
 
 type upload115Cipher interface {
@@ -222,7 +225,7 @@ func (p *cookie115Provider) rapidUploadOrByMultipart(ctx context.Context, dirID 
 		return err
 	}
 	if digest.Size <= singleRequest115UploadLimit {
-		if err := p.uploadByOSSSingle(ctx, &fastInfo.UploadOSSParams, file); err != nil {
+		if err := p.uploadByOSSSingle(ctx, &fastInfo.UploadOSSParams, digest.Size, file); err != nil {
 			return fmt.Errorf("upload to OSS with one request: %w", err)
 		}
 		return nil
@@ -255,7 +258,7 @@ func (p *cookie115Provider) uploadAvailable(ctx context.Context) (bool, error) {
 	return p.client.UserID != 0 && strings.TrimSpace(p.client.Userkey) != "", nil
 }
 
-func (p *cookie115Provider) uploadByOSSSingle(ctx context.Context, params *pan115.UploadOSSParams, reader io.Reader) error {
+func (p *cookie115Provider) uploadByOSSSingle(ctx context.Context, params *pan115.UploadOSSParams, fileSize int64, reader io.Reader) error {
 	token, err := p.get115OSSToken(ctx)
 	if err != nil {
 		return fmt.Errorf("get OSS credentials: %w", err)
@@ -267,6 +270,9 @@ func (p *cookie115Provider) uploadByOSSSingle(ctx context.Context, params *pan11
 	operationCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	options := append(pan115.OssOption(params, token), oss.WithContext(operationCtx))
+	if listener := new115UploadProgressListener(0, fileSize, fileSize, p.progressReporter); listener != nil {
+		options = append(options, oss.Progress(listener))
+	}
 	if err := bucket.PutObject(params.Object, reader, options...); err != nil {
 		return &uncertain115CommitError{stage: "single-request OSS upload", err: err}
 	}
@@ -312,7 +318,7 @@ func (p *cookie115Provider) uploadByOSSMultipart(ctx context.Context, params *pa
 	for partNumber := 1; partNumber <= partCount; partNumber++ {
 		token, bucket, err = p.refresh115OSSBucket(ctx, params, token, bucket, true)
 		if err != nil {
-			p.abort115MultipartUpload(bucket, uploadSession, token)
+			p.abort115MultipartUpload(ctx, bucket, uploadSession, token)
 			return fmt.Errorf("refresh OSS credentials before part %d/%d: %w", partNumber, partCount, err)
 		}
 		offset := int64(partNumber-1) * partSize
@@ -331,17 +337,26 @@ func (p *cookie115Provider) uploadByOSSMultipart(ctx context.Context, params *pa
 				oss.UserAgentHeader(pan115.OSSUserAgent),
 				oss.WithContext(operationCtx),
 			}
+			if listener := new115UploadProgressListener(offset, currentPartSize, fileSize, p.progressReporter); listener != nil {
+				options = append(options, oss.Progress(listener))
+			}
 			uploadedPart, err = bucket.UploadPart(uploadSession, section, currentPartSize, partNumber, options...)
 			cancel()
 			if err == nil {
+				if p.progressReporter != nil {
+					p.progressReporter(offset + currentPartSize)
+				}
 				break
 			}
+			if p.progressReporter != nil {
+				p.progressReporter(offset)
+			}
 			if !isRetryable115Error(err) || attempt == max115OSSOperationAttempts {
-				p.abort115MultipartUpload(bucket, uploadSession, token)
+				p.abort115MultipartUpload(ctx, bucket, uploadSession, token)
 				return fmt.Errorf("upload OSS part %d/%d: %w", partNumber, partCount, err)
 			}
 			if waitErr := p.waitUploadRetry(ctx, attempt); waitErr != nil {
-				p.abort115MultipartUpload(bucket, uploadSession, token)
+				p.abort115MultipartUpload(ctx, bucket, uploadSession, token)
 				return waitErr
 			}
 		}
@@ -417,8 +432,11 @@ func (p *cookie115Provider) refresh115OSSBucket(ctx context.Context, params *pan
 	return latestToken, latestBucket, nil
 }
 
-func (p *cookie115Provider) abort115MultipartUpload(bucket *oss.Bucket, uploadSession oss.InitiateMultipartUploadResult, token *pan115.UploadOSSTokenResp) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (p *cookie115Provider) abort115MultipartUpload(parent context.Context, bucket *oss.Bucket, uploadSession oss.InitiateMultipartUploadResult, token *pan115.UploadOSSTokenResp) {
+	if parent.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 	_ = bucket.AbortMultipartUpload(
 		uploadSession,
@@ -426,6 +444,70 @@ func (p *cookie115Provider) abort115MultipartUpload(bucket *oss.Bucket, uploadSe
 		oss.UserAgentHeader(pan115.OSSUserAgent),
 		oss.WithContext(ctx),
 	)
+}
+
+type upload115ProgressListener struct {
+	mu                sync.Mutex
+	offset            int64
+	partSize          int64
+	totalSize         int64
+	report            func(int64)
+	lastReportedBytes int64
+	lastReportedAt    time.Time
+}
+
+func new115UploadProgressListener(offset int64, partSize int64, totalSize int64, report func(int64)) *upload115ProgressListener {
+	if report == nil || totalSize <= 0 {
+		return nil
+	}
+	return &upload115ProgressListener{
+		offset:            offset,
+		partSize:          partSize,
+		totalSize:         totalSize,
+		report:            report,
+		lastReportedBytes: -1,
+	}
+}
+
+func (listener *upload115ProgressListener) ProgressChanged(event *oss.ProgressEvent) {
+	if listener == nil || event == nil || listener.report == nil {
+		return
+	}
+	consumed := event.ConsumedBytes
+	if event.EventType == oss.TransferCompletedEvent && consumed < listener.partSize {
+		consumed = listener.partSize
+	}
+	if consumed < 0 {
+		consumed = 0
+	}
+	if listener.partSize >= 0 && consumed > listener.partSize {
+		consumed = listener.partSize
+	}
+	transferred := listener.offset + consumed
+	if transferred > listener.totalSize {
+		transferred = listener.totalSize
+	}
+	force := event.EventType == oss.TransferCompletedEvent ||
+		event.EventType == oss.TransferFailedEvent ||
+		transferred == listener.totalSize
+	now := time.Now()
+
+	listener.mu.Lock()
+	if !force &&
+		listener.lastReportedBytes >= 0 &&
+		transferred-listener.lastReportedBytes < min115ProgressReportBytes &&
+		now.Sub(listener.lastReportedAt) < min115ProgressReportInterval {
+		listener.mu.Unlock()
+		return
+	}
+	if transferred < listener.lastReportedBytes {
+		listener.mu.Unlock()
+		return
+	}
+	listener.lastReportedBytes = transferred
+	listener.lastReportedAt = now
+	listener.mu.Unlock()
+	listener.report(transferred)
 }
 
 func multipart115PartSizeFor(fileSize int64) int64 {

@@ -417,6 +417,10 @@ func TestCookie115SmallFileUsesSingleOSSPut(t *testing.T) {
 		StatusCode:      "200",
 	}
 	provider.ossTokenExpiresAt = time.Now().Add(time.Hour)
+	var progress []int64
+	provider.progressReporter = func(bytesTransferred int64) {
+		progress = append(progress, bytesTransferred)
+	}
 
 	initRequests := 0
 	provider.client.Client.SetTransport(roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -459,6 +463,9 @@ func TestCookie115SmallFileUsesSingleOSSPut(t *testing.T) {
 	if initRequests != 1 || ossRequests != 1 {
 		t.Fatalf("requests: init=%d OSS=%d, want one of each", initRequests, ossRequests)
 	}
+	if len(progress) == 0 || progress[len(progress)-1] != 16 {
+		t.Fatalf("progress=%v, want final value 16", progress)
+	}
 }
 
 func TestMultipart115PartSizeForTypicalVideo(t *testing.T) {
@@ -494,6 +501,10 @@ func TestCookie115MultipartUploadUsesOneSessionAndSequentialParts(t *testing.T) 
 		StatusCode:      "200",
 	}
 	provider.ossTokenExpiresAt = time.Now().Add(time.Hour)
+	var multipartProgress []int64
+	provider.progressReporter = func(bytesTransferred int64) {
+		multipartProgress = append(multipartProgress, bytesTransferred)
+	}
 
 	params := &pan115.UploadOSSParams{Bucket: "test-bucket", Object: "episode.mkv", SHA1: "TEST-SHA1"}
 	params.Callback.Callback = "test-callback"
@@ -592,6 +603,96 @@ func TestCookie115MultipartUploadUsesOneSessionAndSequentialParts(t *testing.T) 
 	}
 	if got := strings.Join(events, ","); got != "init,part-1,part-2,complete" {
 		t.Fatalf("multipart request order=%q", got)
+	}
+	if len(multipartProgress) == 0 || multipartProgress[len(multipartProgress)-1] != fileSize {
+		t.Fatalf("multipart progress final=%v, want %d", multipartProgress, fileSize)
+	}
+}
+
+func TestCookie115MultipartProgressRollsBackBeforeRetry(t *testing.T) {
+	provider, err := newCookie115Provider("UID=user;CID=cid;SEID=seid;KID=kid", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.ossToken = &pan115.UploadOSSTokenResp{
+		AccessKeyID:     "test-access-key",
+		AccessKeySecret: "test-secret",
+		SecurityToken:   "test-security-token",
+		StatusCode:      "200",
+	}
+	provider.ossTokenExpiresAt = time.Now().Add(time.Hour)
+	provider.uploadRetryDelay = func(int) time.Duration { return 0 }
+
+	var progress []int64
+	provider.progressReporter = func(bytesTransferred int64) {
+		progress = append(progress, bytesTransferred)
+	}
+
+	params := &pan115.UploadOSSParams{Bucket: "test-bucket", Object: "retry.mkv", SHA1: "TEST-SHA1"}
+	params.Callback.Callback = "test-callback"
+	params.Callback.CallbackVar = "test-callback-vars"
+
+	const fileSize int64 = 3
+	file, err := os.CreateTemp(t.TempDir(), "cookie115-multipart-retry-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	if _, err := file.Write([]byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+
+	partAttempts := 0
+	provider.ossHTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		query := request.URL.Query()
+		switch {
+		case request.Method == http.MethodPost && query.Has("uploads"):
+			return cookie115UploadHTTPResponse(request, "application/xml", `<InitiateMultipartUploadResult><Bucket>test-bucket</Bucket><Key>retry.mkv</Key><UploadId>upload-id</UploadId></InitiateMultipartUploadResult>`), nil
+
+		case request.Method == http.MethodPut && query.Get("uploadId") == "upload-id":
+			partAttempts++
+			body, readErr := io.ReadAll(request.Body)
+			if readErr != nil {
+				t.Fatalf("read OSS part attempt %d: %v", partAttempts, readErr)
+			}
+			if string(body) != "abc" {
+				t.Fatalf("part attempt %d body=%q, want abc", partAttempts, string(body))
+			}
+			if partAttempts == 1 {
+				response := cookie115UploadHTTPResponse(request, "application/xml", `<Error><Code>InternalError</Code><Message>retry</Message><RequestId>test-request</RequestId><HostId>test-host</HostId></Error>`)
+				response.StatusCode = http.StatusInternalServerError
+				response.Status = "500 Internal Server Error"
+				return response, nil
+			}
+			response := cookie115UploadHTTPResponse(request, "application/xml", "")
+			response.Header.Set("ETag", `"etag-1"`)
+			return response, nil
+
+		case request.Method == http.MethodPost && query.Get("uploadId") == "upload-id":
+			return cookie115UploadHTTPResponse(request, "application/json", `{"state":true,"data":{"file_name":"retry.mkv"}}`), nil
+
+		default:
+			t.Fatalf("unexpected OSS request: %s %s", request.Method, request.URL)
+			return nil, nil
+		}
+	})}
+
+	if err := provider.uploadByOSSMultipart(context.Background(), params, fileSize, file); err != nil {
+		t.Fatalf("multipart upload: %v", err)
+	}
+	if partAttempts != 2 {
+		t.Fatalf("part attempts=%d, want 2", partAttempts)
+	}
+
+	rollbackIndex := -1
+	for index := 1; index < len(progress)-1; index++ {
+		if progress[index-1] == fileSize && progress[index] == 0 {
+			rollbackIndex = index
+			break
+		}
+	}
+	if rollbackIndex < 0 || progress[len(progress)-1] != fileSize {
+		t.Fatalf("progress=%v, want failed attempt %d -> 0 rollback -> final %d", progress, fileSize, fileSize)
 	}
 }
 

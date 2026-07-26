@@ -117,6 +117,56 @@ func TestTaskRunsEndpointReturnsBatchSummary(t *testing.T) {
 	}
 }
 
+func TestTasksEndpointFiltersByScanRun(t *testing.T) {
+	t.Parallel()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	for index, scanRunID := range []string{"batch-a", "batch-b"} {
+		if err := st.BeginScanRun(ctx, scanRunID, "manual", fmt.Sprintf("media-%d", index)); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), fmt.Sprintf("episode-%d.mkv", index))
+		if err := os.WriteFile(path, []byte("video"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mediaID, err := st.UpsertMediaFile(ctx, path, info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.EnqueueMediaTaskWithScanRun(ctx, mediaID, true, true, scanRunID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	handler := NewServer(config.Default(), filepath.Join(t.TempDir(), "config.yaml"), st, nil, nil, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/api/tasks?scanRunId=batch-b&page=1&pageSize=20", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("tasks status=%d body=%s", response.Code, response.Body.String())
+	}
+	var got store.TaskListResult
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Total != 1 || len(got.Items) != 1 || got.Items[0].ScanRunID != "batch-b" {
+		t.Fatalf("unexpected filtered tasks: %+v", got)
+	}
+}
+
 func TestRescanAllDirectoriesUsesOneScanRun(t *testing.T) {
 	t.Parallel()
 

@@ -1119,6 +1119,7 @@ export function App() {
   const [restartRequired, setRestartRequired] = useState(false);
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskRuns, setTaskRuns] = useState<TaskRun[]>([]);
   const [taskSummary, setTaskSummary] = useState<TaskSummary>({ total: 0, active: 0, failed: 0 });
   const [uploadSummary, setUploadSummary] = useState<UploadSummary>({ collecting: 0, pending: 0, running: 0, completed: 0, failed: 0 });
   const [uploadBatches, setUploadBatches] = useState<UploadBatch[]>([]);
@@ -1131,10 +1132,11 @@ export function App() {
   const [taskPage, setTaskPage] = useState(1);
   const [taskPageSize] = useState(20);
   const [taskStatusFilter, setTaskStatusFilter] = useState<TaskStatusFilter>('all');
+  const [taskRunFilter, setTaskRunFilter] = useState('');
   const [taskPathFilter, setTaskPathFilter] = useState('');
   const [taskFromFilter, setTaskFromFilter] = useState('');
   const [taskToFilter, setTaskToFilter] = useState('');
-  const [appliedTaskFilters, setAppliedTaskFilters] = useState({ path: '', from: '', to: '' });
+  const [appliedTaskFilters, setAppliedTaskFilters] = useState({ scanRunId: '', path: '', from: '', to: '' });
   const [uploadTotal, setUploadTotal] = useState(0);
   const [uploadPage, setUploadPage] = useState(1);
   const [uploadStatusFilter, setUploadStatusFilter] = useState<UploadStatusFilter>('all');
@@ -1341,6 +1343,7 @@ export function App() {
         configResult,
         toolsResult,
         tasksResult,
+        taskRunsResult,
         taskSummaryResult,
         dirsResult,
         artifactsResult,
@@ -1354,6 +1357,7 @@ export function App() {
         requestJSON<AppConfig>('/api/config', '应用配置'),
         requestJSON<ToolStatus[]>('/api/tools/status', '工具状态'),
         requestJSON<TaskListResponse | Task[]>(`/api/tasks?page=1&pageSize=${taskPageSize}`, '任务列表'),
+        requestJSON<TaskRun[] | TaskRunListResponse>('/api/tasks/runs?limit=200', '任务批次'),
         requestJSON<TaskSummary>('/api/tasks/summary', '任务摘要'),
         requestJSON<WatchDir[]>('/api/watch-dirs', '媒体目录'),
         requestJSON<Artifact[]>('/api/artifacts?limit=10', '最近产物'),
@@ -1377,6 +1381,10 @@ export function App() {
       }
       if (toolsResult.status === 'fulfilled') setTools(asArray<ToolStatus>(toolsResult.value));
       if (tasksResult.status === 'fulfilled') applyTaskList(tasksResult.value);
+      if (taskRunsResult.status === 'fulfilled') {
+        const value = taskRunsResult.value;
+        setTaskRuns(Array.isArray(value) ? value : asArray<TaskRun>(value.items));
+      }
       if (taskSummaryResult.status === 'fulfilled') setTaskSummary(taskSummaryResult.value);
       if (dirsResult.status === 'fulfilled') setWatchDirs(asArray<WatchDir>(dirsResult.value));
       if (artifactsResult.status === 'fulfilled') setArtifacts(asArray<Artifact>(artifactsResult.value));
@@ -1389,6 +1397,7 @@ export function App() {
         configResult.status === 'rejected' && '应用配置',
         toolsResult.status === 'rejected' && '工具状态',
         tasksResult.status === 'rejected' && '任务列表',
+        taskRunsResult.status === 'rejected' && '任务批次',
         taskSummaryResult.status === 'rejected' && '任务摘要',
         dirsResult.status === 'rejected' && '媒体目录',
         artifactsResult.status === 'rejected' && '最近产物',
@@ -1783,6 +1792,7 @@ export function App() {
 
   async function loadTasks(page = taskPage, status = taskStatusFilter, filters = appliedTaskFilters) {
     const params = new URLSearchParams({ page: String(page), pageSize: String(taskPageSize) });
+    if (filters.scanRunId) params.set('scanRunId', filters.scanRunId);
     if (filters.path.trim()) params.set('path', filters.path.trim());
     if (status !== 'all') params.set('status', status);
     if (filters.from) params.set('from', zonedInputToUTC(filters.from, displayTimezone, false));
@@ -1794,6 +1804,17 @@ export function App() {
     }
     applyTaskList(await response.json());
     void loadTaskSummary();
+  }
+
+  async function loadTaskRuns() {
+    try {
+      const response = await fetch('/api/tasks/runs?limit=200');
+      if (!response.ok) return;
+      const value = await response.json() as TaskRun[] | TaskRunListResponse;
+      setTaskRuns(Array.isArray(value) ? value : asArray<TaskRun>(value.items));
+    } catch {
+      // Keep the last known batch choices while the main health check handles connectivity.
+    }
   }
 
   function applyUploadBatchList(value: UploadBatchListResponse) {
@@ -2166,8 +2187,10 @@ export function App() {
 
   useEffect(() => {
     if (activePage !== 'tasks') return;
+    void loadTaskRuns();
     const interval = window.setInterval(() => {
       void loadTasks(taskPage, taskStatusFilter);
+      void loadTaskRuns();
     }, taskListRefreshIntervalMs);
     return () => window.clearInterval(interval);
   }, [activePage, taskPage, taskStatusFilter, taskPageSize, appliedTaskFilters, displayTimezone]);
@@ -2305,16 +2328,17 @@ export function App() {
 
   function resetTaskFilters() {
     setTaskStatusFilter('all');
+    setTaskRunFilter('');
     setTaskPathFilter('');
     setTaskFromFilter('');
     setTaskToFilter('');
-    const emptyFilters = { path: '', from: '', to: '' };
+    const emptyFilters = { scanRunId: '', path: '', from: '', to: '' };
     setAppliedTaskFilters(emptyFilters);
     void loadTasks(1, 'all', emptyFilters);
   }
 
   function applyTaskFilters() {
-    const filters = { path: taskPathFilter, from: taskFromFilter, to: taskToFilter };
+    const filters = { scanRunId: taskRunFilter, path: taskPathFilter, from: taskFromFilter, to: taskToFilter };
     setAppliedTaskFilters(filters);
     void loadTasks(1, taskStatusFilter, filters);
   }
@@ -4105,6 +4129,12 @@ export function App() {
               ))}
             </div>
             <form className="task-filters" onSubmit={(event) => { event.preventDefault(); applyTaskFilters(); }}>
+              <label>任务批次
+                <select value={taskRunFilter} onChange={(event) => setTaskRunFilter(event.target.value)}>
+                  <option value="">全部批次</option>
+                  {taskRuns.map((run) => <option key={run.id} value={run.id} title={run.scopePath}>{taskRunFilterLabel(run, displayTimezone)}</option>)}
+                </select>
+              </label>
               <label>路径<input value={taskPathFilter} onChange={(event) => setTaskPathFilter(event.target.value)} placeholder="输入路径关键字" /></label>
               <label>开始时间（{displayTimezone}）<input type="datetime-local" value={taskFromFilter} onChange={(event) => setTaskFromFilter(event.target.value)} /></label>
               <label>结束时间（{displayTimezone}）<input type="datetime-local" value={taskToFilter} onChange={(event) => setTaskToFilter(event.target.value)} /></label>
@@ -5972,6 +6002,23 @@ function formatStoredTime(value: string, timezone: string): string {
   } catch {
     return value;
   }
+}
+
+function taskRunFilterLabel(run: TaskRun, timezone: string): string {
+  const source = run.source === 'manual' ? '手动扫描' : run.source === 'watcher' ? '目录监控' : run.source === 'scan' ? '启动扫描' : '历史任务';
+  const status = run.status === 'collecting' ? '扫描中'
+    : run.status === 'running' ? '处理中'
+      : run.status === 'completed' ? '已完成'
+        : run.status === 'failed' ? '失败'
+          : run.status === 'canceled' ? '已取消'
+            : run.status === 'empty' ? '无任务'
+              : run.status;
+  const parts = run.scopePath.split(/[\\/]/).filter(Boolean);
+  const count = run.total > 0 ? `${run.total} 个任务` : '无任务';
+  const details = [formatStoredTime(run.createdAt, timezone), source];
+  if (parts.length || run.scopePath) details.push(parts.slice(-2).join(' / ') || run.scopePath);
+  details.push(`${count}（${status}）`);
+  return details.join(' · ');
 }
 
 function zonedInputToUTC(value: string, timezone: string, endOfMinute: boolean): string {

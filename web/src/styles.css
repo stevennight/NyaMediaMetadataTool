@@ -1221,7 +1221,7 @@ button:disabled {
 
 .task-filters {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(190px, auto) minmax(190px, auto) auto;
+  grid-template-columns: minmax(240px, 1fr) minmax(220px, 1fr) minmax(190px, auto) minmax(190px, auto) auto;
   gap: 12px;
   align-items: end;
   margin-bottom: 18px;
@@ -1248,13 +1248,15 @@ button:disabled {
 }
 
 .task-filters label {
+  min-width: 0;
   display: grid;
   gap: 6px;
   color: var(--text-muted);
   font-size: 13px;
 }
 
-.task-filters input {
+.task-filters input,
+.task-filters select {
   width: 100%;
   color: var(--text);
 }
@@ -5148,6 +5150,24 @@ label small {
   .task-page-grid,
   .rename-page-grid {
     height: auto;
+  }
+
+  .task-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .task-page-grid > .card,
+  .task-page-grid > .card > .task-table-wrap {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .task-page-grid > .card {
+    overflow: hidden;
+  }
+
+  .task-page-grid > .card > .task-table-wrap {
+    overflow-x: auto;
   }
 
   .modal-backdrop {

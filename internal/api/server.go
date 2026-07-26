@@ -332,12 +332,13 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		pageSize, _ = strconv.Atoi(r.URL.Query().Get("limit"))
 	}
 	filters := store.TaskListFilters{
-		Page:     page,
-		PageSize: pageSize,
-		Path:     r.URL.Query().Get("path"),
-		Status:   r.URL.Query().Get("status"),
-		From:     r.URL.Query().Get("from"),
-		To:       r.URL.Query().Get("to"),
+		Page:      page,
+		PageSize:  pageSize,
+		Path:      r.URL.Query().Get("path"),
+		Status:    r.URL.Query().Get("status"),
+		ScanRunID: r.URL.Query().Get("scanRunId"),
+		From:      r.URL.Query().Get("from"),
+		To:        r.URL.Query().Get("to"),
 	}
 	tasks, err := s.store.ListTasksFiltered(r.Context(), filters)
 	if err != nil {

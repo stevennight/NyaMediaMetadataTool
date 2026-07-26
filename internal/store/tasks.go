@@ -43,12 +43,13 @@ type TaskDetail struct {
 }
 
 type TaskListFilters struct {
-	Page     int
-	PageSize int
-	Path     string
-	Status   string
-	From     string
-	To       string
+	Page      int
+	PageSize  int
+	Path      string
+	Status    string
+	ScanRunID string
+	From      string
+	To        string
 }
 
 type TaskListResult struct {
@@ -175,6 +176,10 @@ func buildTaskWhere(filters TaskListFilters) (string, []any) {
 	if status := strings.TrimSpace(filters.Status); status != "" && status != "all" {
 		clauses = append(clauses, "tasks.status = ?")
 		args = append(args, status)
+	}
+	if scanRunID := strings.TrimSpace(filters.ScanRunID); scanRunID != "" {
+		clauses = append(clauses, "tasks.scan_run_id = ?")
+		args = append(args, scanRunID)
 	}
 	if from := strings.TrimSpace(filters.From); from != "" {
 		clauses = append(clauses, "tasks.created_at >= ?")

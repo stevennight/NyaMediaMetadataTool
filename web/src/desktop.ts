@@ -8,8 +8,15 @@ export type DesktopRuntimeInfo = {
   database: string;
 };
 
+export type DesktopPreferences = {
+  autostartEnabled: boolean;
+  autostartSupported: boolean;
+};
+
 type DesktopBridge = {
   GetRuntimeInfo: () => Promise<DesktopRuntimeInfo>;
+  GetDesktopPreferences: () => Promise<DesktopPreferences>;
+  SetAutostartEnabled: (enabled: boolean) => Promise<DesktopPreferences>;
   PickDirectory: (title: string, initialPath: string, allowedRoot: string) => Promise<string>;
   PickFile: (title: string, initialPath: string, displayName: string, pattern: string) => Promise<string>;
   RevealPath: (path: string) => Promise<void>;
@@ -86,6 +93,18 @@ export async function getRuntimeInfo(): Promise<DesktopRuntimeInfo> {
     };
   }
   return desktop.GetRuntimeInfo();
+}
+
+export async function getDesktopPreferences(): Promise<DesktopPreferences> {
+  const desktop = bridge();
+  if (!desktop) return { autostartEnabled: false, autostartSupported: false };
+  return desktop.GetDesktopPreferences();
+}
+
+export async function setDesktopAutostart(enabled: boolean): Promise<DesktopPreferences> {
+  const desktop = bridge();
+  if (!desktop) throw new Error('开机自启仅在桌面应用中可用');
+  return desktop.SetAutostartEnabled(enabled);
 }
 
 export async function pickDesktopDirectory(options: { title: string; initialPath: string; allowedRoot?: string }): Promise<{ handled: boolean; path: string }> {

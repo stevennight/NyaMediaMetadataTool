@@ -34,6 +34,14 @@ type DesktopApp struct {
 	ctx                   context.Context
 	secondInstancePending bool
 	focusWindow           func(context.Context)
+	startHidden           bool
+
+	trayMu      sync.Mutex
+	tray        desktopTray
+	trayFactory func(onOpen func(), onQuit func()) (desktopTray, error)
+
+	autostartStatus func() (bool, error)
+	autostartSet    func(bool) error
 
 	serviceOnce    sync.Once
 	serviceMu      sync.RWMutex
@@ -70,6 +78,11 @@ type DesktopRuntimeInfo struct {
 	Database   string `json:"database"`
 }
 
+type DesktopPreferences struct {
+	AutostartEnabled   bool `json:"autostartEnabled"`
+	AutostartSupported bool `json:"autostartSupported"`
+}
+
 type DesktopRenamePreviewEvent struct {
 	RequestID string               `json:"requestId"`
 	Type      string               `json:"type"`
@@ -86,6 +99,9 @@ func NewDesktopApp(paths appdata.Paths, version string, logger *slog.Logger) *De
 		version:         version,
 		logger:          logger,
 		focusWindow:     focusDesktopWindow,
+		trayFactory:     newDesktopTray,
+		autostartStatus: desktopAutostartEnabled,
+		autostartSet:    setDesktopAutostart,
 		serviceInitCtx:  initCtx,
 		serviceCancel:   cancelInit,
 		closeDone:       make(chan struct{}),
@@ -100,13 +116,16 @@ func NewDesktopApp(paths appdata.Paths, version string, logger *slog.Logger) *De
 
 func (a *DesktopApp) startup(ctx context.Context) {
 	a.publishRuntimeContext(ctx)
+	a.startTray()
 	if err := wailsRuntime.InitializeNotifications(ctx); err != nil {
 		a.logger.Debug("desktop notifications unavailable", "error", err)
 	}
 }
 
 func (a *DesktopApp) domReady(ctx context.Context) {
-	wailsRuntime.WindowShow(ctx)
+	if !a.startHidden {
+		wailsRuntime.WindowShow(ctx)
+	}
 }
 
 func (a *DesktopApp) secondInstance(_ options.SecondInstanceData) {
@@ -135,6 +154,7 @@ func (a *DesktopApp) beforeClose(ctx context.Context) bool {
 	if err != nil || active.Tasks+active.Uploads+active.Mutations+active.Background == 0 {
 		return false
 	}
+	a.focusWindow(ctx)
 
 	message := fmt.Sprintf(
 		"仍有 %d 个媒体任务、%d 个上传任务、%d 个前台操作和 %d 个后台扫描等待或正在执行。退出会立即取消可中断操作，并最多等待 %d 秒完成收尾；未完成的队列任务会在下次启动时恢复。",
@@ -146,7 +166,7 @@ func (a *DesktopApp) beforeClose(ctx context.Context) bool {
 	)
 	choice, dialogErr := wailsRuntime.MessageDialog(ctx, wailsRuntime.MessageDialogOptions{
 		Type:          wailsRuntime.QuestionDialog,
-		Title:         "退出 Nya Media？",
+		Title:         "退出 " + desktopProductName + "？",
 		Message:       message,
 		Buttons:       []string{"继续运行", "退出应用"},
 		DefaultButton: "继续运行",
@@ -164,6 +184,7 @@ func (a *DesktopApp) beforeClose(ctx context.Context) bool {
 }
 
 func (a *DesktopApp) shutdown(ctx context.Context) {
+	a.stopTray()
 	a.clearRuntimeContext()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), a.desktopShutdownTimeout())
 	defer cancel()
@@ -174,6 +195,44 @@ func (a *DesktopApp) shutdown(ctx context.Context) {
 	case <-closeDone:
 	case <-shutdownCtx.Done():
 		a.logger.Warn("desktop shutdown exceeded time limit", "timeout", a.desktopShutdownTimeout())
+	}
+}
+
+func (a *DesktopApp) startTray() {
+	if !desktopTraySupported() {
+		return
+	}
+	tray, err := a.trayFactory(a.showWindow, a.quitFromTray)
+	if err != nil {
+		a.logger.Warn("start desktop tray", "error", err)
+		return
+	}
+	a.trayMu.Lock()
+	a.tray = tray
+	a.trayMu.Unlock()
+}
+
+func (a *DesktopApp) stopTray() {
+	a.trayMu.Lock()
+	tray := a.tray
+	a.tray = nil
+	a.trayMu.Unlock()
+	if tray != nil {
+		if err := tray.Close(); err != nil {
+			a.logger.Warn("stop desktop tray", "error", err)
+		}
+	}
+}
+
+func (a *DesktopApp) showWindow() {
+	if ctx := a.runtimeContext(); ctx != nil {
+		a.focusWindow(ctx)
+	}
+}
+
+func (a *DesktopApp) quitFromTray() {
+	if ctx := a.runtimeContext(); ctx != nil {
+		wailsRuntime.Quit(ctx)
 	}
 }
 
@@ -356,6 +415,29 @@ func (a *DesktopApp) GetRuntimeInfo() (DesktopRuntimeInfo, error) {
 		ConfigPath: a.paths.Config,
 		Database:   service.Config.Database.Path,
 	}, nil
+}
+
+func (a *DesktopApp) GetDesktopPreferences() (DesktopPreferences, error) {
+	preferences := DesktopPreferences{AutostartSupported: desktopAutostartSupported()}
+	if !preferences.AutostartSupported {
+		return preferences, nil
+	}
+	enabled, err := a.autostartStatus()
+	if err != nil {
+		return DesktopPreferences{}, err
+	}
+	preferences.AutostartEnabled = enabled
+	return preferences, nil
+}
+
+func (a *DesktopApp) SetAutostartEnabled(enabled bool) (DesktopPreferences, error) {
+	if !desktopAutostartSupported() {
+		return DesktopPreferences{AutostartSupported: false}, errors.New("autostart is not supported on this platform")
+	}
+	if err := a.autostartSet(enabled); err != nil {
+		return DesktopPreferences{}, err
+	}
+	return DesktopPreferences{AutostartEnabled: enabled, AutostartSupported: true}, nil
 }
 
 func (a *DesktopApp) PickDirectory(title string, initialPath string, allowedRoot string) (string, error) {

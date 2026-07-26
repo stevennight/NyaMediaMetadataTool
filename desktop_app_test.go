@@ -44,6 +44,48 @@ func TestPathWithinRoot(t *testing.T) {
 	}
 }
 
+func TestLaunchedInBackground(t *testing.T) {
+	if !launchedInBackground([]string{"--background"}) {
+		t.Fatal("--background did not enable background launch")
+	}
+	if !launchedInBackground([]string{"--some-option", "--background"}) {
+		t.Fatal("background launch argument was not detected after another option")
+	}
+	if launchedInBackground([]string{"--background=false"}) {
+		t.Fatal("an unrelated argument enabled background launch")
+	}
+}
+
+func TestDesktopPreferencesReadAndUpdateAutostart(t *testing.T) {
+	if !desktopAutostartSupported() {
+		t.Skip("autostart integration is platform-specific")
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	app := NewDesktopApp(appdata.Paths{}, "test", logger)
+	app.autostartStatus = func() (bool, error) { return true, nil }
+
+	preferences, err := app.GetDesktopPreferences()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preferences.AutostartSupported || !preferences.AutostartEnabled {
+		t.Fatalf("GetDesktopPreferences() = %+v", preferences)
+	}
+
+	var updated bool
+	app.autostartSet = func(enabled bool) error {
+		updated = enabled
+		return nil
+	}
+	preferences, err = app.SetAutostartEnabled(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated || !preferences.AutostartEnabled || !preferences.AutostartSupported {
+		t.Fatalf("SetAutostartEnabled(true) = %+v, updated=%v", preferences, updated)
+	}
+}
+
 func TestDesktopHandlerStartsServiceOnlyForAPI(t *testing.T) {
 	root := t.TempDir()
 	paths := appdata.Paths{

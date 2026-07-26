@@ -3,12 +3,17 @@ import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent
 import {
   Activity,
   AlertTriangle,
+  Ban,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   CircleGauge,
   CloudUpload,
   Database,
+  Eye,
   FileCheck2,
   Film,
+  Filter,
   FolderCog,
   FolderOpen,
   History,
@@ -20,6 +25,7 @@ import {
   Plus,
   Pencil,
   RefreshCw,
+  RotateCcw,
   Save,
   SearchCheck,
   Settings,
@@ -28,12 +34,13 @@ import {
   Tags,
   Trash2,
   UploadCloud,
+  Undo2,
   WandSparkles,
   X
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { getRuntimeInfo, notifyDesktop, pickDesktopDirectory, pickDesktopFile, previewDesktopRename, revealDesktopPath } from './desktop';
-import type { DesktopRuntimeInfo } from './desktop';
+import { getDesktopPreferences, getRuntimeInfo, notifyDesktop, pickDesktopDirectory, pickDesktopFile, previewDesktopRename, revealDesktopPath, setDesktopAutostart } from './desktop';
+import type { DesktopPreferences, DesktopRuntimeInfo } from './desktop';
 import { applyThemeMode, readThemeMode } from './theme';
 import type { ThemeMode } from './theme';
 
@@ -1112,6 +1119,7 @@ export function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [savedConfig, setSavedConfig] = useState<AppConfig | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<DesktopRuntimeInfo | null>(null);
+  const [desktopPreferences, setDesktopPreferences] = useState<DesktopPreferences | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const [initialLoading, setInitialLoading] = useState(true);
   const [connectionOnline, setConnectionOnline] = useState(false);
@@ -1253,6 +1261,7 @@ export function App() {
   const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([]);
   const [checkingTools, setCheckingTools] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
+  const [savingDesktopPreferences, setSavingDesktopPreferences] = useState(false);
   const [cancelingTasks, setCancelingTasks] = useState(false);
   const [retryingTasks, setRetryingTasks] = useState(false);
   const [ignoringTasks, setIgnoringTasks] = useState(false);
@@ -1350,6 +1359,7 @@ export function App() {
         providersResult,
         providerTypesResult,
         runtimeResult,
+        desktopPreferencesResult,
         renameHistoryResult,
         embyKeysResult
       ] = await Promise.allSettled([
@@ -1364,6 +1374,7 @@ export function App() {
         requestJSON<UploadProvider[]>('/api/upload/providers', '上传 Provider'),
         requestJSON<UploadProviderDescriptor[]>('/api/upload/provider-types', 'Provider 类型'),
         getRuntimeInfo(),
+        getDesktopPreferences(),
         loadRenameHistory(true),
         loadEmbyAPIKeys(true)
       ]);
@@ -1391,6 +1402,7 @@ export function App() {
       if (providersResult.status === 'fulfilled') setUploadProviders(asArray<UploadProvider>(providersResult.value));
       if (providerTypesResult.status === 'fulfilled') setUploadProviderTypes(asArray<UploadProviderDescriptor>(providerTypesResult.value));
       if (runtimeResult.status === 'fulfilled') setRuntimeInfo(runtimeResult.value);
+      if (desktopPreferencesResult.status === 'fulfilled') setDesktopPreferences(desktopPreferencesResult.value);
 
       const failedSections = [
         healthResult.status === 'rejected' && '服务状态',
@@ -1404,6 +1416,7 @@ export function App() {
         providersResult.status === 'rejected' && '上传 Provider',
         providerTypesResult.status === 'rejected' && 'Provider 类型',
         runtimeResult.status === 'rejected' && '桌面运行信息',
+        desktopPreferencesResult.status === 'rejected' && '桌面偏好设置',
         renameHistoryResult.status === 'rejected' && '重命名历史',
         embyKeysResult.status === 'rejected' && 'Emby 密钥'
       ].filter((label): label is string => Boolean(label));
@@ -3374,6 +3387,21 @@ export function App() {
     }
   }
 
+  async function updateDesktopAutostart(enabled: boolean) {
+    setSavingDesktopPreferences(true);
+    setError('');
+    setNotice('');
+    try {
+      const preferences = await setDesktopAutostart(enabled);
+      setDesktopPreferences(preferences);
+      setNotice(enabled ? '已启用登录后后台启动。' : '已关闭登录后自动启动。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '更新开机自启失败');
+    } finally {
+      setSavingDesktopPreferences(false);
+    }
+  }
+
   function updateConfig(mutator: (draft: AppConfig) => void) {
     setConfig((current) => {
       if (!current) return current;
@@ -3424,7 +3452,7 @@ export function App() {
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true"><Film size={20} /></span>
           <div className="brand-copy">
-            <h1>Nya Media</h1>
+            <h1>NyaMediaMetadataTool</h1>
             <span>Metadata Desktop</span>
           </div>
         </div>
@@ -3532,7 +3560,7 @@ export function App() {
               </div>
             </Card>
 
-            <Card title="工具状态" action={<button onClick={checkTools} disabled={checkingTools}>{checkingTools ? '检测中' : '重新检测'}</button>}>
+            <Card title="工具状态" action={<button className="icon-text-button" onClick={checkTools} disabled={checkingTools}><RefreshCw size={16} />{checkingTools ? '检测中' : '重新检测'}</button>}>
               {tools.length ? tools.map((tool) => (
                 <div className="tool" key={tool.name}>
                   <div>
@@ -3567,15 +3595,25 @@ export function App() {
               <div className="settings-scroll-region">
               <div className="config-form settings-form">
                 <section id="settings-panel-basic" className={`settings-section ${settingsTab === 'basic' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-basic" hidden={settingsTab !== 'basic'}>
-                  <ThemeSelector value={themeMode} onChange={setThemeMode} />
-                  <label>显示时区<input list="timezone-options" value={config.server.timezone} onChange={(event) => updateConfig((draft) => { draft.server.timezone = event.target.value; })} placeholder="Asia/Shanghai" /></label>
-                  <datalist id="timezone-options">
-                    {timeZoneOptions.map((timezone) => <option key={timezone} value={timezone} />)}
-                  </datalist>
-                  <PathField label="ffmpeg" value={config.tools.ffmpeg} onChange={(value) => updateConfig((draft) => { draft.tools.ffmpeg = value; })} onBrowse={() => void browseFile({ title: '选择 ffmpeg', value: config.tools.ffmpeg, onSelect: (value) => updateConfig((draft) => { draft.tools.ffmpeg = value; }) })} />
-                  <PathField label="ffprobe" value={config.tools.ffprobe} onChange={(value) => updateConfig((draft) => { draft.tools.ffprobe = value; })} onBrowse={() => void browseFile({ title: '选择 ffprobe', value: config.tools.ffprobe, onSelect: (value) => updateConfig((draft) => { draft.tools.ffprobe = value; }) })} />
-                  <PathField label="mkvextract" value={config.tools.mkvextract} onChange={(value) => updateConfig((draft) => { draft.tools.mkvextract = value; })} onBrowse={() => void browseFile({ title: '选择 mkvextract', value: config.tools.mkvextract, onSelect: (value) => updateConfig((draft) => { draft.tools.mkvextract = value; }) })} />
-                  <PathField label="mediainfo" value={config.tools.mediainfo} onChange={(value) => updateConfig((draft) => { draft.tools.mediainfo = value; })} onBrowse={() => void browseFile({ title: '选择 mediainfo', value: config.tools.mediainfo, onSelect: (value) => updateConfig((draft) => { draft.tools.mediainfo = value; }) })} />
+                  <SettingsGroup title="桌面行为">
+                    <ThemeSelector value={themeMode} onChange={setThemeMode} />
+                    <Toggle
+                      label="登录后自动启动（后台）"
+                      checked={desktopPreferences?.autostartEnabled ?? false}
+                      disabled={!desktopPreferences?.autostartSupported || savingDesktopPreferences}
+                      onChange={(enabled) => void updateDesktopAutostart(enabled)}
+                    />
+                  </SettingsGroup>
+                  <SettingsGroup title="本地环境">
+                    <label>显示时区<input list="timezone-options" value={config.server.timezone} onChange={(event) => updateConfig((draft) => { draft.server.timezone = event.target.value; })} placeholder="Asia/Shanghai" /></label>
+                    <datalist id="timezone-options">
+                      {timeZoneOptions.map((timezone) => <option key={timezone} value={timezone} />)}
+                    </datalist>
+                    <PathField label="ffmpeg" value={config.tools.ffmpeg} onChange={(value) => updateConfig((draft) => { draft.tools.ffmpeg = value; })} onBrowse={() => void browseFile({ title: '选择 ffmpeg', value: config.tools.ffmpeg, onSelect: (value) => updateConfig((draft) => { draft.tools.ffmpeg = value; }) })} />
+                    <PathField label="ffprobe" value={config.tools.ffprobe} onChange={(value) => updateConfig((draft) => { draft.tools.ffprobe = value; })} onBrowse={() => void browseFile({ title: '选择 ffprobe', value: config.tools.ffprobe, onSelect: (value) => updateConfig((draft) => { draft.tools.ffprobe = value; }) })} />
+                    <PathField label="mkvextract" value={config.tools.mkvextract} onChange={(value) => updateConfig((draft) => { draft.tools.mkvextract = value; })} onBrowse={() => void browseFile({ title: '选择 mkvextract', value: config.tools.mkvextract, onSelect: (value) => updateConfig((draft) => { draft.tools.mkvextract = value; }) })} />
+                    <PathField label="mediainfo" value={config.tools.mediainfo} onChange={(value) => updateConfig((draft) => { draft.tools.mediainfo = value; })} onBrowse={() => void browseFile({ title: '选择 mediainfo', value: config.tools.mediainfo, onSelect: (value) => updateConfig((draft) => { draft.tools.mediainfo = value; }) })} />
+                  </SettingsGroup>
                 </section>
                 <section id="settings-panel-processing" className={`settings-section ${settingsTab === 'processing' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-processing" hidden={settingsTab !== 'processing'}>
                   <label className="extensions-field">扩展名<textarea value={extensionInput} onChange={(event) => updateConfig((draft) => { draft.processing.extensions = normalizeExtensions(event.target.value); })} placeholder={commonVideoExtensions.join('\n')} rows={8} /><small>每行一个后缀，或用逗号分隔，例如 `.mkv`、`.mp4`、`.rmvb`。</small></label>
@@ -3630,7 +3668,7 @@ export function App() {
 
         {activePage === 'watchDirs' && (
         <section className="page-grid">
-          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary" onClick={() => openRescanDialog('all')} disabled={rescanning}>{rescanning ? '扫描中' : '扫描生成'}</button><button onClick={openAddWatchDirModal}>添加媒体目录</button></div>}>
+          <Card title="媒体目录" action={<div className="inline-actions"><button className="secondary icon-text-button" onClick={() => openRescanDialog('all')} disabled={rescanning}><SearchCheck size={16} />{rescanning ? '扫描中' : '扫描生成'}</button><button className="icon-text-button" onClick={openAddWatchDirModal}><Plus size={16} />添加媒体目录</button></div>}>
             {watchDirs.length ? watchDirs.map((dir) => {
               const uploadCount = (dir.uploadConfigs ?? []).filter((item) => item.enabled).length;
               const uploadIssueCount = (dir.uploadConfigs ?? []).filter((item) => {
@@ -3645,9 +3683,9 @@ export function App() {
                     <small>{dir.watchEnabled ? '自动监听' : '不监听'} · {dir.useGlobalProcessing ? '跟随全局生成设置' : '独立生成设置'} · {uploadCount ? `${uploadCount} 个上传配置${uploadIssueCount ? `，${uploadIssueCount} 个需处理` : ''}` : '不上传'}</small>
                   </div>
                   <div className="inline-actions">
-                    <button className="secondary" onClick={() => openEditWatchDir(dir)}>编辑</button>
-                    <button onClick={() => openRescanDialog('dir', dir.path)} disabled={rescanning}>扫描生成</button>
-                    <button className="danger" onClick={() => deleteWatchDir(dir.id)}>删除</button>
+                    <ActionIconButton label={`编辑媒体目录 ${dir.path}`} icon={Pencil} onClick={() => openEditWatchDir(dir)} />
+                    <ActionIconButton label={`扫描生成 ${dir.path}`} icon={SearchCheck} disabled={rescanning} onClick={() => openRescanDialog('dir', dir.path)} />
+                    <ActionIconButton label={`删除媒体目录 ${dir.path}`} icon={Trash2} tone="danger" onClick={() => deleteWatchDir(dir.id)} />
                   </div>
                 </div>
               );
@@ -3658,7 +3696,7 @@ export function App() {
 
         {activePage === 'rename' && (
         <section className="page-grid rename-page-grid">
-          <Card title="整理命名" action={<button className="secondary" type="button" onClick={() => setRenameHistoryOpen(true)}>重命名历史{renameHistory.length ? ` (${renameHistory.length})` : ''}</button>}>
+          <Card title="整理命名" action={<button className="secondary icon-text-button" type="button" onClick={() => setRenameHistoryOpen(true)}><History size={16} />重命名历史{renameHistory.length ? ` (${renameHistory.length})` : ''}</button>}>
             <div className="rename-controls">
               <label className="rename-control-primary">目录或文件路径<div className="path-input"><input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder="D:\\Media\\Anime\\Season 1" /><button type="button" className="icon-text-button" onClick={() => void browseDirectory({ title: '选择整理目录', value: renamePath, onSelect: setRenamePath })}><FolderOpen size={16} />选择</button></div></label>
               <label className="rename-control-primary">命名模板
@@ -3758,7 +3796,7 @@ export function App() {
                       <td className="path-cell">{recalculatingItem ? '正在根据当前季集生成新目标…' : pendingItem ? '季集已修改，重新生成前不会执行' : item.conflict ? '目标文件已存在' : item.message || '-'}</td>
                       <td>
                         <div className="inline-actions rename-row-actions">
-                          <button type="button" title="根据当前剧名、季、集重新查询 TMDB 并生成预览" onClick={() => recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false })} disabled={renamePreviewStale || previewingRename || applyingTmdbShowId !== null || applyingBatchEpisode || applyingRename || recalculatingItem}>{recalculatingItem ? '生成中' : '重新生成'}</button>
+                          <ActionIconButton label="根据当前季集重新生成" icon={RefreshCw} loading={recalculatingItem} onClick={() => recalculateRenameItem({ ...item, manualName: false }, { forceTmdb: true, keepManualName: false })} disabled={renamePreviewStale || previewingRename || applyingTmdbShowId !== null || applyingBatchEpisode || applyingRename || recalculatingItem} />
                         </div>
                       </td>
                     </tr>
@@ -3773,13 +3811,13 @@ export function App() {
 
         {activePage === 'audit' && (
         <section className="page-grid audit-page-grid">
-          <div className="audit-tabs" role="group" aria-label="核对类型">
-            <button className={auditTab === 'missing' ? 'status-tab active' : 'status-tab'} type="button" aria-pressed={auditTab === 'missing'} onClick={() => setAuditTab('missing')}>剧集缺漏</button>
-            <button className={auditTab === 'emby' ? 'status-tab active' : 'status-tab'} type="button" aria-pressed={auditTab === 'emby'} onClick={() => setAuditTab('emby')}>Emby 与本地核对</button>
-            <button className={auditTab === 'files' ? 'status-tab active' : 'status-tab'} type="button" aria-pressed={auditTab === 'files'} onClick={() => setAuditTab('files')}>文件对齐检查</button>
+          <div className="page-tabs audit-tabs" role="tablist" aria-label="核对类型">
+            <button className={auditTab === 'missing' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'missing'} onClick={() => setAuditTab('missing')}>剧集缺漏</button>
+            <button className={auditTab === 'emby' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'emby'} onClick={() => setAuditTab('emby')}>Emby 与本地核对</button>
+            <button className={auditTab === 'files' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={auditTab === 'files'} onClick={() => setAuditTab('files')}>文件对齐检查</button>
           </div>
 
-          {auditTab === 'missing' && <Card title="剧集缺漏" action={<button onClick={() => runSeriesAudit('missing')} disabled={auditingMissing}>{auditingMissing ? '核对中' : '开始核对'}</button>}>
+          {auditTab === 'missing' && <Card title="剧集缺漏" action={<button className="icon-text-button" onClick={() => runSeriesAudit('missing')} disabled={auditingMissing}><SearchCheck size={16} />{auditingMissing ? '核对中' : '开始核对'}</button>}>
             <fieldset className="workflow-fieldset" disabled={auditingMissing}>
               <div className="audit-controls">
                 <label>剧集根目录<div className="path-input"><input value={auditRoot} onChange={(event) => setAuditRoot(event.target.value)} placeholder="D:\Media\TV\Example Show" /><button type="button" className="icon-text-button" onClick={() => void browseDirectory({ title: '选择剧集根目录', value: auditRoot, onSelect: setAuditRoot })}><FolderOpen size={16} />选择</button></div></label>
@@ -3791,7 +3829,7 @@ export function App() {
             </fieldset>
           </Card>}
 
-          {auditTab === 'emby' && <Card title="Emby 与本地核对" action={<button onClick={() => runSeriesAudit('emby')} disabled={auditingEmby}>{auditingEmby ? '核对中' : '开始核对'}</button>}>
+          {auditTab === 'emby' && <Card title="Emby 与本地核对" action={<button className="icon-text-button" onClick={() => runSeriesAudit('emby')} disabled={auditingEmby}><SearchCheck size={16} />{auditingEmby ? '核对中' : '开始核对'}</button>}>
             <fieldset className="emby-audit-form workflow-fieldset" disabled={auditingEmby}>
               <section className="audit-form-section">
                 <div className="audit-form-section-heading">
@@ -3830,7 +3868,7 @@ export function App() {
             </fieldset>
           </Card>}
 
-          {auditTab === 'files' && <Card title="文件对齐检查" action={<button onClick={runFileAudit} disabled={auditingFiles}>{auditingFiles ? '检查中' : '开始检查'}</button>}>
+          {auditTab === 'files' && <Card title="文件对齐检查" action={<button className="icon-text-button" onClick={runFileAudit} disabled={auditingFiles}><SearchCheck size={16} />{auditingFiles ? '检查中' : '开始检查'}</button>}>
             <fieldset className="file-audit-form workflow-fieldset" disabled={auditingFiles}>
               <section className="audit-form-section">
                 <div className="audit-form-section-heading">
@@ -4041,9 +4079,9 @@ export function App() {
 
         {activePage === 'uploads' && (
         <section className="page-grid uploads-page-grid">
-          <nav className="upload-tabs" aria-label="上传管理子页面">
-            <button className={uploadView === 'batches' ? 'status-tab active' : 'status-tab'} type="button" aria-current={uploadView === 'batches' ? 'page' : undefined} onClick={() => navigateUploadView('batches')}>上传批次</button>
-            <button className={uploadView === 'providers' ? 'status-tab active' : 'status-tab'} type="button" aria-current={uploadView === 'providers' ? 'page' : undefined} onClick={() => navigateUploadView('providers')}>Provider 账号</button>
+          <nav className="page-tabs upload-tabs" role="tablist" aria-label="上传管理子页面">
+            <button className={uploadView === 'batches' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={uploadView === 'batches'} onClick={() => navigateUploadView('batches')}>上传批次</button>
+            <button className={uploadView === 'providers' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={uploadView === 'providers'} onClick={() => navigateUploadView('providers')}>Provider 账号</button>
           </nav>
 
           {uploadView === 'batches' && <>
@@ -4057,13 +4095,13 @@ export function App() {
               </div>
             </Card>
 
-            <Card title="上传批次" action={<button className="secondary" type="button" disabled={refreshingUploads} onClick={() => void refreshUploads(1)}>{refreshingUploads ? '刷新中' : '刷新'}</button>}>
+            <Card title="上传批次" action={<ActionIconButton label="刷新上传批次" icon={RefreshCw} loading={refreshingUploads} disabled={refreshingUploads} onClick={() => void refreshUploads(1)} />}>
               <div className="task-status-tabs" role="group" aria-label="上传批次状态过滤">
                 {uploadStatusFilters.map((status) => <button className={uploadStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} aria-pressed={uploadStatusFilter === status.value} disabled={refreshingUploads} onClick={() => { setUploadStatusFilter(status.value); void refreshUploads(1, status.value); }}>{status.label}</button>)}
               </div>
               <form className="task-filters upload-filters" onSubmit={(event) => { event.preventDefault(); applyUploadFilters(); }}>
                 <label>番剧路径<input value={uploadPathFilter} onChange={(event) => setUploadPathFilter(event.target.value)} placeholder="输入番剧目录关键字" /></label>
-                <div className="filter-actions"><button type="submit" disabled={refreshingUploads}>过滤</button><button className="secondary" type="button" disabled={refreshingUploads} onClick={resetUploadFilters}>重置</button></div>
+                <div className="filter-actions list-toolbar-icons"><ActionIconButton label="应用过滤" icon={Filter} type="submit" disabled={refreshingUploads} /><ActionIconButton label="重置过滤" icon={RotateCcw} disabled={refreshingUploads} onClick={resetUploadFilters} /></div>
               </form>
               <div className="task-table-wrap">
                 <table className="task-table upload-batch-table">
@@ -4078,7 +4116,7 @@ export function App() {
                         <td className="upload-batch-destination"><strong>{batch.providerName || '-'}</strong>{batch.remoteRoot && <small>{batch.remoteRoot}</small>}</td>
                         <td><UploadBatchProgress batch={batch} /></td>
                         <td>{formatStoredTime(batch.readyAt, displayTimezone)}</td>
-                        <td><button className="secondary" type="button" onClick={(event) => { event.stopPropagation(); void loadUploadBatchDetail(batch.id); }}>详情</button></td>
+                        <td><ActionIconButton label={`查看上传批次 ${batch.id} 详情`} icon={Eye} onClick={(event) => { event.stopPropagation(); void loadUploadBatchDetail(batch.id); }} /></td>
                       </tr>
                     )) : <tr><td colSpan={8} className="empty-cell">暂无上传批次。</td></tr>}
                   </tbody>
@@ -4086,12 +4124,12 @@ export function App() {
               </div>
               <div className="pagination-bar">
                 <span>共 {uploadTotal} 条，第 {uploadPage} / {Math.max(1, Math.ceil(uploadTotal / taskPageSize))} 页</span>
-                <div className="inline-actions"><button className="secondary" type="button" disabled={refreshingUploads || uploadPage <= 1} onClick={() => void refreshUploads(uploadPage - 1)}>上一页</button><button className="secondary" type="button" disabled={refreshingUploads || uploadPage >= Math.ceil(uploadTotal / taskPageSize)} onClick={() => void refreshUploads(uploadPage + 1)}>下一页</button></div>
+                <div className="inline-actions"><ActionIconButton label="上一页" icon={ChevronLeft} disabled={refreshingUploads || uploadPage <= 1} onClick={() => void refreshUploads(uploadPage - 1)} /><ActionIconButton label="下一页" icon={ChevronRight} disabled={refreshingUploads || uploadPage >= Math.ceil(uploadTotal / taskPageSize)} onClick={() => void refreshUploads(uploadPage + 1)} /></div>
               </div>
             </Card>
           </>}
 
-          {uploadView === 'providers' && <Card title="Provider 账号" action={<div className="inline-actions"><button className="secondary" type="button" disabled={refreshingUploadProviders} onClick={() => void refreshUploadProviders()}>{refreshingUploadProviders ? '刷新中' : '刷新'}</button><button className="icon-text-button" type="button" onClick={() => setNewUploadProviderOpen(true)}><Plus size={16} />添加 Provider</button></div>}>
+          {uploadView === 'providers' && <Card title="Provider 账号" action={<div className="inline-actions"><ActionIconButton label="刷新 Provider 账号" icon={RefreshCw} loading={refreshingUploadProviders} disabled={refreshingUploadProviders} onClick={() => void refreshUploadProviders()} /><button className="icon-text-button" type="button" onClick={() => setNewUploadProviderOpen(true)}><Plus size={16} />添加 Provider</button></div>}>
             <div className="task-table-wrap">
               <table className="task-table upload-provider-table">
                 <thead><tr><th>名称</th><th>类型</th><th>授权</th><th>授权设备</th><th>目录配置</th><th>状态</th><th>操作</th></tr></thead>
@@ -4107,7 +4145,7 @@ export function App() {
                         <td>{provider.type === '115cookie' && provider.hasCookie ? uploadAuthDeviceName(provider.authDevice, provider.type, uploadProviderTypes) : '-'}</td>
                         <td>{directoryCount ? <button className="secondary upload-provider-directory-button" type="button" onClick={() => setUploadProviderUsage(provider)}>{directoryCount} 个目录</button> : <span className="pill ignored">未使用</span>}</td>
                         <td><span className={provider.enabled ? 'pill ok' : 'pill ignored'}>{provider.enabled ? '可用' : '停用'}</span></td>
-                        <td><div className="table-actions upload-provider-actions"><button className="icon-button secondary" type="button" title="编辑 Provider" aria-label={`编辑 Provider ${provider.name}`} onClick={() => setUploadProviderModal(provider)}><Pencil size={16} /></button>{provider.type === '115cookie' && <button className="icon-button secondary" type="button" title={provider.hasCookie ? '重新授权' : '授权'} aria-label={`${provider.hasCookie ? '重新授权' : '授权'} ${provider.name}`} onClick={() => openUploadCookieAuthorization(provider)}><KeyRound size={16} /></button>}<button className="icon-button secondary" type="button" title="检查连接" aria-label={`检查连接 ${provider.name}`} disabled={checkingUploadProviderID === provider.id || needsAuthorization} onClick={() => void checkUploadProvider(provider)}>{checkingUploadProviderID === provider.id ? <span className="loading-spinner compact" aria-hidden="true" /> : <CircleGauge size={16} />}</button><button className="icon-button danger" type="button" title="删除 Provider" aria-label={`删除 Provider ${provider.name}`} onClick={() => void deleteUploadProvider(provider)}><Trash2 size={16} /></button></div></td>
+                        <td><div className="table-actions upload-provider-actions"><ActionIconButton label={`编辑 Provider ${provider.name}`} icon={Pencil} onClick={() => setUploadProviderModal(provider)} />{provider.type === '115cookie' && <ActionIconButton label={`${provider.hasCookie ? '重新授权' : '授权'} ${provider.name}`} icon={KeyRound} onClick={() => openUploadCookieAuthorization(provider)} />}<ActionIconButton label={`检查连接 ${provider.name}`} icon={CircleGauge} loading={checkingUploadProviderID === provider.id} disabled={checkingUploadProviderID === provider.id || needsAuthorization} onClick={() => void checkUploadProvider(provider)} /><ActionIconButton label={`删除 Provider ${provider.name}`} icon={Trash2} tone="danger" onClick={() => void deleteUploadProvider(provider)} /></div></td>
                       </tr>
                     );
                   }) : <tr><td colSpan={7} className="empty-cell">尚未添加 Provider。先添加并授权账号，再到媒体目录中配置上传步骤。</td></tr>}
@@ -4120,7 +4158,7 @@ export function App() {
 
         {activePage === 'tasks' && (
         <section className="page-grid task-page-grid">
-          <Card title="任务列表" action={<div className="inline-actions"><button className="secondary" type="button" onClick={() => setRecentArtifactsOpen(true)}>最近产物</button><button className="secondary" onClick={() => void retrySelectedTasks()} disabled={retryingTasks || retryableSelectedTaskIds.length === 0}>{retryingTasks ? '重试中' : `重试${retryableSelectedTaskIds.length ? ` (${retryableSelectedTaskIds.length})` : ''}`}</button><button className="secondary" onClick={() => void ignoreSelectedTasks()} disabled={ignoringTasks || ignorableSelectedTaskIds.length === 0}>{ignoringTasks ? '忽略中' : `忽略失败${ignorableSelectedTaskIds.length ? ` (${ignorableSelectedTaskIds.length})` : ''}`}</button><button className="danger" onClick={cancelActiveTasks} disabled={cancelingTasks || activeTaskCount === 0}>{cancelingTasks ? '取消中' : '取消全部活动任务'}</button></div>}>
+          <Card title="任务列表" action={<div className="inline-actions"><button className="secondary icon-text-button" type="button" onClick={() => setRecentArtifactsOpen(true)}><History size={16} />最近产物</button><button className="secondary icon-text-button" onClick={() => void retrySelectedTasks()} disabled={retryingTasks || retryableSelectedTaskIds.length === 0}><RotateCcw size={16} />{retryingTasks ? '重试中' : `重试${retryableSelectedTaskIds.length ? ` (${retryableSelectedTaskIds.length})` : ''}`}</button><button className="secondary icon-text-button" onClick={() => void ignoreSelectedTasks()} disabled={ignoringTasks || ignorableSelectedTaskIds.length === 0}><Ban size={16} />{ignoringTasks ? '忽略中' : `忽略失败${ignorableSelectedTaskIds.length ? ` (${ignorableSelectedTaskIds.length})` : ''}`}</button><button className="danger icon-text-button" onClick={cancelActiveTasks} disabled={cancelingTasks || activeTaskCount === 0}><X size={16} />{cancelingTasks ? '取消中' : '取消全部活动任务'}</button></div>}>
             <div className="task-status-tabs" role="group" aria-label="任务状态过滤">
               {taskStatusFilters.map((status) => (
                 <button className={taskStatusFilter === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} aria-pressed={taskStatusFilter === status.value} onClick={() => selectTaskStatusFilter(status.value)}>
@@ -4138,9 +4176,9 @@ export function App() {
               <label>路径<input value={taskPathFilter} onChange={(event) => setTaskPathFilter(event.target.value)} placeholder="输入路径关键字" /></label>
               <label>开始时间（{displayTimezone}）<input type="datetime-local" value={taskFromFilter} onChange={(event) => setTaskFromFilter(event.target.value)} /></label>
               <label>结束时间（{displayTimezone}）<input type="datetime-local" value={taskToFilter} onChange={(event) => setTaskToFilter(event.target.value)} /></label>
-              <div className="filter-actions">
-                <button type="submit">过滤</button>
-                <button className="secondary" type="button" onClick={resetTaskFilters}>重置</button>
+              <div className="filter-actions list-toolbar-icons">
+                <ActionIconButton label="应用过滤" icon={Filter} type="submit" />
+                <ActionIconButton label="重置过滤" icon={RotateCcw} onClick={resetTaskFilters} />
               </div>
             </form>
             <div className="task-table-wrap">
@@ -4167,7 +4205,7 @@ export function App() {
                       <td className="path-cell">{task.mediaPath || '-'}</td>
                       <td>{formatStoredTime(task.createdAt, displayTimezone)}</td>
                       <td className="path-cell">{task.errorSummary || '-'}</td>
-                      <td><div className="table-actions"><button className="icon-button secondary" type="button" title="在文件管理器中显示" aria-label={`在文件管理器中显示任务 ${task.id}`} disabled={!task.mediaPath} onClick={(event) => { event.stopPropagation(); void revealPath(task.mediaPath); }}><FolderOpen size={16} /></button><button className="secondary" type="button" onClick={(event) => { event.stopPropagation(); void loadTaskDetail(task.id); }}>详情</button></div></td>
+                      <td><div className="table-actions"><ActionIconButton label={`在文件管理器中显示任务 ${task.id}`} icon={FolderOpen} disabled={!task.mediaPath} onClick={(event) => { event.stopPropagation(); void revealPath(task.mediaPath); }} /><ActionIconButton label={`查看任务 ${task.id} 详情`} icon={Eye} onClick={(event) => { event.stopPropagation(); void loadTaskDetail(task.id); }} /></div></td>
                     </tr>
                   )) : (
                     <tr><td colSpan={8} className="empty-cell">暂无任务。</td></tr>
@@ -4178,8 +4216,8 @@ export function App() {
             <div className="pagination-bar">
               <span>共 {taskTotal} 条，第 {taskPage} / {Math.max(1, Math.ceil(taskTotal / taskPageSize))} 页</span>
               <div className="inline-actions">
-                <button className="secondary" disabled={taskPage <= 1} onClick={() => loadTasks(taskPage - 1)}>上一页</button>
-                <button className="secondary" disabled={taskPage >= Math.ceil(taskTotal / taskPageSize)} onClick={() => loadTasks(taskPage + 1)}>下一页</button>
+                <ActionIconButton label="上一页" icon={ChevronLeft} disabled={taskPage <= 1} onClick={() => loadTasks(taskPage - 1)} />
+                <ActionIconButton label="下一页" icon={ChevronRight} disabled={taskPage >= Math.ceil(taskTotal / taskPageSize)} onClick={() => loadTasks(taskPage + 1)} />
               </div>
             </div>
           </Card>
@@ -4284,7 +4322,7 @@ function UploadProviderUsageModal(props: { provider: UploadProvider; watchDirs: 
                     <td className="upload-provider-usage-content" title={(route.includeTypes ?? []).map(uploadContentTypeLabel).join('、')}>{(route.includeTypes ?? []).length ? (route.includeTypes ?? []).map(uploadContentTypeLabel).join('、') : '-'}</td>
                     <td>{uploadCollisionPolicyLabel(route.collisionPolicy)}</td>
                     <td><span className={enabled ? 'pill ok' : 'pill ignored'}>{statusLabel}</span></td>
-                    <td><button className="secondary" type="button" onClick={() => props.onEditDirectory(dir)}>编辑目录</button></td>
+                    <td><ActionIconButton label={`编辑媒体目录 ${dir.path}`} icon={Pencil} onClick={() => props.onEditDirectory(dir)} /></td>
                   </tr>
                 })}
               </tbody>
@@ -4581,7 +4619,7 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
                     <td><div className="upload-target-status"><span className={uploadStatusPillClass(target.status)}>{uploadTargetStatusLabel(target)}</span>{scheduleLabel && <small>{scheduleLabel}</small>}</div></td>
                     <td>{target.attempts}</td>
                     <td className="path-cell upload-error-cell">{target.errorSummary || '-'}</td>
-                    <td><div className="inline-actions">{['failed', 'canceled'].includes(target.status) && target.retryable && <button className="secondary" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onRetry(target)}>{props.actionTargetID === target.id ? '处理中' : '重试'}</button>}{['failed', 'canceled'].includes(target.status) && !target.retryable && <span className="pill ignored">不可重试</span>}{['waiting', 'pending'].includes(target.status) && <button className="danger" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onCancel(target)}>{props.actionTargetID === target.id ? '处理中' : '取消'}</button>}</div></td>
+                    <td><div className="table-actions">{['failed', 'canceled'].includes(target.status) && target.retryable && <ActionIconButton label={`重试目标 ${target.providerName}`} icon={RotateCcw} loading={props.actionTargetID === target.id} disabled={props.actionTargetID === target.id} onClick={() => props.onRetry(target)} />}{['failed', 'canceled'].includes(target.status) && !target.retryable && <span className="pill ignored">不可重试</span>}{['waiting', 'pending'].includes(target.status) && <ActionIconButton label={`取消目标 ${target.providerName}`} icon={X} tone="danger" loading={props.actionTargetID === target.id} disabled={props.actionTargetID === target.id} onClick={() => props.onCancel(target)} />}</div></td>
                   </tr>;
                 })}</tbody>
               </table>
@@ -4649,8 +4687,8 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
             <div className="pagination-bar upload-file-pagination">
               <span aria-live="polite">共 {filteredFileRows.length} 条，第 {safeFilePage} / {filePageCount} 页</span>
               <div className="inline-actions">
-                <button className="secondary" type="button" disabled={safeFilePage <= 1} onClick={() => setFilePage(safeFilePage - 1)}>上一页</button>
-                <button className="secondary" type="button" disabled={safeFilePage >= filePageCount} onClick={() => setFilePage(safeFilePage + 1)}>下一页</button>
+                <ActionIconButton label="上一页" icon={ChevronLeft} disabled={safeFilePage <= 1} onClick={() => setFilePage(safeFilePage - 1)} />
+                <ActionIconButton label="下一页" icon={ChevronRight} disabled={safeFilePage >= filePageCount} onClick={() => setFilePage(safeFilePage + 1)} />
               </div>
             </div>
           </section>
@@ -4780,6 +4818,31 @@ function IconCloseButton(props: { onClick: () => void; disabled?: boolean }) {
   );
 }
 
+function ActionIconButton(props: {
+  label: string;
+  icon: LucideIcon;
+  tone?: 'default' | 'danger';
+  type?: 'button' | 'submit';
+  disabled?: boolean;
+  loading?: boolean;
+  onClick?: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+}) {
+  const Icon = props.icon;
+  return (
+    <button
+      className={`icon-button ${props.tone === 'danger' ? 'danger' : 'secondary'}`}
+      type={props.type ?? 'button'}
+      title={props.label}
+      aria-label={props.label}
+      aria-busy={props.loading || undefined}
+      disabled={props.disabled}
+      onClick={props.onClick}
+    >
+      {props.loading ? <span className="loading-spinner compact" aria-hidden="true" /> : <Icon size={16} aria-hidden="true" />}
+    </button>
+  );
+}
+
 function TabButton(props: { active: boolean; label: string; icon: LucideIcon; badge?: number; badgeTone?: 'default' | 'warn' | 'danger'; onClick: () => void }) {
   const Icon = props.icon;
   return (
@@ -4899,7 +4962,7 @@ function TaskDetailModal(props: { detail: TaskDetail; timezone: string; onClose:
   const logs = [...asArray<TaskLog>(props.detail.logs)].reverse();
   return (
     <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
-      <section className="modal-card rescan-modal" role="dialog" aria-modal="true" aria-labelledby="task-detail-title" onClick={(event) => event.stopPropagation()}>
+      <section className="modal-card task-detail-modal" role="dialog" aria-modal="true" aria-labelledby="task-detail-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header">
           <h2 id="task-detail-title">任务详情</h2>
           <IconCloseButton onClick={props.onClose} />
@@ -5202,7 +5265,7 @@ function TmdbEpisodeDetailModal(props: { detail: TmdbEpisodeDetail; language: st
             <small>TMDB #{detail.showId} · 查询语言 {props.language}</small>
           </div>
           <div className="inline-actions">
-            <button className="secondary" type="button" onClick={props.onRefresh} disabled={props.refreshing}>{props.refreshing ? '刷新中' : '刷新'}</button>
+            <ActionIconButton label="刷新 TMDB 详情" icon={RefreshCw} loading={props.refreshing} disabled={props.refreshing} onClick={props.onRefresh} />
             <IconCloseButton onClick={props.onClose} />
           </div>
         </div>
@@ -5257,7 +5320,7 @@ function RenameHistoryModal(props: {
         <div className="card-header">
           <h2 id="rename-history-title">重命名历史</h2>
           <div className="inline-actions">
-            <button className="secondary" onClick={props.onRefresh} disabled={props.loading}>{props.loading ? '刷新中' : '刷新历史'}</button>
+            <ActionIconButton label="刷新重命名历史" icon={RefreshCw} loading={props.loading} disabled={props.loading} onClick={props.onRefresh} />
             <IconCloseButton onClick={props.onClose} />
           </div>
         </div>
@@ -5265,13 +5328,13 @@ function RenameHistoryModal(props: {
           {props.history.length ? props.history.map((batch) => (
             <div className="history-item" key={batch.id}>
               <div className="history-summary">
-                <button className="secondary" type="button" onClick={() => props.onOpenDetails(batch)}>详情</button>
+                <ActionIconButton label={`查看重命名历史 ${batch.id} 详情`} icon={Eye} onClick={() => props.onOpenDetails(batch)} />
                 <div>
                   <strong>{formatStoredTime(batch.createdAt, props.timezone)}</strong>
                   <small>{batch.items.length} 项 · {batch.id}{batch.undone ? ` · 已撤销 ${batch.undoneAt ? formatStoredTime(batch.undoneAt, props.timezone) : ''}` : ''}</small>
                 </div>
                 <div className="inline-actions">
-                  <button className="secondary" onClick={() => props.onUndo(batch.id)} disabled={batch.undone || props.undoingId === batch.id}>{batch.undone ? '已撤销' : props.undoingId === batch.id ? '撤销中' : '撤销'}</button>
+                  <ActionIconButton label={batch.undone ? `历史 ${batch.id} 已撤销` : `撤销重命名历史 ${batch.id}`} icon={Undo2} loading={props.undoingId === batch.id} onClick={() => props.onUndo(batch.id)} disabled={batch.undone || props.undoingId === batch.id} />
                 </div>
               </div>
             </div>
@@ -5666,11 +5729,11 @@ function SettingsGroup(props: { title: string; children: ReactNode }) {
   );
 }
 
-function Toggle(props: { label: ReactNode; checked: boolean; onChange: (value: boolean) => void }) {
+function Toggle(props: { label: ReactNode; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
   return (
-    <label className="toggle-row">
+    <label className={`toggle-row ${props.disabled ? 'disabled' : ''}`}>
       <span>{props.label}</span>
-      <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} />
+      <input type="checkbox" checked={props.checked} disabled={props.disabled} onChange={(event) => props.onChange(event.target.checked)} />
       <span className="toggle-switch" aria-hidden="true">
         <span className="toggle-switch-label">{props.checked ? '开' : '关'}</span>
         <span className="toggle-switch-thumb" />

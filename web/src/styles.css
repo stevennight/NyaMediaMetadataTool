@@ -397,16 +397,51 @@ h1 {
   gap: 18px;
 }
 
-.upload-tabs {
+.page-tabs {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+  align-items: flex-end;
+  gap: 22px;
+  min-width: 0;
+  min-height: 46px;
+  overflow-x: auto;
+  overflow-y: hidden;
   border-bottom: 1px solid var(--border);
-  padding-bottom: 10px;
+  padding: 0 2px;
+  background: transparent;
+  scrollbar-width: none;
 }
 
-.upload-tabs .status-tab {
-  min-width: 112px;
+.page-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.page-tabs .status-tab {
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 46px;
+  padding: 10px 8px 9px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 15px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.page-tabs .status-tab:hover:not(:disabled) {
+  border-bottom-color: var(--border-strong);
+  background: transparent;
+  color: var(--text);
+}
+
+.page-tabs .status-tab.active,
+.page-tabs .status-tab.active:hover:not(:disabled) {
+  border-color: transparent;
+  border-bottom-color: var(--primary);
+  background: transparent;
+  color: var(--primary);
 }
 
 .upload-summary-grid {
@@ -1265,12 +1300,6 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.audit-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
 .audit-controls {
   display: grid;
   grid-template-columns: minmax(280px, 1fr) minmax(150px, 0.3fr) minmax(320px, 1fr) minmax(220px, 0.55fr);
@@ -2016,7 +2045,8 @@ button:disabled {
 .rename-row-actions {
   display: flex;
   flex-wrap: nowrap;
-  min-width: 92px;
+  justify-content: center;
+  min-width: 32px;
 }
 
 .rename-row-actions button {
@@ -3169,6 +3199,7 @@ h3 {
 }
 
 .settings-group-fields .toggle-row,
+.settings-group-fields .theme-preference,
 .settings-group-fields .language-picker,
 .settings-group-fields .image-source-picker,
 .settings-group-fields .settings-note {
@@ -3212,6 +3243,11 @@ h3 {
   font-size: 16px;
   font-weight: 650;
   line-height: 1.35;
+}
+
+.toggle-row.disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
 }
 
 .toggle-row:first-of-type {
@@ -3817,9 +3853,10 @@ body {
 .brand-copy h1 {
   margin: 0;
   color: var(--text);
-  font-size: 16px;
+  font-size: 13px;
   font-weight: 750;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 .brand-copy span {
@@ -4147,8 +4184,7 @@ body {
 .audit-form-section,
 .upload-auth-panel,
 .upload-route-profile,
-.watch-dir-item,
-.settings-group {
+.watch-dir-item {
   border-color: var(--border);
   border-radius: 8px;
   background: var(--surface);
@@ -4403,11 +4439,28 @@ select:focus-visible,
   color: var(--text);
 }
 
+.icon-button.danger {
+  border-color: var(--danger-border);
+  background: var(--surface);
+  color: var(--danger);
+}
+
+.icon-button.danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger-hover);
+}
+
 .icon-text-button,
 .table-actions {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+}
+
+.filter-actions.list-toolbar-icons {
+  align-items: center;
+  flex-direction: row;
 }
 
 input,
@@ -4504,8 +4557,7 @@ label small {
 }
 
 .settings-tabs,
-.status-tabs,
-.audit-tabs {
+.status-tabs {
   gap: 4px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-translucent);
@@ -4538,7 +4590,6 @@ label small {
   color: var(--primary);
 }
 
-.settings-group,
 .audit-form-section,
 .upload-auth-panel,
 .upload-route-profile {
@@ -4796,18 +4847,22 @@ label small {
   padding: 28px 16px;
 }
 
-/* Keep modal chrome in normal flow so it never covers dialog content. */
-.modal-card {
+/* Keep every dialog header aligned with the upload batch detail modal. */
+.modal-card:not(.confirm-dialog) {
   overscroll-behavior: contain;
+  padding-top: 0;
   scrollbar-gutter: auto;
 }
 
 .modal-card > .card-header {
-  position: static;
-  z-index: auto;
-  margin: -24px -24px 18px;
-  padding-right: 24px;
-  padding-left: 24px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex: 0 0 auto;
+  min-height: 52px;
+  margin: 0 -24px 18px;
+  border-radius: 8px 8px 0 0;
+  padding: 12px 24px;
   box-shadow: none;
 }
 
@@ -4815,10 +4870,15 @@ label small {
   margin: 0;
 }
 
-.modal-card.upload-batch-detail-modal > .card-header {
+.modal-card.upload-batch-detail-modal > .card-header,
+.modal-card.remote-directory-picker-modal > .card-header {
   margin: 0;
   border-radius: 8px 8px 0 0;
   padding: 12px 24px;
+}
+
+.modal-card.task-detail-modal {
+  width: min(760px, 100%);
 }
 
 .modal-card:not(.confirm-dialog) .modal-actions {

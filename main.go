@@ -18,6 +18,8 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
+const desktopProductName = "NyaMediaMetadataTool"
+
 var version = "dev"
 
 func main() {
@@ -39,17 +41,18 @@ func runDesktop() error {
 	defer closeLog()
 
 	desktop := NewDesktopApp(paths, version, logger)
+	desktop.startHidden = launchedInBackground(os.Args[1:])
 	defer desktop.closeService()
 
 	err = wails.Run(&options.App{
-		Title:             "Nya Media",
+		Title:             desktopProductName,
 		Width:             1440,
 		Height:            900,
 		MinWidth:          900,
 		MinHeight:         640,
 		BackgroundColour:  options.NewRGB(246, 247, 249),
 		StartHidden:       true,
-		HideWindowOnClose: false,
+		HideWindowOnClose: desktopTraySupported(),
 		AssetServer: &assetserver.Options{
 			Assets:  web.Assets(),
 			Handler: desktop.Handler(web.Handler()),
@@ -81,7 +84,7 @@ func runDesktop() error {
 			DisableEscapeExitsFullscreen: true,
 		},
 		Linux: &linux.Options{
-			ProgramName:      "nya-media",
+			ProgramName:      "nya-media-metadata-tool",
 			WebviewGpuPolicy: linux.WebviewGpuPolicyOnDemand,
 		},
 	})
@@ -90,6 +93,15 @@ func runDesktop() error {
 		return err
 	}
 	return nil
+}
+
+func launchedInBackground(args []string) bool {
+	for _, arg := range args {
+		if arg == "--background" {
+			return true
+		}
+	}
+	return false
 }
 
 func desktopLogger(paths appdata.Paths) (*slog.Logger, func(), error) {

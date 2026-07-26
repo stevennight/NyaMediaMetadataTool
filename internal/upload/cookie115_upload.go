@@ -54,6 +54,32 @@ func (err *uncertain115CommitError) Unwrap() error {
 	return err.err
 }
 
+func is115PreCommitConnectionError(err error) bool {
+	var operationErr *net.OpError
+	if !errors.As(err, &operationErr) {
+		return false
+	}
+	switch strings.ToLower(operationErr.Op) {
+	case "dial", "lookup":
+		return true
+	default:
+		return false
+	}
+}
+
+func format115PreCommitConnectionError(err error) error {
+	var operationErr *net.OpError
+	if errors.As(err, &operationErr) {
+		if address, ok := operationErr.Addr.(*net.TCPAddr); ok {
+			ip := address.IP.To4()
+			if len(ip) == net.IPv4len && ip[0] == 198 && (ip[1] == 18 || ip[1] == 19) {
+				return fmt.Errorf("connect to OSS before upload: %w; OSS resolved to proxy fake-IP %s, check the proxy/TUN connection", err, ip)
+			}
+		}
+	}
+	return fmt.Errorf("connect to OSS before upload: %w", err)
+}
+
 func newECDH115UploadCipher() (upload115Cipher, error) {
 	return ec115.NewEcdhCipher()
 }
@@ -274,6 +300,9 @@ func (p *cookie115Provider) uploadByOSSSingle(ctx context.Context, params *pan11
 		options = append(options, oss.Progress(listener))
 	}
 	if err := bucket.PutObject(params.Object, reader, options...); err != nil {
+		if is115PreCommitConnectionError(err) {
+			return format115PreCommitConnectionError(err)
+		}
 		return &uncertain115CommitError{stage: "single-request OSS upload", err: err}
 	}
 	return nil

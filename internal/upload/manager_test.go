@@ -298,7 +298,7 @@ func TestWorkerUploadsOneBatchToEveryEnabledProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.Completed != 1 {
+	if summary.Completed != 2 {
 		t.Fatalf("unexpected summary: %#v", summary)
 	}
 }
@@ -368,7 +368,7 @@ func TestFailedProviderDoesNotPreventOtherTargetCompletion(t *testing.T) {
 	}
 	cancelWorker()
 	<-workerDone
-	if summary.Completed != 0 || summary.Failed != 1 || len(providers[okProvider.ID].uploads) != 1 {
+	if summary.Completed != 1 || summary.Failed != 1 || len(providers[okProvider.ID].uploads) != 1 {
 		t.Fatalf("unexpected terminal states: summary=%#v good=%#v", summary, providers[okProvider.ID].uploads)
 	}
 }

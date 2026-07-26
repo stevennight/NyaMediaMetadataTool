@@ -233,6 +233,8 @@ type UploadBatch = {
   revision: number;
   readyAt: string;
   fileCount: number;
+  providerName: string;
+  remoteRoot: string;
   targetCount: number;
   completedTargets: number;
   failedTargets: number;
@@ -4028,7 +4030,7 @@ export function App() {
               </form>
               <div className="task-table-wrap">
                 <table className="task-table upload-batch-table">
-                  <thead><tr><th>ID</th><th>状态</th><th>番剧目录</th><th>文件</th><th>目标</th><th>进度</th><th>可上传时间</th><th>操作</th></tr></thead>
+                  <thead><tr><th>ID</th><th>状态</th><th>番剧目录</th><th>文件</th><th>上传到</th><th>进度</th><th>可上传时间</th><th>操作</th></tr></thead>
                   <tbody>
                     {uploadBatches.length ? uploadBatches.map((batch) => (
                       <tr key={batch.id} tabIndex={0} onClick={() => void loadUploadBatchDetail(batch.id)} onKeyDown={(event) => { if (event.target !== event.currentTarget || !['Enter', ' '].includes(event.key)) return; event.preventDefault(); void loadUploadBatchDetail(batch.id); }} title="按 Enter 或空格打开详情">
@@ -4036,7 +4038,7 @@ export function App() {
                         <td><span className={uploadStatusPillClass(batch.status)}>{uploadStatusLabel(batch.status)}</span></td>
                         <td className="path-cell">{batch.seriesPath}</td>
                         <td>{batch.fileCount}</td>
-                        <td>{batch.targetCount}</td>
+                        <td className="upload-batch-destination"><strong>{batch.providerName || '-'}</strong>{batch.remoteRoot && <small>{batch.remoteRoot}</small>}</td>
                         <td><UploadBatchProgress batch={batch} /></td>
                         <td>{formatStoredTime(batch.readyAt, displayTimezone)}</td>
                         <td><button className="secondary" type="button" onClick={(event) => { event.stopPropagation(); void loadUploadBatchDetail(batch.id); }}>详情</button></td>
@@ -4280,11 +4282,8 @@ function UploadRouteProfile(props: { route: UploadProviderRoute; provider?: Uplo
 }
 
 function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; providers: UploadProvider[]; onChange: (configs: UploadProviderRoute[]) => void; onAddProvider: () => void; onAuthorizeProvider: (provider: UploadProvider) => void; onBrowseRemoteDirectory: (request: RemoteDirectoryPickerRequest) => void }) {
-  const selectedProviderIDs = new Set(props.configs.flatMap((config) => config.providerId == null ? [] : [config.providerId]));
-  const availableProviders = props.providers.filter((provider) => !selectedProviderIDs.has(provider.id));
-
   function addConfig() {
-    const provider = availableProviders.find((item) => item.enabled) ?? availableProviders[0];
+    const provider = props.providers.find((item) => item.enabled) ?? props.providers[0];
     if (!provider) return;
     props.onChange([...props.configs, newDirectoryUploadConfig(provider.id)]);
   }
@@ -4299,12 +4298,11 @@ function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; p
         <div><strong id="directory-upload-step-title"><CloudUpload size={16} aria-hidden="true" />上传</strong><small>{props.configs.length ? `${props.configs.length} 个目录级配置` : '未配置，不会上传'}</small></div>
         <div className="directory-upload-step-actions">
           <button className="secondary icon-text-button" type="button" onClick={props.onAddProvider}><Plus size={16} />添加 Provider</button>
-          <button className="secondary icon-text-button" type="button" onClick={addConfig} disabled={!availableProviders.length}><Plus size={16} />添加配置</button>
+          <button className="secondary icon-text-button" type="button" onClick={addConfig} disabled={!props.providers.length}><Plus size={16} />添加配置</button>
         </div>
       </div>
       {!props.providers.length && <div className="directory-upload-empty-action"><p className="settings-note">尚未添加 Provider。添加并授权账号后，即可为当前目录配置上传。</p></div>}
       {props.providers.length > 0 && !props.configs.length && <p className="settings-note">上传是当前媒体目录的独立处理步骤；添加配置后，处理完成的文件会发送到指定 Provider。</p>}
-      {props.providers.length > 0 && props.configs.length > 0 && !availableProviders.length && <p className="settings-note">所有 Provider 都已配置；同一媒体目录不能重复选择同一个 Provider。</p>}
       <div className="directory-upload-configs">
         {props.configs.map((config, index) => {
           const provider = props.providers.find((item) => item.id === config.providerId);
@@ -4314,7 +4312,7 @@ function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; p
             <section className="directory-upload-config" key={config.id ?? `${config.providerId}-${index}`}>
               <div className="directory-upload-config-header">
                 <label>Provider<select value={config.providerId ?? ''} onChange={(event) => updateConfig(index, { providerId: Number(event.target.value), remoteRoot: '/' })}>
-                  {props.providers.map((item) => <option key={item.id} value={item.id} disabled={item.id !== config.providerId && selectedProviderIDs.has(item.id)}>{item.name} · {item.type}{item.enabled ? '' : '（已停用）'}</option>)}
+                  {props.providers.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.type}{item.enabled ? '' : '（已停用）'}</option>)}
                 </select></label>
                 <div className="directory-upload-config-state">
                   {needsAuthorization && <span className="pill warn">待授权</span>}
@@ -4406,7 +4404,6 @@ function UploadBatchProgress(props: { batch: UploadBatch }) {
   const transferCount = Math.max(0, Number(props.batch.transferCount) || 0);
   const completedTransfers = Math.min(transferCount, Math.max(0, Number(props.batch.completedTransfers) || 0));
   const failedTransfers = Math.max(0, Number(props.batch.failedTransfers) || 0);
-  const targetSummary = `目标 ${props.batch.completedTargets}/${props.batch.targetCount}${props.batch.failedTargets ? `，失败 ${props.batch.failedTargets}` : ''}`;
   if (transferCount === 0) {
     const emptyLabel = props.batch.status === 'collecting'
       ? '正在收集文件'
@@ -4420,7 +4417,6 @@ function UploadBatchProgress(props: { batch: UploadBatch }) {
     return (
       <div className="upload-batch-progress empty">
         <span>{emptyLabel}</span>
-        <small>{targetSummary}</small>
       </div>
     );
   }
@@ -4435,7 +4431,6 @@ function UploadBatchProgress(props: { batch: UploadBatch }) {
       {collecting
         ? <progress max={transferCount} aria-label="批次仍在收集文件，传输总数可能变化" />
         : <progress max={transferCount} value={completedTransfers} aria-label={`已完成 ${completedTransfers} / ${transferCount} 个传输`} />}
-      <small>{targetSummary}</small>
     </div>
   );
 }
@@ -4475,6 +4470,18 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
     () => fileStatusFilter === 'all' ? fileRows : fileRows.filter((row) => row.status === fileStatusFilter),
     [fileRows, fileStatusFilter]
   );
+  const fileStatusCounts = useMemo<Record<UploadFileStatusFilter, number>>(() => {
+    const counts: Record<UploadFileStatusFilter, number> = {
+      all: fileRows.length,
+      running: 0,
+      pending: 0,
+      failed: 0,
+      canceled: 0,
+      completed: 0
+    };
+    for (const row of fileRows) counts[row.status] += 1;
+    return counts;
+  }, [fileRows]);
   const filePageCount = Math.max(1, Math.ceil(filteredFileRows.length / uploadDetailPageSize));
   const safeFilePage = Math.min(filePage, filePageCount);
   const pagedFileRows = filteredFileRows.slice((safeFilePage - 1) * uploadDetailPageSize, safeFilePage * uploadDetailPageSize);
@@ -4505,101 +4512,106 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
     <div className="modal-backdrop" role="presentation" onClick={props.onClose}>
       <section className="modal-card upload-batch-detail-modal" role="dialog" aria-modal="true" aria-labelledby="upload-batch-detail-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header"><div><h2 id="upload-batch-detail-title">上传批次 #{props.detail.batch.id}</h2><small>{props.detail.batch.seriesPath}</small></div><IconCloseButton onClick={props.onClose} /></div>
-        <div className="upload-detail-summary">
-          <Row label="状态" value={uploadStatusLabel(props.detail.batch.status)} />
-          <Row label="可上传时间" value={formatStoredTime(props.detail.batch.readyAt, props.timezone)} />
-          <Row label="文件 / 目标" value={`${props.detail.files.length} / ${props.detail.targets.length}`} />
-        </div>
-        {(waitingTransferCount > 0 || waitingRetryCount > 0) && (
-          <p className="upload-detail-refresh-note retrying" role="status">
-            <RefreshCw size={14} aria-hidden="true" />
-            {waitingTransferCount > 0
-              ? `${waitingTransferCount} 个传输正在等待 115 请求间隔；倒计时见文件状态。`
-              : `${waitingRetryCount} 个目标正在等待自动重试；会保留上次错误供排查。`}
-          </p>
-        )}
-        <section className="upload-detail-section">
-          <h3>目标</h3>
-          <div className="task-table-wrap">
-            <table className="task-table upload-target-table">
-              <thead><tr><th>目标</th><th>状态 / 调度</th><th>尝试</th><th>最近错误</th><th>操作</th></tr></thead>
-              <tbody>{props.detail.targets.map((target) => {
-                const scheduleLabel = uploadTargetScheduleLabel(target, props.timezone);
-                return <tr key={target.id}>
-                  <td><strong>{target.providerName}</strong><small>{target.remoteRoot}</small></td>
-                  <td><div className="upload-target-status"><span className={uploadStatusPillClass(target.status)}>{uploadTargetStatusLabel(target)}</span>{scheduleLabel && <small>{scheduleLabel}</small>}</div></td>
-                  <td>{target.attempts}</td>
-                  <td className="path-cell upload-error-cell">{target.errorSummary || '-'}</td>
-                  <td><div className="inline-actions">{['failed', 'canceled'].includes(target.status) && target.retryable && <button className="secondary" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onRetry(target)}>{props.actionTargetID === target.id ? '处理中' : '重试'}</button>}{['failed', 'canceled'].includes(target.status) && !target.retryable && <span className="pill ignored">不可重试</span>}{['waiting', 'pending'].includes(target.status) && <button className="danger" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onCancel(target)}>{props.actionTargetID === target.id ? '处理中' : '取消'}</button>}</div></td>
-                </tr>;
-              })}</tbody>
-            </table>
+        <div className="upload-batch-detail-content">
+          <div className="upload-detail-summary">
+            <Row label="状态" value={uploadStatusLabel(props.detail.batch.status)} />
+            <Row label="可上传时间" value={formatStoredTime(props.detail.batch.readyAt, props.timezone)} />
+            <Row label="文件 / 目标" value={`${props.detail.files.length} / ${props.detail.targets.length}`} />
           </div>
-        </section>
-        <section className="upload-detail-section">
-          <div className="upload-detail-section-header">
-            <h3>文件</h3>
-            <small>显示 {filteredFileRows.length} / {fileRows.length}</small>
-          </div>
-          <div className="task-status-tabs upload-file-status-tabs" role="group" aria-label="文件传输状态过滤">
-            {uploadFileStatusFilters.map((status) => (
-              <button
-                className={fileStatusFilter === status.value ? 'status-tab active' : 'status-tab'}
-                type="button"
-                key={status.value}
-                aria-pressed={fileStatusFilter === status.value}
-                onClick={() => {
-                  setFileStatusFilter(status.value);
-                  setFilePage(1);
-                }}
-              >
-                {status.label}
-              </button>
-            ))}
-          </div>
-          <div className="task-table-wrap">
-            <table className="task-table upload-file-table">
-              <thead><tr><th>相对路径</th><th>类型</th><th>大小</th><th>传输状态</th><th>最近错误</th></tr></thead>
-              <tbody>{pagedFileRows.length ? pagedFileRows.map(({ file, transfers }) => {
-                const transferErrors = transfers.flatMap((transfer) => {
-                  const target = targetsByID.get(transfer.batchTargetId);
-                  const status = effectiveUploadTransferStatus(transfer, target);
-                  const summary = transfer.errorSummary || (['failed', 'canceled'].includes(status) ? target?.errorSummary : '');
-                  return summary ? [{ transfer, target, summary }] : [];
-                });
-                return <tr key={file.id}>
-                  <td className="path-cell">{file.relativePath}</td>
-                  <td>{file.fileType}</td>
-                  <td>{formatUploadBytes(file.size)}</td>
-                  <td>{transfers.length ? <div className="upload-transfer-list">{transfers.map((transfer) => {
-                    const target = targetsByID.get(transfer.batchTargetId);
-                    const display = uploadTransferDisplay(transfer, target);
-                    const activity = uploadTransferActivity(transfer, countdownNow);
-                    const progress = uploadTransferProgress(transfer);
-                    return <div className="upload-transfer-item" key={transfer.id}>
-                      <div className="upload-transfer-state">
-                        <span className={display.className}>{display.label}</span>
-                        {activity && <span className={uploadTransferIsWaiting(transfer) ? 'upload-transfer-activity waiting' : 'upload-transfer-activity'}>{activity}</span>}
-                      </div>
-                      {progress && <div className="upload-transfer-progress">
-                        <progress max={progress.bytesTotal} value={progress.bytesTransferred} aria-label={`已上传 ${progress.percent}%`} />
-                        <small>{formatUploadBytes(progress.bytesTransferred)} / {formatUploadBytes(progress.bytesTotal)} · {progress.percent}%</small>
-                      </div>}
-                    </div>;
-                  })}</div> : '-'}</td>
-                  <td className="upload-error-cell">{transferErrors.length ? <div className="upload-transfer-errors">{transferErrors.map(({ transfer, target, summary }) => <div className="upload-transfer-error" key={transfer.id}><strong>{target?.providerName || `目标 #${transfer.batchTargetId}`}</strong><span>{summary}</span></div>)}</div> : '-'}</td>
-                </tr>;
-              }) : <tr><td colSpan={5} className="empty-cell">{fileStatusFilter === 'all' ? '暂无上传文件。' : '当前状态下没有文件。'}</td></tr>}</tbody>
-            </table>
-          </div>
-          <div className="pagination-bar upload-file-pagination">
-            <span aria-live="polite">共 {filteredFileRows.length} 条，第 {safeFilePage} / {filePageCount} 页</span>
-            <div className="inline-actions">
-              <button className="secondary" type="button" disabled={safeFilePage <= 1} onClick={() => setFilePage(safeFilePage - 1)}>上一页</button>
-              <button className="secondary" type="button" disabled={safeFilePage >= filePageCount} onClick={() => setFilePage(safeFilePage + 1)}>下一页</button>
+          {(waitingTransferCount > 0 || waitingRetryCount > 0) && (
+            <p className="upload-detail-refresh-note retrying" role="status">
+              <RefreshCw size={14} aria-hidden="true" />
+              {waitingTransferCount > 0
+                ? `${waitingTransferCount} 个传输正在等待 115 请求间隔；倒计时见文件状态。`
+                : `${waitingRetryCount} 个目标正在等待自动重试；会保留上次错误供排查。`}
+            </p>
+          )}
+          <section className="upload-detail-section">
+            <h3>目标</h3>
+            <div className="task-table-wrap">
+              <table className="task-table upload-target-table">
+                <thead><tr><th>目标</th><th>状态 / 调度</th><th>尝试</th><th>最近错误</th><th>操作</th></tr></thead>
+                <tbody>{props.detail.targets.map((target) => {
+                  const scheduleLabel = uploadTargetScheduleLabel(target, props.timezone);
+                  return <tr key={target.id}>
+                    <td><strong>{target.providerName}</strong><small>{target.remoteRoot}</small></td>
+                    <td><div className="upload-target-status"><span className={uploadStatusPillClass(target.status)}>{uploadTargetStatusLabel(target)}</span>{scheduleLabel && <small>{scheduleLabel}</small>}</div></td>
+                    <td>{target.attempts}</td>
+                    <td className="path-cell upload-error-cell">{target.errorSummary || '-'}</td>
+                    <td><div className="inline-actions">{['failed', 'canceled'].includes(target.status) && target.retryable && <button className="secondary" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onRetry(target)}>{props.actionTargetID === target.id ? '处理中' : '重试'}</button>}{['failed', 'canceled'].includes(target.status) && !target.retryable && <span className="pill ignored">不可重试</span>}{['waiting', 'pending'].includes(target.status) && <button className="danger" type="button" disabled={props.actionTargetID === target.id} onClick={() => props.onCancel(target)}>{props.actionTargetID === target.id ? '处理中' : '取消'}</button>}</div></td>
+                  </tr>;
+                })}</tbody>
+              </table>
             </div>
-          </div>
-        </section>
+          </section>
+          <section className="upload-detail-section">
+            <div className="upload-detail-section-header">
+              <h3>文件</h3>
+              <small>显示 {filteredFileRows.length} / {fileRows.length}</small>
+            </div>
+            <div className="task-status-tabs upload-file-status-tabs" role="group" aria-label="文件传输状态过滤">
+              {uploadFileStatusFilters.map((status) => (
+                <button
+                  className={fileStatusFilter === status.value ? 'status-tab active' : 'status-tab'}
+                  type="button"
+                  key={status.value}
+                  aria-pressed={fileStatusFilter === status.value}
+                  onClick={() => {
+                    setFileStatusFilter(status.value);
+                    setFilePage(1);
+                  }}
+                >
+                  <span>{status.label}</span>
+                  <span className="status-tab-count" aria-label={`${fileStatusCounts[status.value]} 个文件`}>
+                    {fileStatusCounts[status.value]}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="task-table-wrap">
+              <table className="task-table upload-file-table">
+                <thead><tr><th>相对路径</th><th>类型</th><th>大小</th><th>传输状态</th><th>最近错误</th></tr></thead>
+                <tbody>{pagedFileRows.length ? pagedFileRows.map(({ file, transfers }) => {
+                  const transferErrors = transfers.flatMap((transfer) => {
+                    const target = targetsByID.get(transfer.batchTargetId);
+                    const status = effectiveUploadTransferStatus(transfer, target);
+                    const summary = transfer.errorSummary || (['failed', 'canceled'].includes(status) ? target?.errorSummary : '');
+                    return summary ? [{ transfer, target, summary }] : [];
+                  });
+                  return <tr key={file.id}>
+                    <td className="path-cell">{file.relativePath}</td>
+                    <td>{file.fileType}</td>
+                    <td>{formatUploadBytes(file.size)}</td>
+                    <td>{transfers.length ? <div className="upload-transfer-list">{transfers.map((transfer) => {
+                      const target = targetsByID.get(transfer.batchTargetId);
+                      const display = uploadTransferDisplay(transfer, target);
+                      const activity = uploadTransferActivity(transfer, countdownNow);
+                      const progress = uploadTransferProgress(transfer);
+                      return <div className="upload-transfer-item" key={transfer.id}>
+                        <div className="upload-transfer-state">
+                          <span className={display.className}>{display.label}</span>
+                          {activity && <span className={uploadTransferIsWaiting(transfer) ? 'upload-transfer-activity waiting' : 'upload-transfer-activity'}>{activity}</span>}
+                        </div>
+                        {progress && <div className="upload-transfer-progress">
+                          <progress max={progress.bytesTotal} value={progress.bytesTransferred} aria-label={`已上传 ${progress.percent}%`} />
+                          <small>{formatUploadBytes(progress.bytesTransferred)} / {formatUploadBytes(progress.bytesTotal)} · {progress.percent}%</small>
+                        </div>}
+                      </div>;
+                    })}</div> : '-'}</td>
+                    <td className="upload-error-cell">{transferErrors.length ? <div className="upload-transfer-errors">{transferErrors.map(({ transfer, target, summary }) => <div className="upload-transfer-error" key={transfer.id}><strong>{target?.providerName || `目标 #${transfer.batchTargetId}`}</strong><span>{summary}</span></div>)}</div> : '-'}</td>
+                  </tr>;
+                }) : <tr><td colSpan={5} className="empty-cell">{fileStatusFilter === 'all' ? '暂无上传文件。' : '当前状态下没有文件。'}</td></tr>}</tbody>
+              </table>
+            </div>
+            <div className="pagination-bar upload-file-pagination">
+              <span aria-live="polite">共 {filteredFileRows.length} 条，第 {safeFilePage} / {filePageCount} 页</span>
+              <div className="inline-actions">
+                <button className="secondary" type="button" disabled={safeFilePage <= 1} onClick={() => setFilePage(safeFilePage - 1)}>上一页</button>
+                <button className="secondary" type="button" disabled={safeFilePage >= filePageCount} onClick={() => setFilePage(safeFilePage + 1)}>下一页</button>
+              </div>
+            </div>
+          </section>
+        </div>
       </section>
     </div>
   );
@@ -4999,9 +5011,7 @@ function WatchDirModal(props: {
   onBrowsePath: () => void;
   onSubmit: () => void;
 }) {
-  const uploadProviderIDs = props.uploadConfigs.map((config) => config.providerId).filter((value): value is number => value != null && value > 0);
-  const uploadConfigsValid = props.uploadConfigs.every((config) => config.providerId != null && config.providerId > 0 && config.remoteRoot.trim() && config.includeTypes.length > 0)
-    && new Set(uploadProviderIDs).size === uploadProviderIDs.length;
+  const uploadConfigsValid = props.uploadConfigs.every((config) => config.providerId != null && config.providerId > 0 && config.remoteRoot.trim() && config.includeTypes.length > 0);
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="modal-card watch-dir-modal" data-protect-draft={props.dirty ? 'true' : undefined} role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="watch-dir-modal-title" onClick={(event) => event.stopPropagation()}>
@@ -5030,7 +5040,7 @@ function WatchDirModal(props: {
             </>
           )}
           <DirectoryUploadConfigsEditor configs={props.uploadConfigs} providers={props.providers} onChange={props.onUploadConfigsChange} onAddProvider={props.onAddProvider} onAuthorizeProvider={props.onAuthorizeProvider} onBrowseRemoteDirectory={props.onBrowseRemoteDirectory} />
-          {!uploadConfigsValid && <small className="upload-selection-warning">每个上传配置必须选择不同的 Provider、填写远端根目录，并至少选择一种上传内容。</small>}
+          {!uploadConfigsValid && <small className="upload-selection-warning">每个上传配置必须选择 Provider、填写远端根目录，并至少选择一种上传内容。</small>}
         </fieldset>
         <p className="muted">保存后默认递归处理该目录。自动监听会在保存后立即热更新，无需重启服务。</p>
         <div className="inline-actions modal-actions">

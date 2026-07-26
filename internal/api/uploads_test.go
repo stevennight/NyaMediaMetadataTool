@@ -417,28 +417,30 @@ func TestWatchDirCreateAllowsDisabledMissingRemoteRoot(t *testing.T) {
 	}
 }
 
-func TestWatchDirCreateRejectsDuplicateProvidersBeforeRemoteAccess(t *testing.T) {
+func TestWatchDirCreateAllowsProviderWithMultipleRemoteRoots(t *testing.T) {
 	remote := &fakeDirectoryListingProvider{directories: map[string][]upload.RemoteEntry{"/Existing": nil}}
 	handler, st, provider := newUploadDirectoryTestHandler(t, remote)
 
-	route := `{"providerId":` + jsonNumber(provider.ID) + `,"enabled":true,"remoteRoot":"/Existing","collisionPolicy":"fail","includeTypes":["video"]}`
-	body := `{"path":` + strconv.Quote(filepath.Join(t.TempDir(), "media")) + `,"recursive":true,"watchEnabled":true,"useGlobalProcessing":true,"uploadConfigs":[` + route + `,` + route + `]}`
+	firstRoute := `{"providerId":` + jsonNumber(provider.ID) + `,"enabled":true,"remoteRoot":"/Existing","collisionPolicy":"fail","includeTypes":["video"]}`
+	secondRoute := `{"providerId":` + jsonNumber(provider.ID) + `,"enabled":true,"remoteRoot":"/Existing/Backup","collisionPolicy":"fail","includeTypes":["video"]}`
+	remote.directories["/Existing/Backup"] = nil
+	body := `{"path":` + strconv.Quote(filepath.Join(t.TempDir(), "media")) + `,"recursive":true,"watchEnabled":true,"useGlobalProcessing":true,"uploadConfigs":[` + firstRoute + `,` + secondRoute + `]}`
 	request := httptest.NewRequest(http.MethodPost, "/api/watch-dirs", bytes.NewBufferString(body))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("create with duplicate providers status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create with repeated provider status=%d body=%s", response.Code, response.Body.String())
 	}
-	if len(remote.listedPaths) != 0 {
-		t.Fatalf("structurally invalid routes unexpectedly accessed provider: %#v", remote.listedPaths)
+	if len(remote.listedPaths) != 2 {
+		t.Fatalf("expected both remote roots to be checked: %#v", remote.listedPaths)
 	}
 	dirs, err := st.ListWatchDirs(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dirs) != 0 {
-		t.Fatalf("duplicate provider routes persisted watch directories: %#v", dirs)
+	if len(dirs) != 1 || len(dirs[0].UploadConfigs) != 2 {
+		t.Fatalf("provider routes were not persisted independently: %#v", dirs)
 	}
 }
 

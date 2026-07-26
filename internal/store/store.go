@@ -121,6 +121,9 @@ func (s *Store) Migrate(ctx context.Context, legacyUploads ...*config.LegacyUplo
 	if err := s.ensureUploadColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureUploadRouteIndexes(ctx); err != nil {
+		return err
+	}
 	if err := s.migrateUploadRoutesToWatchDirs(ctx); err != nil {
 		return err
 	}
@@ -223,6 +226,7 @@ func (s *Store) ensureUploadColumns(ctx context.Context) error {
 		update string
 	}{
 		{"upload_providers", "auth_device", `ALTER TABLE upload_providers ADD COLUMN auth_device TEXT NOT NULL DEFAULT ''`, ""},
+		{"upload_batches", "upload_route_id", `ALTER TABLE upload_batches ADD COLUMN upload_route_id INTEGER`, ""},
 		{"upload_batch_targets", "include_types", `ALTER TABLE upload_batch_targets ADD COLUMN include_types TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_batch_targets", "retryable", `ALTER TABLE upload_batch_targets ADD COLUMN retryable INTEGER NOT NULL DEFAULT 1`, ""},
 		{"upload_events", "attempts", `ALTER TABLE upload_events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`, ""},
@@ -255,6 +259,17 @@ func (s *Store) ensureUploadColumns(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) ensureUploadRouteIndexes(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_upload_provider_routes_watch`); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_upload_provider_routes_watch
+ON upload_provider_routes(provider_id, watch_dir_id)
+`)
+	return err
 }
 
 func (s *Store) migrateUploadRoutesToWatchDirs(ctx context.Context) error {
@@ -647,7 +662,7 @@ CREATE TABLE IF NOT EXISTS upload_provider_routes (
   FOREIGN KEY(watch_dir_id) REFERENCES watch_dirs(id) ON DELETE CASCADE
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_provider_routes_watch
+CREATE INDEX IF NOT EXISTS idx_upload_provider_routes_watch
   ON upload_provider_routes(provider_id, watch_dir_id)
   WHERE watch_dir_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_upload_provider_routes_watch_enabled
@@ -670,6 +685,7 @@ END;
 CREATE TABLE IF NOT EXISTS upload_batches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   watch_dir_id INTEGER,
+  upload_route_id INTEGER,
   series_key TEXT NOT NULL,
   series_path TEXT NOT NULL,
   status TEXT NOT NULL,

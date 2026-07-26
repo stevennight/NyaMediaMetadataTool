@@ -826,13 +826,49 @@ h1 {
 }
 
 .modal-card.upload-batch-detail-modal {
+  display: flex;
   width: min(1120px, 100%);
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.upload-batch-detail-modal > .card-header {
+  flex: 0 0 auto;
+}
+
+.upload-batch-detail-modal > .card-header > div {
+  min-width: 0;
+}
+
+.upload-batch-detail-modal > .card-header small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.upload-batch-detail-content {
+  min-height: 0;
+  overflow: auto;
+  padding: 24px;
 }
 
 .upload-detail-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+}
+
+.upload-batch-destination strong,
+.upload-batch-destination small {
+  display: block;
+}
+
+.upload-batch-destination small {
+  margin-top: 3px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .upload-detail-summary .row {
@@ -866,7 +902,31 @@ h1 {
 }
 
 .upload-file-status-tabs .status-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   min-width: 82px;
+}
+
+.upload-file-status-tabs .status-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--surface-hover);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.upload-file-status-tabs .status-tab.active .status-tab-count {
+  background: var(--surface);
+  color: var(--primary);
 }
 
 .upload-detail-section .pill {
@@ -4751,6 +4811,12 @@ label small {
 
 .modal-card > .card-header h2 {
   margin: 0;
+}
+
+.modal-card.upload-batch-detail-modal > .card-header {
+  margin: 0;
+  border-radius: 8px 8px 0 0;
+  padding: 12px 24px;
 }
 
 .modal-card:not(.confirm-dialog) .modal-actions {

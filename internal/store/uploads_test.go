@@ -138,7 +138,7 @@ func TestUploadProviderCookieRejectsUnsupportedAuthDevice(t *testing.T) {
 	}
 }
 
-func TestCollectUploadBatchCoalescesFilesAndTargets(t *testing.T) {
+func TestCollectUploadBatchesCoalescesFilesByRoute(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	defer st.Close()
@@ -146,19 +146,15 @@ func TestCollectUploadBatchCoalescesFilesAndTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := st.CreateUploadProvider(ctx, UploadProvider{Name: "115 B", Type: UploadProviderType115Cookie, Enabled: true})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	root := t.TempDir()
 	dir := createUploadTestWatchDir(t, st, ctx, root, []UploadProviderRoute{
 		{ProviderID: first.ID, Enabled: true, RemoteRoot: "/A", CollisionPolicy: "fail", IncludeTypes: []string{"video", "nfo"}},
-		{ProviderID: second.ID, Enabled: true, RemoteRoot: "/B", CollisionPolicy: "fail", IncludeTypes: []string{"video", "nfo"}},
+		{ProviderID: first.ID, Enabled: true, RemoteRoot: "/B", CollisionPolicy: "fail", IncludeTypes: []string{"video", "nfo"}},
 	})
 	seriesPath := filepath.Join(root, "Show")
 	base := time.Now().UTC().Add(-time.Minute)
-	batch, created, err := st.CollectUploadBatch(ctx, UploadCollectionInput{
+	batches, created, err := st.CollectUploadBatches(ctx, UploadCollectionInput{
 		WatchDirID:  &dir.ID,
 		SeriesKey:   "watch-1:" + seriesPath,
 		SeriesPath:  seriesPath,
@@ -174,11 +170,16 @@ func TestCollectUploadBatchCoalescesFilesAndTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !created || batch.ID == 0 || batch.TargetCount != 2 {
-		t.Fatalf("unexpected initial batch: %#v created=%v", batch, created)
+	if created != 2 || len(batches) != 2 {
+		t.Fatalf("unexpected initial batches: %#v created=%d", batches, created)
+	}
+	for _, batch := range batches {
+		if batch.ID == 0 || batch.UploadRouteID == nil || batch.TargetCount != 1 || batch.FileCount != 1 || batch.TransferCount != 1 {
+			t.Fatalf("unexpected route batch: %#v", batch)
+		}
 	}
 
-	updated, created, err := st.CollectUploadBatch(ctx, UploadCollectionInput{
+	updated, created, err := st.CollectUploadBatches(ctx, UploadCollectionInput{
 		WatchDirID:  &dir.ID,
 		SeriesKey:   "watch-1:" + seriesPath,
 		SeriesPath:  seriesPath,
@@ -194,29 +195,37 @@ func TestCollectUploadBatchCoalescesFilesAndTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created || updated.ID != batch.ID || updated.FileCount != 2 || updated.TargetCount != 2 {
-		t.Fatalf("batch should coalesce: %#v created=%v", updated, created)
+	if created != 0 || len(updated) != 2 {
+		t.Fatalf("batches should coalesce: %#v created=%d", updated, created)
+	}
+	for index, batch := range updated {
+		if batch.ID != batches[index].ID || batch.FileCount != 2 || batch.TargetCount != 1 || batch.TransferCount != 2 {
+			t.Fatalf("route batch should coalesce: %#v", batch)
+		}
 	}
 
 	sealed, err := st.SealDueUploadBatches(ctx, time.Now(), time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sealed != 1 {
-		t.Fatalf("expected one sealed batch, got %d", sealed)
+	if sealed != 2 {
+		t.Fatalf("expected two sealed batches, got %d", sealed)
 	}
-	detail, err := st.GetUploadBatchDetail(ctx, batch.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if detail.Batch.Status != UploadBatchPending || len(detail.Files) != 2 || len(detail.Targets) != 2 || len(detail.Transfers) != 4 {
-		t.Fatalf("unexpected sealed detail: %#v files=%d targets=%d transfers=%d", detail.Batch, len(detail.Files), len(detail.Targets), len(detail.Transfers))
-	}
-	if detail.Batch.TransferCount != 4 || detail.Batch.CompletedTransfers != 0 || detail.Batch.FailedTransfers != 0 {
-		t.Fatalf("unexpected initial transfer progress: %#v", detail.Batch)
-	}
-	if detail.Targets[0].ProviderID != first.ID {
-		t.Fatalf("unexpected first target: %#v", detail.Targets[0])
+	for index, batch := range batches {
+		detail, err := st.GetUploadBatchDetail(ctx, batch.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if detail.Batch.Status != UploadBatchPending || len(detail.Files) != 2 || len(detail.Targets) != 1 || len(detail.Transfers) != 2 {
+			t.Fatalf("unexpected sealed detail: %#v files=%d targets=%d transfers=%d", detail.Batch, len(detail.Files), len(detail.Targets), len(detail.Transfers))
+		}
+		wantRoot := "/A"
+		if index == 1 {
+			wantRoot = "/B"
+		}
+		if detail.Targets[0].ProviderID != first.ID || detail.Targets[0].RemoteRoot != wantRoot {
+			t.Fatalf("unexpected target: %#v", detail.Targets[0])
+		}
 	}
 }
 
@@ -238,7 +247,7 @@ func TestUploadTargetCompletionCreatesOneEventPerDestination(t *testing.T) {
 		{ProviderID: providers[1].ID, Enabled: true, RemoteRoot: "/B", CollisionPolicy: "fail", IncludeTypes: []string{"video"}},
 	})
 	seriesPath := filepath.Join(root, "Show")
-	batch, _, err := st.CollectUploadBatch(ctx, UploadCollectionInput{
+	batches, _, err := st.CollectUploadBatches(ctx, UploadCollectionInput{
 		WatchDirID:  &dir.ID,
 		SeriesKey:   "show",
 		SeriesPath:  seriesPath,
@@ -278,13 +287,18 @@ func TestUploadTargetCompletionCreatesOneEventPerDestination(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	detail, err := st.GetUploadBatchDetail(ctx, batch.ID)
-	if err != nil {
-		t.Fatal(err)
+	if len(batches) != 2 {
+		t.Fatalf("unexpected batches: %#v", batches)
 	}
-	if detail.Batch.Status != UploadBatchCompleted || detail.Batch.CompletedTargets != 2 ||
-		detail.Batch.TransferCount != 2 || detail.Batch.CompletedTransfers != 2 || detail.Batch.FailedTransfers != 0 {
-		t.Fatalf("batch did not complete: %#v", detail.Batch)
+	for _, batch := range batches {
+		detail, err := st.GetUploadBatchDetail(ctx, batch.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if detail.Batch.Status != UploadBatchCompleted || detail.Batch.CompletedTargets != 1 ||
+			detail.Batch.TransferCount != 1 || detail.Batch.CompletedTransfers != 1 || detail.Batch.FailedTransfers != 0 {
+			t.Fatalf("batch did not complete: %#v", detail.Batch)
+		}
 	}
 	events, err := st.ListUploadEvents(ctx, "pending", 10)
 	if err != nil {

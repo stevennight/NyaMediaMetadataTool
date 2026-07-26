@@ -110,12 +110,15 @@ type UploadProviderRoute struct {
 type UploadBatch struct {
 	ID                 int64  `json:"id"`
 	WatchDirID         *int64 `json:"watchDirId"`
+	UploadRouteID      *int64 `json:"uploadRouteId,omitempty"`
 	SeriesKey          string `json:"seriesKey"`
 	SeriesPath         string `json:"seriesPath"`
 	Status             string `json:"status"`
 	Revision           int    `json:"revision"`
 	ReadyAt            string `json:"readyAt"`
 	FileCount          int    `json:"fileCount"`
+	ProviderName       string `json:"providerName"`
+	RemoteRoot         string `json:"remoteRoot"`
 	TargetCount        int    `json:"targetCount"`
 	CompletedTargets   int    `json:"completedTargets"`
 	FailedTargets      int    `json:"failedTargets"`
@@ -383,15 +386,10 @@ ORDER BY id
 }
 
 func ValidateUploadProviderRoutes(routes []UploadProviderRoute) error {
-	seen := make(map[int64]struct{}, len(routes))
 	for _, route := range routes {
 		if route.ProviderID <= 0 {
 			return fmt.Errorf("%w: provider id is required", ErrInvalidUploadConfig)
 		}
-		if _, ok := seen[route.ProviderID]; ok {
-			return fmt.Errorf("%w: duplicate provider %d for watch directory", ErrInvalidUploadConfig, route.ProviderID)
-		}
-		seen[route.ProviderID] = struct{}{}
 		if err := validateStoredUploadTypes(route.IncludeTypes); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidUploadConfig, err)
 		}
@@ -529,128 +527,122 @@ func (s *Store) DeleteUploadProviderSecret(ctx context.Context, providerID int64
 	return tx.Commit()
 }
 
-// CollectUploadBatch coalesces files for the same show until the batch is
-// sealed. Each enabled provider is snapshotted once per batch.
+// CollectUploadBatch preserves the original single-result API for callers
+// that only need to know whether upload work exists.
 func (s *Store) CollectUploadBatch(ctx context.Context, input UploadCollectionInput) (UploadBatch, bool, error) {
+	batches, created, err := s.CollectUploadBatches(ctx, input)
+	if err != nil || len(batches) == 0 {
+		return UploadBatch{}, false, err
+	}
+	return batches[0], created > 0, nil
+}
+
+// CollectUploadBatches coalesces files by watch-directory upload route and
+// series until each route-specific batch is sealed.
+func (s *Store) CollectUploadBatches(ctx context.Context, input UploadCollectionInput) ([]UploadBatch, int, error) {
 	if strings.TrimSpace(input.SeriesKey) == "" || strings.TrimSpace(input.SeriesPath) == "" {
-		return UploadBatch{}, false, errors.New("series key and series path are required")
+		return nil, 0, errors.New("series key and series path are required")
 	}
 	if input.WatchDirID == nil || *input.WatchDirID <= 0 {
-		return UploadBatch{}, false, nil
+		return nil, 0, nil
 	}
 	if len(input.Files) == 0 {
-		return UploadBatch{}, false, nil
+		return nil, 0, nil
 	}
 	if input.QuietPeriod <= 0 {
 		input.QuietPeriod = 2 * time.Minute
 	}
+	for _, candidate := range input.Files {
+		if err := validateUploadCandidate(candidate); err != nil {
+			return nil, 0, err
+		}
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return UploadBatch{}, false, err
+		return nil, 0, err
 	}
 	defer tx.Rollback()
 
 	configuredTargets, err := listEnabledWatchDirUploadTargetsTx(ctx, tx, *input.WatchDirID)
 	if err != nil {
-		return UploadBatch{}, false, err
+		return nil, 0, err
 	}
-	type selectedProvider struct {
-		provider        UploadProvider
-		remoteRoot      string
-		collisionPolicy string
-		includeTypes    []string
-	}
-	selectedProviders := make([]selectedProvider, 0, len(configuredTargets))
+	readyAt := formatStoreTime(time.Now().UTC().Add(input.QuietPeriod))
+	batchIDs := make([]int64, 0, len(configuredTargets))
+	created := 0
+
 	for _, configured := range configuredTargets {
 		if !hasAllowedUploadCandidate(input.Files, configured.route.IncludeTypes) {
 			continue
 		}
-		selectedProviders = append(selectedProviders, selectedProvider{
-			provider:        configured.provider,
-			remoteRoot:      configured.route.RemoteRoot,
-			collisionPolicy: configured.route.CollisionPolicy,
-			includeTypes:    configured.route.IncludeTypes,
-		})
-	}
 
-	var batchID int64
-	var existing bool
-	err = tx.QueryRowContext(ctx, `
+		var batchID int64
+		existing := false
+		err = tx.QueryRowContext(ctx, `
 SELECT id
 FROM upload_batches
-WHERE watch_dir_id = ? AND series_key = ? AND status = ?
+WHERE watch_dir_id = ? AND upload_route_id = ? AND series_key = ? AND status = ?
 ORDER BY id DESC
 LIMIT 1
-`, *input.WatchDirID, input.SeriesKey, UploadBatchCollecting).Scan(&batchID)
-	if err == nil {
-		existing = true
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return UploadBatch{}, false, err
-	}
-	if !existing && len(selectedProviders) == 0 {
-		if err := tx.Commit(); err != nil {
-			return UploadBatch{}, false, err
+`, *input.WatchDirID, configured.route.ID, input.SeriesKey, UploadBatchCollecting).Scan(&batchID)
+		if err == nil {
+			existing = true
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, 0, err
 		}
-		return UploadBatch{}, false, nil
-	}
 
-	readyAt := formatStoreTime(time.Now().UTC().Add(input.QuietPeriod))
-	if !existing {
-		var revision int
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(revision), 0) + 1 FROM upload_batches WHERE watch_dir_id = ? AND series_key = ?`, *input.WatchDirID, input.SeriesKey).Scan(&revision); err != nil {
-			return UploadBatch{}, false, err
-		}
-		var watchDirID any
-		if input.WatchDirID != nil {
-			watchDirID = *input.WatchDirID
-		}
-		result, err := tx.ExecContext(ctx, `
-INSERT INTO upload_batches (watch_dir_id, series_key, series_path, status, revision, ready_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-`, watchDirID, input.SeriesKey, input.SeriesPath, UploadBatchCollecting, revision, readyAt)
-		if err != nil {
-			return UploadBatch{}, false, err
-		}
-		batchID, err = result.LastInsertId()
-		if err != nil {
-			return UploadBatch{}, false, err
-		}
-		for _, selected := range selectedProviders {
-			encodedTypes, err := json.Marshal(selected.includeTypes)
+		if !existing {
+			var revision int
+			if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(revision), 0) + 1
+FROM upload_batches
+WHERE watch_dir_id = ? AND upload_route_id = ? AND series_key = ?
+`, *input.WatchDirID, configured.route.ID, input.SeriesKey).Scan(&revision); err != nil {
+				return nil, 0, err
+			}
+			result, err := tx.ExecContext(ctx, `
+INSERT INTO upload_batches (watch_dir_id, upload_route_id, series_key, series_path, status, revision, ready_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+`, *input.WatchDirID, configured.route.ID, input.SeriesKey, input.SeriesPath, UploadBatchCollecting, revision, readyAt)
 			if err != nil {
-				return UploadBatch{}, false, err
+				return nil, 0, err
+			}
+			batchID, err = result.LastInsertId()
+			if err != nil {
+				return nil, 0, err
+			}
+			encodedTypes, err := json.Marshal(configured.route.IncludeTypes)
+			if err != nil {
+				return nil, 0, err
 			}
 			if _, err := tx.ExecContext(ctx, `
 INSERT INTO upload_batch_targets (batch_id, provider_id, provider_name, provider_type, remote_root, user_agent, collision_policy, include_types, status, available_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, batchID, selected.provider.ID, selected.provider.Name, selected.provider.Type, selected.remoteRoot, selected.provider.UserAgent, selected.collisionPolicy, string(encodedTypes), UploadTargetWaiting, readyAt); err != nil {
-				return UploadBatch{}, false, err
+`, batchID, configured.provider.ID, configured.provider.Name, configured.provider.Type, configured.route.RemoteRoot, configured.provider.UserAgent, configured.route.CollisionPolicy, string(encodedTypes), UploadTargetWaiting, readyAt); err != nil {
+				return nil, 0, err
 			}
+			created++
 		}
-	}
 
-	targets, err := listUploadBatchTargetsTx(ctx, tx, batchID)
-	if err != nil {
-		return UploadBatch{}, false, err
-	}
-	for _, candidate := range input.Files {
-		if err := validateUploadCandidate(candidate); err != nil {
-			return UploadBatch{}, false, err
+		targets, err := listUploadBatchTargetsTx(ctx, tx, batchID)
+		if err != nil {
+			return nil, 0, err
 		}
-		if !anyUploadTargetAllows(targets, candidate.FileType) {
-			continue
-		}
-		var previousSize int64
-		var previousModified string
-		previousErr := tx.QueryRowContext(ctx, `
+		for _, candidate := range input.Files {
+			if !uploadTypeAllowed(configured.route.IncludeTypes, candidate.FileType) {
+				continue
+			}
+			var previousSize int64
+			var previousModified string
+			previousErr := tx.QueryRowContext(ctx, `
 SELECT size, modified_at FROM upload_batch_files WHERE batch_id = ? AND local_path = ?
 `, batchID, candidate.LocalPath).Scan(&previousSize, &previousModified)
-		fileChanged := previousErr == nil && (previousSize != candidate.Size || previousModified != formatStoreTime(candidate.ModifiedAt.UTC()))
-		if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
-			return UploadBatch{}, false, previousErr
-		}
-		if _, err := tx.ExecContext(ctx, `
+			fileChanged := previousErr == nil && (previousSize != candidate.Size || previousModified != formatStoreTime(candidate.ModifiedAt.UTC()))
+			if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
+				return nil, 0, previousErr
+			}
+			if _, err := tx.ExecContext(ctx, `
 INSERT INTO upload_batch_files (batch_id, local_path, relative_path, file_type, size, modified_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 ON CONFLICT(batch_id, local_path) DO UPDATE SET
@@ -660,47 +652,54 @@ ON CONFLICT(batch_id, local_path) DO UPDATE SET
   modified_at = excluded.modified_at,
   updated_at = CURRENT_TIMESTAMP
 `, batchID, candidate.LocalPath, candidate.RelativePath, candidate.FileType, candidate.Size, formatStoreTime(candidate.ModifiedAt.UTC())); err != nil {
-			return UploadBatch{}, false, err
-		}
-		var batchFileID int64
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM upload_batch_files WHERE batch_id = ? AND local_path = ?`, batchID, candidate.LocalPath).Scan(&batchFileID); err != nil {
-			return UploadBatch{}, false, err
-		}
-		for _, target := range targets {
-			if !uploadTypeAllowed(target.IncludeTypes, candidate.FileType) {
-				continue
+				return nil, 0, err
 			}
-			if _, err := tx.ExecContext(ctx, `
+			var batchFileID int64
+			if err := tx.QueryRowContext(ctx, `SELECT id FROM upload_batch_files WHERE batch_id = ? AND local_path = ?`, batchID, candidate.LocalPath).Scan(&batchFileID); err != nil {
+				return nil, 0, err
+			}
+			for _, target := range targets {
+				if _, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO upload_transfers (batch_target_id, batch_file_id, remote_path, status, bytes_total)
 VALUES (?, ?, ?, ?, ?)
 `, target.ID, batchFileID, joinRemotePath(target.RemoteRoot, candidate.RelativePath), UploadTransferPending, candidate.Size); err != nil {
-				return UploadBatch{}, false, err
-			}
-			if fileChanged {
-				if _, err := tx.ExecContext(ctx, `
+					return nil, 0, err
+				}
+				if fileChanged {
+					if _, err := tx.ExecContext(ctx, `
 UPDATE upload_transfers
 SET status = CASE WHEN status = ? THEN status ELSE ? END,
     bytes_total = ?, bytes_transferred = 0, remote_id = '', error_summary = '',
     started_at = NULL, finished_at = NULL, updated_at = CURRENT_TIMESTAMP
 WHERE batch_target_id = ? AND batch_file_id = ?
 `, UploadTransferCanceled, UploadTransferPending, candidate.Size, target.ID, batchFileID); err != nil {
-					return UploadBatch{}, false, err
+						return nil, 0, err
+					}
 				}
 			}
 		}
+
+		if _, err := tx.ExecContext(ctx, `UPDATE upload_batches SET ready_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, readyAt, batchID); err != nil {
+			return nil, 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE upload_batch_targets SET available_at = ?, updated_at = CURRENT_TIMESTAMP WHERE batch_id = ? AND status = ?`, readyAt, batchID, UploadTargetWaiting); err != nil {
+			return nil, 0, err
+		}
+		batchIDs = append(batchIDs, batchID)
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE upload_batches SET ready_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, readyAt, batchID); err != nil {
-		return UploadBatch{}, false, err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE upload_batch_targets SET available_at = ?, updated_at = CURRENT_TIMESTAMP WHERE batch_id = ? AND status = ?`, readyAt, batchID, UploadTargetWaiting); err != nil {
-		return UploadBatch{}, false, err
-	}
 	if err := tx.Commit(); err != nil {
-		return UploadBatch{}, false, err
+		return nil, 0, err
 	}
-	batch, err := s.GetUploadBatch(ctx, batchID)
-	return batch, !existing, err
+	batches := make([]UploadBatch, 0, len(batchIDs))
+	for _, batchID := range batchIDs {
+		batch, err := s.GetUploadBatch(ctx, batchID)
+		if err != nil {
+			return nil, 0, err
+		}
+		batches = append(batches, batch)
+	}
+	return batches, created, nil
 }
 
 // SealDueUploadBatches moves quiet, fully processed show changes into the
@@ -1405,8 +1404,10 @@ SELECT id, name, type, enabled, user_agent,
 FROM upload_providers`
 
 const uploadBatchSelect = `
-SELECT b.id, b.watch_dir_id, b.series_key, b.series_path, b.status, b.revision, b.ready_at,
+SELECT b.id, b.watch_dir_id, b.upload_route_id, b.series_key, b.series_path, b.status, b.revision, b.ready_at,
        (SELECT COUNT(*) FROM upload_batch_files f WHERE f.batch_id = b.id),
+       COALESCE((SELECT t.provider_name FROM upload_batch_targets t WHERE t.batch_id = b.id ORDER BY t.id LIMIT 1), ''),
+       COALESCE((SELECT t.remote_root FROM upload_batch_targets t WHERE t.batch_id = b.id ORDER BY t.id LIMIT 1), ''),
        (SELECT COUNT(*) FROM upload_batch_targets t WHERE t.batch_id = b.id),
        (SELECT COUNT(*) FROM upload_batch_targets t WHERE t.batch_id = b.id AND t.status = 'completed'),
        (SELECT COUNT(*) FROM upload_batch_targets t WHERE t.batch_id = b.id AND t.status = 'failed'),
@@ -1479,15 +1480,19 @@ type uploadBatchScanner interface {
 func scanUploadBatch(scanner uploadBatchScanner) (UploadBatch, error) {
 	var item UploadBatch
 	var watchDirID sql.NullInt64
+	var uploadRouteID sql.NullInt64
 	err := scanner.Scan(
 		&item.ID,
 		&watchDirID,
+		&uploadRouteID,
 		&item.SeriesKey,
 		&item.SeriesPath,
 		&item.Status,
 		&item.Revision,
 		&item.ReadyAt,
 		&item.FileCount,
+		&item.ProviderName,
+		&item.RemoteRoot,
 		&item.TargetCount,
 		&item.CompletedTargets,
 		&item.FailedTargets,
@@ -1499,6 +1504,9 @@ func scanUploadBatch(scanner uploadBatchScanner) (UploadBatch, error) {
 	)
 	if watchDirID.Valid {
 		item.WatchDirID = &watchDirID.Int64
+	}
+	if uploadRouteID.Valid {
+		item.UploadRouteID = &uploadRouteID.Int64
 	}
 	return item, err
 }

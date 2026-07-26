@@ -3,7 +3,9 @@ package upload
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -395,6 +397,49 @@ func TestCookie115UploadAndVerifyDoesNotReplayUncertainCommit(t *testing.T) {
 	}
 	if uploadAttempts != 1 || remoteLookups != 1 {
 		t.Fatalf("upload attempts=%d lookups=%d, want no replay", uploadAttempts, remoteLookups)
+	}
+}
+
+func TestCookie115UploadAndVerifyRetriesPreCommitDialFailure(t *testing.T) {
+	provider := &cookie115Provider{}
+	uploadAttempts := 0
+	remoteLookups := 0
+	provider.uploadContent = func(context.Context, string, string, int64, *os.File) error {
+		uploadAttempts++
+		return fmt.Errorf("connect to OSS before upload: %w", &net.OpError{
+			Op:  "dial",
+			Net: "tcp",
+			Err: os.ErrDeadlineExceeded,
+		})
+	}
+	provider.lookupChild = func(context.Context, string, string) (pan115.File, bool, error) {
+		remoteLookups++
+		return pan115.File{}, false, nil
+	}
+	provider.uploadRetryDelay = func(int) time.Duration { return 0 }
+
+	file := writeCookie115TestFile(t, "retry dial payload")
+	_, uploadErr := provider.uploadAndVerify(context.Background(), "parent", "episode.mkv", 18, file)
+	if uploadErr == nil || !strings.Contains(uploadErr.Error(), "failed after 3 attempts") {
+		t.Fatalf("upload error=%v, want exhausted retry error", uploadErr)
+	}
+	if uploadAttempts != max115UploadAttempts {
+		t.Fatalf("upload attempts=%d, want %d", uploadAttempts, max115UploadAttempts)
+	}
+	if remoteLookups != max115UploadAttempts {
+		t.Fatalf("remote lookups=%d, want %d", remoteLookups, max115UploadAttempts)
+	}
+}
+
+func TestFormat115PreCommitConnectionErrorExplainsProxyFakeIP(t *testing.T) {
+	err := format115PreCommitConnectionError(&net.OpError{
+		Op:   "dial",
+		Net:  "tcp",
+		Addr: &net.TCPAddr{IP: net.IPv4(198, 18, 2, 162), Port: 80},
+		Err:  os.ErrDeadlineExceeded,
+	})
+	if !strings.Contains(err.Error(), "proxy fake-IP 198.18.2.162") {
+		t.Fatalf("error=%q, want proxy fake-IP hint", err)
 	}
 }
 

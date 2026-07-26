@@ -308,7 +308,7 @@ func (m *Manager) RecordMediaProcessed(ctx context.Context, task store.Task, med
 		return err
 	}
 	seriesKey := normalizeSeriesKey(&dir.ID, seriesPath)
-	batch, created, err := m.store.CollectUploadBatch(ctx, store.UploadCollectionInput{
+	batches, created, err := m.store.CollectUploadBatches(ctx, store.UploadCollectionInput{
 		WatchDirID:  &dir.ID,
 		SeriesKey:   seriesKey,
 		SeriesPath:  seriesPath,
@@ -318,12 +318,12 @@ func (m *Manager) RecordMediaProcessed(ctx context.Context, task store.Task, med
 	if err != nil {
 		return fmt.Errorf("collect upload batch: %w", err)
 	}
-	if batch.ID != 0 {
-		message := "upload batch updated"
-		if created {
-			message = "upload batch created"
+	if len(batches) > 0 {
+		batchIDs := make([]int64, 0, len(batches))
+		for _, batch := range batches {
+			batchIDs = append(batchIDs, batch.ID)
 		}
-		m.logger.Info(message, "batchID", batch.ID, "series", batch.SeriesPath, "files", len(files))
+		m.logger.Info("upload batches collected", "batchIDs", batchIDs, "created", created, "series", seriesPath, "files", len(files))
 	}
 	return nil
 }

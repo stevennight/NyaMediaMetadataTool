@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	hash115 "github.com/SheltonZhu/115driver/pkg/crypto"
 	pan115 "github.com/SheltonZhu/115driver/pkg/driver"
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/go-resty/resty/v2"
@@ -355,7 +356,7 @@ func (p *cookie115Provider) List(ctx context.Context, remotePath string) ([]Remo
 	return entries, nil
 }
 
-func (p *cookie115Provider) Upload(ctx context.Context, localPath string, remotePath string, size int64, collisionPolicy string) (RemoteFile, error) {
+func (p *cookie115Provider) Upload(ctx context.Context, localPath string, remotePath string, size int64, localSHA1 string, collisionPolicy string) (RemoteFile, error) {
 	if err := ctx.Err(); err != nil {
 		return RemoteFile{}, err
 	}
@@ -372,38 +373,130 @@ func (p *cookie115Provider) Upload(ctx context.Context, localPath string, remote
 	if err != nil {
 		return RemoteFile{}, err
 	}
+
+	var file *os.File
+	var digest *hash115.DigestResult
+	openFile := func() (*os.File, error) {
+		if file != nil {
+			return file, nil
+		}
+		opened, openErr := os.Open(localPath)
+		if openErr != nil {
+			return nil, openErr
+		}
+		file = opened
+		return file, nil
+	}
+	defer func() {
+		if file != nil {
+			_ = file.Close()
+		}
+	}()
+	ensureDigest := func() (*hash115.DigestResult, error) {
+		if digest != nil {
+			return digest, nil
+		}
+		opened, openErr := openFile()
+		if openErr != nil {
+			return nil, openErr
+		}
+		resolved, digestErr := p.calculate115Digest(ctx, opened)
+		if digestErr != nil {
+			return nil, digestErr
+		}
+		if resolved.Size != size {
+			return nil, fmt.Errorf("local file changed after batch snapshot: %s", localPath)
+		}
+		digest = resolved
+		return digest, nil
+	}
+
+	localSHA1 = strings.ToUpper(strings.TrimSpace(localSHA1))
+	intendedOutcome := store.UploadOutcomeCreated
 	if found {
 		if existing.IsDirectory {
 			return RemoteFile{}, fmt.Errorf("115 target path is a directory: %s", remotePath)
 		}
-		if existing.Size == size {
-			return RemoteFile{ID: existing.FileID, Size: existing.Size}, nil
+		if existing.Size == size && localSHA1 == "" {
+			resolved, digestErr := ensureDigest()
+			if digestErr != nil {
+				return RemoteFile{}, fmt.Errorf("hash local file for collision check: %w", digestErr)
+			}
+			localSHA1 = resolved.QuickID
 		}
-		switch strings.ToLower(strings.TrimSpace(collisionPolicy)) {
-		case "skip":
-			return RemoteFile{ID: existing.FileID, Size: existing.Size}, nil
-		case "fail":
-			return RemoteFile{}, fmt.Errorf("115 target already exists with a different size: %s", remotePath)
-		default:
-			if err := p.delete115(ctx, existing.FileID); err != nil {
-				return RemoteFile{}, fmt.Errorf("replace existing 115 file %s: %w", remotePath, err)
+		decision, decisionErr := decide115Collision(existing, size, localSHA1, collisionPolicy)
+		if decisionErr != nil {
+			return RemoteFile{}, fmt.Errorf("%w: %s", decisionErr, remotePath)
+		}
+		if !decision.replace {
+			return RemoteFile{
+				ID:        existing.FileID,
+				Size:      existing.Size,
+				SHA1:      existing.Sha1,
+				LocalSHA1: localSHA1,
+				Outcome:   decision.outcome,
+			}, nil
+		}
+		intendedOutcome = store.UploadOutcomeReplaced
+		if err := p.delete115(ctx, existing.FileID); err != nil {
+			return RemoteFile{}, &UploadAttemptError{
+				Outcome:   intendedOutcome,
+				LocalSHA1: localSHA1,
+				Err:       fmt.Errorf("replace existing 115 file %s: %w", remotePath, err),
 			}
 		}
 	}
 
-	file, err := os.Open(localPath)
+	resolvedDigest, err := ensureDigest()
 	if err != nil {
-		return RemoteFile{}, err
+		return RemoteFile{}, &UploadAttemptError{
+			Outcome:   intendedOutcome,
+			LocalSHA1: localSHA1,
+			Err:       fmt.Errorf("hash local file for upload: %w", err),
+		}
 	}
-	defer file.Close()
-	remote, err := p.uploadAndVerify(ctx, parentID, name, size, file)
+	localSHA1 = resolvedDigest.QuickID
+	remote, err := p.uploadAndVerifyWithDigest(ctx, parentID, name, size, file, resolvedDigest)
 	if err != nil {
-		return RemoteFile{}, fmt.Errorf("115 upload %s: %w", remotePath, err)
+		return RemoteFile{}, &UploadAttemptError{
+			Outcome:   intendedOutcome,
+			LocalSHA1: localSHA1,
+			Err:       fmt.Errorf("115 upload %s: %w", remotePath, err),
+		}
+	}
+	remote.Outcome = intendedOutcome
+	remote.LocalSHA1 = localSHA1
+	if strings.TrimSpace(remote.SHA1) == "" {
+		remote.SHA1 = localSHA1
 	}
 	return remote, nil
 }
 
-func (p *cookie115Provider) Verify(ctx context.Context, remotePath string, size int64) (RemoteFile, bool, error) {
+type collision115Decision struct {
+	outcome string
+	replace bool
+}
+
+func decide115Collision(existing pan115.File, localSize int64, localSHA1 string, collisionPolicy string) (collision115Decision, error) {
+	localSHA1 = strings.TrimSpace(localSHA1)
+	remoteSHA1 := strings.TrimSpace(existing.Sha1)
+	if existing.Size == localSize &&
+		localSHA1 != "" &&
+		remoteSHA1 != "" &&
+		strings.EqualFold(localSHA1, remoteSHA1) {
+		return collision115Decision{outcome: store.UploadOutcomeUnchanged}, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(collisionPolicy)) {
+	case "skip":
+		return collision115Decision{outcome: store.UploadOutcomeSkipped}, nil
+	case "fail":
+		return collision115Decision{}, errors.New("115 target already exists with different content")
+	default:
+		return collision115Decision{outcome: store.UploadOutcomeReplaced, replace: true}, nil
+	}
+}
+
+func (p *cookie115Provider) Verify(ctx context.Context, remotePath string, size int64, localSHA1 string) (RemoteFile, bool, error) {
 	remotePath = normalize115Path(remotePath)
 	name := pathpkg.Base(remotePath)
 	if name == "." || name == "/" || name == "" {
@@ -420,11 +513,28 @@ func (p *cookie115Provider) Verify(ctx context.Context, remotePath string, size 
 	if !found || remoteFile.IsDirectory || remoteFile.Size != size {
 		return RemoteFile{}, false, nil
 	}
-	return RemoteFile{ID: remoteFile.FileID, Size: remoteFile.Size}, true, nil
+	localSHA1 = strings.TrimSpace(localSHA1)
+	if localSHA1 != "" &&
+		(strings.TrimSpace(remoteFile.Sha1) == "" || !strings.EqualFold(localSHA1, remoteFile.Sha1)) {
+		return RemoteFile{}, false, nil
+	}
+	return RemoteFile{
+		ID:        remoteFile.FileID,
+		Size:      remoteFile.Size,
+		SHA1:      remoteFile.Sha1,
+		LocalSHA1: localSHA1,
+		Outcome:   store.UploadOutcomeCreated,
+	}, true, nil
 }
 
 func (p *cookie115Provider) uploadAndVerify(ctx context.Context, parentID string, name string, size int64, file *os.File) (RemoteFile, error) {
-	upload := p.rapidUploadOrByMultipart
+	return p.uploadAndVerifyWithDigest(ctx, parentID, name, size, file, nil)
+}
+
+func (p *cookie115Provider) uploadAndVerifyWithDigest(ctx context.Context, parentID string, name string, size int64, file *os.File, digest *hash115.DigestResult) (RemoteFile, error) {
+	upload := func(ctx context.Context, parentID string, name string, size int64, file *os.File) error {
+		return p.rapidUploadOrByMultipartWithDigest(ctx, parentID, name, size, file, digest)
+	}
 	if p.uploadContent != nil {
 		upload = p.uploadContent
 	}
@@ -436,6 +546,9 @@ func (p *cookie115Provider) uploadAndVerify(ctx context.Context, parentID string
 		uploadErr := upload(ctx, parentID, name, size, file)
 		if uploadErr == nil {
 			remote, verifyErr := p.waitForFile(ctx, parentID, name, size)
+			if verifyErr == nil && !remote115DigestMatches(remote.SHA1, digest) {
+				verifyErr = errors.New("verified 115 file has different content")
+			}
 			if verifyErr == nil {
 				return remote, nil
 			}
@@ -455,6 +568,9 @@ func (p *cookie115Provider) uploadAndVerify(ctx context.Context, parentID string
 			var uncertainCommit *uncertain115CommitError
 			if errors.As(uploadErr, &uncertainCommit) {
 				remote, verifyErr := p.waitForFile(ctx, parentID, name, size)
+				if verifyErr == nil && !remote115DigestMatches(remote.SHA1, digest) {
+					verifyErr = errors.New("verified 115 file has different content")
+				}
 				if verifyErr == nil {
 					return remote, nil
 				}
@@ -476,7 +592,10 @@ func (p *cookie115Provider) uploadAndVerify(ctx context.Context, parentID string
 					return RemoteFile{}, fmt.Errorf("115 target became a directory: %s", name)
 				}
 				if remoteFile.Size == size {
-					return RemoteFile{ID: remoteFile.FileID, Size: remoteFile.Size}, nil
+					if !remote115DigestMatches(remoteFile.Sha1, digest) {
+						return RemoteFile{}, fmt.Errorf("115 target appeared with different content while retrying: %s", name)
+					}
+					return RemoteFile{ID: remoteFile.FileID, Size: remoteFile.Size, SHA1: remoteFile.Sha1}, nil
 				}
 				return RemoteFile{}, fmt.Errorf("115 target appeared with a different size while retrying: %s", name)
 			}
@@ -489,6 +608,12 @@ func (p *cookie115Provider) uploadAndVerify(ctx context.Context, parentID string
 		}
 	}
 	return RemoteFile{}, fmt.Errorf("failed after %d attempts: %w", max115UploadAttempts, lastErr)
+}
+
+func remote115DigestMatches(remoteSHA1 string, digest *hash115.DigestResult) bool {
+	return digest == nil ||
+		strings.TrimSpace(remoteSHA1) == "" ||
+		strings.EqualFold(strings.TrimSpace(remoteSHA1), digest.QuickID)
 }
 
 func (p *cookie115Provider) waitUploadRetry(ctx context.Context, attempt int) error {
@@ -755,7 +880,7 @@ func (p *cookie115Provider) waitForFile(ctx context.Context, parentID string, na
 			return RemoteFile{}, err
 		}
 		if found && !file.IsDirectory && file.Size == size {
-			return RemoteFile{ID: file.FileID, Size: file.Size}, nil
+			return RemoteFile{ID: file.FileID, Size: file.Size, SHA1: file.Sha1}, nil
 		}
 		if attempt == 3 {
 			break

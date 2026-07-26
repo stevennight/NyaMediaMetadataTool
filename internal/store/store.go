@@ -227,8 +227,11 @@ func (s *Store) ensureUploadColumns(ctx context.Context) error {
 	}{
 		{"upload_providers", "auth_device", `ALTER TABLE upload_providers ADD COLUMN auth_device TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_batches", "upload_route_id", `ALTER TABLE upload_batches ADD COLUMN upload_route_id INTEGER`, ""},
+		{"upload_batch_files", "sha1", `ALTER TABLE upload_batch_files ADD COLUMN sha1 TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_batch_targets", "include_types", `ALTER TABLE upload_batch_targets ADD COLUMN include_types TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_batch_targets", "retryable", `ALTER TABLE upload_batch_targets ADD COLUMN retryable INTEGER NOT NULL DEFAULT 1`, ""},
+		{"upload_transfers", "outcome", `ALTER TABLE upload_transfers ADD COLUMN outcome TEXT NOT NULL DEFAULT ''`, ""},
+		{"upload_transfers", "remote_sha1", `ALTER TABLE upload_transfers ADD COLUMN remote_sha1 TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_events", "attempts", `ALTER TABLE upload_events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`, ""},
 		{"upload_events", "available_at", `ALTER TABLE upload_events ADD COLUMN available_at TEXT NOT NULL DEFAULT ''`, `UPDATE upload_events SET available_at = created_at WHERE available_at = ''`},
 		{"upload_events", "lease_id", `ALTER TABLE upload_events ADD COLUMN lease_id TEXT NOT NULL DEFAULT ''`, ""},
@@ -707,11 +710,15 @@ CREATE TABLE IF NOT EXISTS upload_batch_files (
   file_type TEXT NOT NULL,
   size INTEGER NOT NULL,
   modified_at TEXT NOT NULL,
+  sha1 TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(batch_id, local_path),
   FOREIGN KEY(batch_id) REFERENCES upload_batches(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_upload_batch_files_local_fingerprint
+  ON upload_batch_files(local_path, size, modified_at, id DESC);
 
 CREATE TABLE IF NOT EXISTS upload_batch_targets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -749,6 +756,8 @@ CREATE TABLE IF NOT EXISTS upload_transfers (
   bytes_total INTEGER NOT NULL DEFAULT 0,
   bytes_transferred INTEGER NOT NULL DEFAULT 0,
   remote_id TEXT NOT NULL DEFAULT '',
+  outcome TEXT NOT NULL DEFAULT '',
+  remote_sha1 TEXT NOT NULL DEFAULT '',
   error_summary TEXT NOT NULL DEFAULT '',
   started_at TEXT,
   finished_at TEXT,

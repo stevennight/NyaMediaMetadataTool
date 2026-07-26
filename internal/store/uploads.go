@@ -42,6 +42,11 @@ const (
 	UploadTransferFailed    = "failed"
 	UploadTransferCanceled  = "canceled"
 
+	UploadOutcomeCreated   = "created"
+	UploadOutcomeReplaced  = "replaced"
+	UploadOutcomeUnchanged = "unchanged"
+	UploadOutcomeSkipped   = "skipped"
+
 	UploadEventTargetVerified = "upload_target_verified"
 
 	UploadEventPending    = "pending"
@@ -137,6 +142,7 @@ type UploadBatchFile struct {
 	FileType     string `json:"fileType"`
 	Size         int64  `json:"size"`
 	ModifiedAt   string `json:"modifiedAt"`
+	SHA1         string `json:"sha1,omitempty"`
 	CreatedAt    string `json:"createdAt"`
 	UpdatedAt    string `json:"updatedAt"`
 }
@@ -169,17 +175,40 @@ type UploadTransfer struct {
 	LocalPath        string `json:"localPath"`
 	RelativePath     string `json:"relativePath"`
 	FileType         string `json:"fileType"`
+	ModifiedAt       string `json:"modifiedAt"`
 	RemotePath       string `json:"remotePath"`
 	Status           string `json:"status"`
 	Attempts         int    `json:"attempts"`
 	BytesTotal       int64  `json:"bytesTotal"`
 	BytesTransferred int64  `json:"bytesTransferred"`
 	RemoteID         string `json:"remoteId"`
+	Outcome          string `json:"outcome,omitempty"`
+	LocalSHA1        string `json:"localSha1,omitempty"`
+	RemoteSHA1       string `json:"remoteSha1,omitempty"`
 	ErrorSummary     string `json:"errorSummary"`
 	StartedAt        string `json:"startedAt"`
 	FinishedAt       string `json:"finishedAt"`
 	CreatedAt        string `json:"createdAt"`
 	UpdatedAt        string `json:"updatedAt"`
+}
+
+type UploadTransferCompletion struct {
+	RemoteID   string
+	Outcome    string
+	LocalSHA1  string
+	RemoteSHA1 string
+}
+
+// UploadOutcomeChangesRemote is the notification boundary for uploads.
+// Future scan or notification consumers must only act on outcomes for which
+// this function returns true.
+func UploadOutcomeChangesRemote(outcome string) bool {
+	switch normalizeUploadOutcome(outcome) {
+	case UploadOutcomeCreated, UploadOutcomeReplaced:
+		return true
+	default:
+		return false
+	}
 }
 
 type UploadEvent struct {
@@ -635,23 +664,36 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			}
 			var previousSize int64
 			var previousModified string
+			modifiedAt := formatStoreTime(candidate.ModifiedAt.UTC())
 			previousErr := tx.QueryRowContext(ctx, `
 SELECT size, modified_at FROM upload_batch_files WHERE batch_id = ? AND local_path = ?
 `, batchID, candidate.LocalPath).Scan(&previousSize, &previousModified)
-			fileChanged := previousErr == nil && (previousSize != candidate.Size || previousModified != formatStoreTime(candidate.ModifiedAt.UTC()))
+			fileChanged := previousErr == nil && (previousSize != candidate.Size || previousModified != modifiedAt)
 			if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
 				return nil, 0, previousErr
 			}
+			var cachedSHA1 string
+			cacheErr := tx.QueryRowContext(ctx, `
+SELECT sha1
+FROM upload_batch_files
+WHERE local_path = ? AND size = ? AND modified_at = ? AND sha1 != ''
+ORDER BY id DESC
+LIMIT 1
+`, candidate.LocalPath, candidate.Size, modifiedAt).Scan(&cachedSHA1)
+			if cacheErr != nil && !errors.Is(cacheErr, sql.ErrNoRows) {
+				return nil, 0, cacheErr
+			}
 			if _, err := tx.ExecContext(ctx, `
-INSERT INTO upload_batch_files (batch_id, local_path, relative_path, file_type, size, modified_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+INSERT INTO upload_batch_files (batch_id, local_path, relative_path, file_type, size, modified_at, sha1, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 ON CONFLICT(batch_id, local_path) DO UPDATE SET
   relative_path = excluded.relative_path,
   file_type = excluded.file_type,
   size = excluded.size,
   modified_at = excluded.modified_at,
+  sha1 = excluded.sha1,
   updated_at = CURRENT_TIMESTAMP
-`, batchID, candidate.LocalPath, candidate.RelativePath, candidate.FileType, candidate.Size, formatStoreTime(candidate.ModifiedAt.UTC())); err != nil {
+`, batchID, candidate.LocalPath, candidate.RelativePath, candidate.FileType, candidate.Size, modifiedAt, strings.ToUpper(strings.TrimSpace(cachedSHA1))); err != nil {
 				return nil, 0, err
 			}
 			var batchFileID int64
@@ -669,7 +711,7 @@ VALUES (?, ?, ?, ?, ?)
 					if _, err := tx.ExecContext(ctx, `
 UPDATE upload_transfers
 SET status = CASE WHEN status = ? THEN status ELSE ? END,
-    bytes_total = ?, bytes_transferred = 0, remote_id = '', error_summary = '',
+    bytes_total = ?, bytes_transferred = 0, remote_id = '', outcome = '', remote_sha1 = '', error_summary = '',
     started_at = NULL, finished_at = NULL, updated_at = CURRENT_TIMESTAMP
 WHERE batch_target_id = ? AND batch_file_id = ?
 `, UploadTransferCanceled, UploadTransferPending, candidate.Size, target.ID, batchFileID); err != nil {
@@ -832,23 +874,87 @@ WHERE id = ? AND status IN (?, ?)
 }
 
 func (s *Store) CompleteUploadTransfer(ctx context.Context, transferID int64, remoteID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	return s.CompleteUploadTransferWithResult(ctx, transferID, UploadTransferCompletion{
+		RemoteID: remoteID,
+		Outcome:  UploadOutcomeCreated,
+	})
+}
+
+func (s *Store) CompleteUploadTransferWithResult(ctx context.Context, transferID int64, completion UploadTransferCompletion) error {
+	outcome := normalizeUploadOutcome(completion.Outcome)
+	if outcome == "" {
+		outcome = UploadOutcomeCreated
+	}
+	remoteChanged := 0
+	if UploadOutcomeChangesRemote(outcome) {
+		remoteChanged = 1
+	}
+	localSHA1 := strings.ToUpper(strings.TrimSpace(completion.LocalSHA1))
+	remoteSHA1 := strings.ToUpper(strings.TrimSpace(completion.RemoteSHA1))
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 UPDATE upload_transfers
-SET status = ?, bytes_transferred = bytes_total, remote_id = ?, error_summary = '', finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+SET status = ?,
+    bytes_transferred = CASE WHEN ? = 1 THEN bytes_total ELSE 0 END,
+    remote_id = ?, outcome = ?, remote_sha1 = ?, error_summary = '',
+    finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
-`, UploadTransferCompleted, strings.TrimSpace(remoteID), transferID)
-	return err
+`, UploadTransferCompleted, remoteChanged, strings.TrimSpace(completion.RemoteID), outcome, remoteSHA1, transferID); err != nil {
+		return err
+	}
+	if localSHA1 != "" {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE upload_batch_files
+SET sha1 = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = (SELECT batch_file_id FROM upload_transfers WHERE id = ?)
+`, localSHA1, transferID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) FailUploadTransfer(ctx context.Context, transferID int64, summary string) error {
-	_, err := s.db.ExecContext(ctx, `
-UPDATE upload_transfers
-SET status = ?, error_summary = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-WHERE id = ?
-`, UploadTransferFailed, strings.TrimSpace(summary), transferID)
-	return err
+	return s.FailUploadTransferWithResult(ctx, transferID, summary, "", "")
 }
 
+func (s *Store) FailUploadTransferWithResult(ctx context.Context, transferID int64, summary string, outcome string, localSHA1 string) error {
+	outcome = normalizeUploadOutcome(outcome)
+	localSHA1 = strings.ToUpper(strings.TrimSpace(localSHA1))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+UPDATE upload_transfers
+SET status = ?,
+    outcome = CASE WHEN ? = '' THEN outcome ELSE ? END,
+    error_summary = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+WHERE id = ?
+`, UploadTransferFailed, outcome, outcome, strings.TrimSpace(summary), transferID); err != nil {
+		return err
+	}
+	if localSHA1 != "" {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE upload_batch_files
+SET sha1 = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = (SELECT batch_file_id FROM upload_transfers WHERE id = ?)
+`, localSHA1, transferID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// CompleteUploadTarget finalizes successful reconciliation. It writes an
+// outbox event only when at least one transfer changed the remote namespace;
+// notification delivery is intentionally owned by a future consumer.
 func (s *Store) CompleteUploadTarget(ctx context.Context, targetID int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -878,15 +984,17 @@ WHERE id = ?
 `, UploadTargetCompleted, targetID); err != nil {
 		return err
 	}
-	payload, err := buildUploadEventPayloadTx(ctx, tx, target)
+	payload, changedFiles, err := buildUploadEventPayloadTx(ctx, tx, target)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if changedFiles > 0 {
+		if _, err := tx.ExecContext(ctx, `
 	INSERT OR IGNORE INTO upload_events (batch_target_id, type, payload, status, available_at)
 	VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
 `, targetID, UploadEventTargetVerified, string(payload), UploadEventPending); err != nil {
-		return err
+			return err
+		}
 	}
 	if err := refreshUploadBatchStatusTx(ctx, tx, target.BatchID); err != nil {
 		return err
@@ -894,7 +1002,7 @@ WHERE id = ?
 	return tx.Commit()
 }
 
-func buildUploadEventPayloadTx(ctx context.Context, tx *sql.Tx, target UploadBatchTarget) ([]byte, error) {
+func buildUploadEventPayloadTx(ctx context.Context, tx *sql.Tx, target UploadBatchTarget) ([]byte, int, error) {
 	var watchDirID sql.NullInt64
 	var seriesKey, seriesPath string
 	var revision int
@@ -903,54 +1011,61 @@ SELECT b.watch_dir_id, b.series_key, b.series_path, b.revision
 FROM upload_batches b
 WHERE b.id = ?
 `, target.BatchID).Scan(&watchDirID, &seriesKey, &seriesPath, &revision); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	type eventFile struct {
 		RelativePath string `json:"relativePath"`
 		RemotePath   string `json:"remotePath"`
 		FileType     string `json:"fileType"`
 		Size         int64  `json:"size"`
+		Outcome      string `json:"outcome"`
+		SHA1         string `json:"sha1,omitempty"`
 	}
 	rows, err := tx.QueryContext(ctx, `
-SELECT f.relative_path, t.remote_path, f.file_type, f.size
+SELECT f.relative_path, t.remote_path, f.file_type, f.size, t.outcome, t.remote_sha1
 FROM upload_transfers t
 JOIN upload_batch_files f ON f.id = t.batch_file_id
 WHERE t.batch_target_id = ? AND t.status = ?
 ORDER BY f.relative_path ASC
 `, target.ID, UploadTransferCompleted)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	files := make([]eventFile, 0)
 	for rows.Next() {
 		var file eventFile
-		if err := rows.Scan(&file.RelativePath, &file.RemotePath, &file.FileType, &file.Size); err != nil {
+		if err := rows.Scan(&file.RelativePath, &file.RemotePath, &file.FileType, &file.Size, &file.Outcome, &file.SHA1); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, 0, err
+		}
+		if !UploadOutcomeChangesRemote(file.Outcome) {
+			continue
 		}
 		files = append(files, file)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var watchID any
 	if watchDirID.Valid {
 		watchID = watchDirID.Int64
 	}
-	return json.Marshal(map[string]any{
-		"eventKey":     fmt.Sprintf("upload:%d:%d:%s", target.BatchID, target.ID, UploadEventTargetVerified),
-		"batchId":      target.BatchID,
-		"revision":     revision,
-		"targetId":     target.ID,
-		"providerId":   target.ProviderID,
-		"provider":     target.ProviderName,
-		"providerType": target.ProviderType,
-		"remoteRoot":   target.RemoteRoot,
-		"watchDirId":   watchID,
-		"seriesKey":    seriesKey,
-		"seriesPath":   seriesPath,
-		"files":        files,
+	payload, err := json.Marshal(map[string]any{
+		"eventKey":      fmt.Sprintf("upload:%d:%d:%s", target.BatchID, target.ID, UploadEventTargetVerified),
+		"remoteChanged": true,
+		"batchId":       target.BatchID,
+		"revision":      revision,
+		"targetId":      target.ID,
+		"providerId":    target.ProviderID,
+		"provider":      target.ProviderName,
+		"providerType":  target.ProviderType,
+		"remoteRoot":    target.RemoteRoot,
+		"watchDirId":    watchID,
+		"seriesKey":     seriesKey,
+		"seriesPath":    seriesPath,
+		"files":         files,
 	})
+	return payload, len(files), err
 }
 
 func (s *Store) RetryUploadTarget(ctx context.Context, targetID int64) error {
@@ -1434,7 +1549,8 @@ JOIN upload_batches b ON b.id = t.batch_id`
 
 const uploadTransferSelect = `
 SELECT t.id, t.batch_target_id, t.batch_file_id, f.local_path, f.relative_path, f.file_type,
-       t.remote_path, t.status, t.attempts, t.bytes_total, t.bytes_transferred, t.remote_id, t.error_summary,
+       f.modified_at, t.remote_path, t.status, t.attempts, t.bytes_total, t.bytes_transferred, t.remote_id,
+       t.outcome, f.sha1, t.remote_sha1, t.error_summary,
        COALESCE(t.started_at, ''), COALESCE(t.finished_at, ''), t.created_at, t.updated_at
 FROM upload_transfers t
 JOIN upload_batch_files f ON f.id = t.batch_file_id`
@@ -1531,7 +1647,29 @@ type uploadTransferScanner interface {
 
 func scanUploadTransfer(scanner uploadTransferScanner) (UploadTransfer, error) {
 	var item UploadTransfer
-	err := scanner.Scan(&item.ID, &item.BatchTargetID, &item.BatchFileID, &item.LocalPath, &item.RelativePath, &item.FileType, &item.RemotePath, &item.Status, &item.Attempts, &item.BytesTotal, &item.BytesTransferred, &item.RemoteID, &item.ErrorSummary, &item.StartedAt, &item.FinishedAt, &item.CreatedAt, &item.UpdatedAt)
+	err := scanner.Scan(
+		&item.ID,
+		&item.BatchTargetID,
+		&item.BatchFileID,
+		&item.LocalPath,
+		&item.RelativePath,
+		&item.FileType,
+		&item.ModifiedAt,
+		&item.RemotePath,
+		&item.Status,
+		&item.Attempts,
+		&item.BytesTotal,
+		&item.BytesTransferred,
+		&item.RemoteID,
+		&item.Outcome,
+		&item.LocalSHA1,
+		&item.RemoteSHA1,
+		&item.ErrorSummary,
+		&item.StartedAt,
+		&item.FinishedAt,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+	)
 	return item, err
 }
 
@@ -1622,6 +1760,15 @@ func normalizeCollisionPolicy(value string) string {
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return "fail"
+	}
+}
+
+func normalizeUploadOutcome(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case UploadOutcomeCreated, UploadOutcomeReplaced, UploadOutcomeUnchanged, UploadOutcomeSkipped:
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
 	}
 }
 
@@ -1751,7 +1898,7 @@ func listUploadBatchTargetsTx(ctx context.Context, tx *sql.Tx, batchID int64) ([
 
 func (s *Store) listUploadBatchFiles(ctx context.Context, batchID int64) ([]UploadBatchFile, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, batch_id, local_path, relative_path, file_type, size, modified_at, created_at, updated_at
+SELECT id, batch_id, local_path, relative_path, file_type, size, modified_at, sha1, created_at, updated_at
 FROM upload_batch_files
 WHERE batch_id = ?
 ORDER BY id ASC
@@ -1763,7 +1910,7 @@ ORDER BY id ASC
 	items := make([]UploadBatchFile, 0)
 	for rows.Next() {
 		var item UploadBatchFile
-		if err := rows.Scan(&item.ID, &item.BatchID, &item.LocalPath, &item.RelativePath, &item.FileType, &item.Size, &item.ModifiedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.BatchID, &item.LocalPath, &item.RelativePath, &item.FileType, &item.Size, &item.ModifiedAt, &item.SHA1, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

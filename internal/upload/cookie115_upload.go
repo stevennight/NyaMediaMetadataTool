@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	hash115 "github.com/SheltonZhu/115driver/pkg/crypto"
 	ec115 "github.com/SheltonZhu/115driver/pkg/crypto/ec115"
 	pan115 "github.com/SheltonZhu/115driver/pkg/driver"
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
@@ -210,6 +211,10 @@ func default115BrowserUserAgent(version string) string {
 }
 
 func (p *cookie115Provider) rapidUploadOrByMultipart(ctx context.Context, dirID string, fileName string, fileSize int64, file *os.File) error {
+	return p.rapidUploadOrByMultipartWithDigest(ctx, dirID, fileName, fileSize, file, nil)
+}
+
+func (p *cookie115Provider) rapidUploadOrByMultipartWithDigest(ctx context.Context, dirID string, fileName string, fileSize int64, file *os.File, digest *hash115.DigestResult) error {
 	appVersion, _ := p.resolve115AppVersion(ctx)
 	if err := ctx.Err(); err != nil {
 		return err
@@ -226,9 +231,11 @@ func (p *cookie115Provider) rapidUploadOrByMultipart(ctx context.Context, dirID 
 		return pan115.ErrUploadTooLarge
 	}
 
-	digest, err := p.client.GetDigestResult(&context115Reader{ctx: ctx, reader: file})
-	if err != nil {
-		return fmt.Errorf("hash local file: %w", err)
+	if digest == nil {
+		digest, err = p.calculate115Digest(ctx, file)
+		if err != nil {
+			return fmt.Errorf("hash local file: %w", err)
+		}
 	}
 	fastInfo, err := p.rapidUpload(ctx, digest.Size, fileName, dirID, digest.PreID, digest.QuickID, appVersion, file)
 	if err != nil {
@@ -260,6 +267,13 @@ func (p *cookie115Provider) rapidUploadOrByMultipart(ctx context.Context, dirID 
 		return fmt.Errorf("upload to OSS with multipart: %w", err)
 	}
 	return nil
+}
+
+func (p *cookie115Provider) calculate115Digest(ctx context.Context, file *os.File) (*hash115.DigestResult, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return p.client.GetDigestResult(&context115Reader{ctx: ctx, reader: file})
 }
 
 func (p *cookie115Provider) uploadAvailable(ctx context.Context) (bool, error) {

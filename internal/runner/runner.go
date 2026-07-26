@@ -260,16 +260,16 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 		return err
 	}
 	if seriesResult.ShowNFOPath != "" {
-		if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "tvshow-nfo", seriesResult.ShowNFOPath, "generated"); err != nil {
+		if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "tvshow-nfo", seriesResult.ShowNFOPath, "available"); err != nil {
 			return err
 		}
-		_ = r.store.AddTaskLog(ctx, task.ID, "info", "tvshow nfo generated", seriesResult.ShowNFOPath)
+		_ = r.store.AddTaskLog(ctx, task.ID, "info", "tvshow nfo available", seriesResult.ShowNFOPath)
 	}
 	if seriesResult.SeasonNFOPath != "" {
-		if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "season-nfo", seriesResult.SeasonNFOPath, "generated"); err != nil {
+		if err := r.store.SaveArtifact(ctx, media.ID, task.ID, "season-nfo", seriesResult.SeasonNFOPath, "available"); err != nil {
 			return err
 		}
-		_ = r.store.AddTaskLog(ctx, task.ID, "info", "season nfo generated", seriesResult.SeasonNFOPath)
+		_ = r.store.AddTaskLog(ctx, task.ID, "info", "season nfo available", seriesResult.SeasonNFOPath)
 	}
 	if !r.shouldSkipSucceededStage(ctx, task, "series-nfo") {
 		if err := r.store.MarkTaskStageSucceeded(ctx, task.ID, "series-nfo"); err != nil {
@@ -284,8 +284,12 @@ func (r *Runner) processTask(ctx context.Context, task store.Task) error {
 		return err
 	}
 	for _, image := range imageResult.Images {
-		if image.Status == "generated" {
-			if err := r.store.SaveArtifact(ctx, media.ID, task.ID, image.Type, image.Path, "generated"); err != nil {
+		if (image.Status == "generated" || image.Status == "skipped") && image.Path != "" && fileExists(image.Path) {
+			source := "generated"
+			if image.Status == "skipped" {
+				source = "existing"
+			}
+			if err := r.store.SaveArtifact(ctx, media.ID, task.ID, image.Type, image.Path, source); err != nil {
 				return err
 			}
 		}

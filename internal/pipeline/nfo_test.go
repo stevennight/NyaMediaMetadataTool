@@ -244,6 +244,36 @@ func TestApplyTMDBShowAndSeasonImagesSkipsNetworkWhenTargetsExist(t *testing.T) 
 	}
 }
 
+func TestApplyTMDBShowAndSeasonNFOReportsExistingTargets(t *testing.T) {
+	t.Parallel()
+
+	showDir := t.TempDir()
+	seasonDir := filepath.Join(showDir, "Season 1")
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	showPath := filepath.Join(showDir, "tvshow.nfo")
+	seasonPath := filepath.Join(seasonDir, "season.nfo")
+	for _, path := range []string{showPath, seasonPath} {
+		if err := os.WriteFile(path, []byte("existing"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := config.Default()
+	cfg.Processing.OverwriteExisting = false
+	cfg.Scraping.EnableTMDB = true
+	cfg.Scraping.TMDBBaseURL = "http://127.0.0.1:1"
+	cfg.Scraping.TMDBAPIKey = "test"
+	result := NFOResult{Path: filepath.Join(seasonDir, "Show - S01E01.nfo")}
+
+	applyTMDBShowAndSeasonScoped(t.Context(), cfg, episodeInfo{Season: 1}, &result, true, true)
+
+	if result.ShowNFOPath != showPath || result.SeasonNFOPath != seasonPath {
+		t.Fatalf("existing series NFO paths were not reported: %#v", result)
+	}
+}
+
 func TestImageSourceCandidatesUsesConfiguredPriority(t *testing.T) {
 	t.Parallel()
 

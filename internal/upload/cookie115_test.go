@@ -8,9 +8,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"NyaMediaMetadataTool/internal/store"
 
 	pan115 "github.com/SheltonZhu/115driver/pkg/driver"
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
@@ -283,6 +286,92 @@ func TestCookie115EnsureDirectoryCachesResolvedIDs(t *testing.T) {
 	}
 	if id, ok := provider.cachedDirectoryID("/Anime/Season 1"); !ok || id != "season-id" {
 		t.Fatalf("cached season=(%q, %v)", id, ok)
+	}
+}
+
+func TestDecide115CollisionUsesContentSHA1(t *testing.T) {
+	existing := pan115.File{FileID: "remote-id", Name: "episode.mkv", Size: 100, Sha1: "ABC123"}
+	tests := []struct {
+		name      string
+		localSize int64
+		localSHA1 string
+		policy    string
+		outcome   string
+		replace   bool
+		wantErr   bool
+	}{
+		{name: "identical content", localSize: 100, localSHA1: "abc123", policy: "replace", outcome: store.UploadOutcomeUnchanged},
+		{name: "same size different content replace", localSize: 100, localSHA1: "DIFFERENT", policy: "replace", outcome: store.UploadOutcomeReplaced, replace: true},
+		{name: "same size different content skip", localSize: 100, localSHA1: "DIFFERENT", policy: "skip", outcome: store.UploadOutcomeSkipped},
+		{name: "different size replace", localSize: 200, localSHA1: "", policy: "replace", outcome: store.UploadOutcomeReplaced, replace: true},
+		{name: "missing remote hash cannot prove equality", localSize: 100, localSHA1: "ABC123", policy: "fail", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := existing
+			if test.name == "missing remote hash cannot prove equality" {
+				candidate.Sha1 = ""
+			}
+			decision, err := decide115Collision(candidate, test.localSize, test.localSHA1, test.policy)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("decision=%#v err=%v wantErr=%v", decision, err, test.wantErr)
+			}
+			if decision.outcome != test.outcome || decision.replace != test.replace {
+				t.Fatalf("decision=%#v, want outcome=%q replace=%v", decision, test.outcome, test.replace)
+			}
+		})
+	}
+}
+
+func TestCookie115UploadMarksIdenticalRemoteAsUnchanged(t *testing.T) {
+	provider, err := newCookie115Provider("UID=user;CID=cid;SEID=seid;KID=kid", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := writeCookie115TestFile(t, "same payload")
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := provider.client.GetDigestResult(strings.NewReader("same payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.lookupChild = func(_ context.Context, parentID string, name string) (pan115.File, bool, error) {
+		if parentID != "0" || name != "episode.mkv" {
+			t.Fatalf("unexpected lookup %s/%s", parentID, name)
+		}
+		return pan115.File{FileID: "remote-id", ParentID: parentID, Name: name, Size: info.Size(), Sha1: digest.QuickID}, true, nil
+	}
+	provider.uploadContent = func(context.Context, string, string, int64, *os.File) error {
+		t.Fatal("identical remote content must not be uploaded")
+		return nil
+	}
+
+	remote, err := provider.Upload(context.Background(), file.Name(), "/episode.mkv", info.Size(), "", "replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.Outcome != store.UploadOutcomeUnchanged || remote.LocalSHA1 != digest.QuickID || remote.SHA1 != digest.QuickID {
+		t.Fatalf("remote result=%#v", remote)
+	}
+}
+
+func TestCookie115UploadUsesCachedSHA1WithoutReadingFile(t *testing.T) {
+	provider, err := newCookie115Provider("UID=user;CID=cid;SEID=seid;KID=kid", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.lookupChild = func(_ context.Context, _ string, name string) (pan115.File, bool, error) {
+		return pan115.File{FileID: "remote-id", Name: name, Size: 100, Sha1: "CACHED-SHA1"}, true, nil
+	}
+
+	remote, err := provider.Upload(context.Background(), filepath.Join(t.TempDir(), "missing.mkv"), "/episode.mkv", 100, "CACHED-SHA1", "replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.Outcome != store.UploadOutcomeUnchanged {
+		t.Fatalf("remote result=%#v", remote)
 	}
 }
 

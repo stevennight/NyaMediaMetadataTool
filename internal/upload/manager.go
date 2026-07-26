@@ -40,8 +40,11 @@ type RemoteEntry struct {
 
 // RemoteFile is returned after a file is verified at a destination.
 type RemoteFile struct {
-	ID   string
-	Size int64
+	ID        string
+	Size      int64
+	SHA1      string
+	LocalSHA1 string
+	Outcome   string
 }
 
 // Provider is intentionally small. New provider types such as 115 Open,
@@ -49,11 +52,31 @@ type RemoteFile struct {
 type Provider interface {
 	Check(ctx context.Context) error
 	List(ctx context.Context, remotePath string) ([]RemoteEntry, error)
-	Upload(ctx context.Context, localPath string, remotePath string, size int64, collisionPolicy string) (RemoteFile, error)
+	Upload(ctx context.Context, localPath string, remotePath string, size int64, localSHA1 string, collisionPolicy string) (RemoteFile, error)
 }
 
 type ProviderVerifier interface {
-	Verify(ctx context.Context, remotePath string, size int64) (RemoteFile, bool, error)
+	Verify(ctx context.Context, remotePath string, size int64, localSHA1 string) (RemoteFile, bool, error)
+}
+
+type UploadAttemptError struct {
+	Outcome   string
+	LocalSHA1 string
+	Err       error
+}
+
+func (err *UploadAttemptError) Error() string {
+	if err == nil || err.Err == nil {
+		return "upload attempt failed"
+	}
+	return err.Err.Error()
+}
+
+func (err *UploadAttemptError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Err
 }
 
 // TransferRuntimeState is ephemeral progress information for an active
@@ -547,7 +570,14 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 	failedTransfers := 0
 	var firstFailure error
 	recordFailure := func(transferID int64, transferErr error) error {
-		if err := m.store.FailUploadTransfer(ctx, transferID, transferErr.Error()); err != nil {
+		var attemptErr *UploadAttemptError
+		outcome := ""
+		localSHA1 := ""
+		if errors.As(transferErr, &attemptErr) {
+			outcome = attemptErr.Outcome
+			localSHA1 = attemptErr.LocalSHA1
+		}
+		if err := m.store.FailUploadTransferWithResult(ctx, transferID, transferErr.Error(), outcome, localSHA1); err != nil {
 			return fmt.Errorf("mark transfer %d failed: %w", transferID, err)
 		}
 		failedTransfers++
@@ -564,9 +594,9 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			setActiveTransfer(transfer.ID, transfer.BytesTotal, "verifying", "正在确认 115 远端文件")
 			verificationErr := fmt.Errorf("%s: remote file is still not confirmed", uncertain115CommitMarker)
 			if verifier, ok := client.(ProviderVerifier); ok {
-				remote, found, err := verifier.Verify(ctx, transfer.RemotePath, transfer.BytesTotal)
+				remote, found, err := verifier.Verify(ctx, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1)
 				if err == nil && found {
-					if err := m.store.CompleteUploadTransfer(ctx, transfer.ID, remote.ID); err != nil {
+					if err := m.completeTransfer(ctx, transfer, remote); err != nil {
 						return err
 					}
 					continue
@@ -592,7 +622,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			}
 			continue
 		}
-		if info.IsDir() || info.Size() != transfer.BytesTotal {
+		if info.IsDir() || info.Size() != transfer.BytesTotal || !uploadSnapshotTimeMatches(transfer.ModifiedAt, info.ModTime()) {
 			transferErr := fmt.Errorf("local file changed after batch snapshot: %s", transfer.LocalPath)
 			if err := recordFailure(transfer.ID, transferErr); err != nil {
 				return err
@@ -604,7 +634,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 		activeMessage = "正在上传到 115"
 		activeMu.Unlock()
 		m.setTransferRuntime(transfer.ID, "uploading", "正在上传到 115", time.Time{})
-		remote, err := client.Upload(ctx, transfer.LocalPath, transfer.RemotePath, transfer.BytesTotal, target.CollisionPolicy)
+		remote, err := client.Upload(ctx, transfer.LocalPath, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1, target.CollisionPolicy)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -615,7 +645,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			}
 			continue
 		}
-		if err := m.store.CompleteUploadTransfer(ctx, transfer.ID, remote.ID); err != nil {
+		if err := m.completeTransfer(ctx, transfer, remote); err != nil {
 			return err
 		}
 		clearActiveTransfer()
@@ -624,6 +654,37 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 		return fmt.Errorf("%d file(s) failed; first failure: %w", failedTransfers, firstFailure)
 	}
 	return m.store.CompleteUploadTarget(ctx, target.ID)
+}
+
+func (m *Manager) completeTransfer(ctx context.Context, transfer store.UploadTransfer, remote RemoteFile) error {
+	outcome := strings.ToLower(strings.TrimSpace(remote.Outcome))
+	if store.UploadOutcomeChangesRemote(transfer.Outcome) &&
+		(outcome == "" || outcome == store.UploadOutcomeUnchanged) {
+		outcome = transfer.Outcome
+	}
+	if outcome == "" {
+		// Unknown successful providers are treated conservatively as a remote
+		// change so future notification consumers cannot miss an update.
+		outcome = store.UploadOutcomeCreated
+	}
+	localSHA1 := strings.TrimSpace(remote.LocalSHA1)
+	if localSHA1 == "" {
+		localSHA1 = transfer.LocalSHA1
+	}
+	return m.store.CompleteUploadTransferWithResult(ctx, transfer.ID, store.UploadTransferCompletion{
+		RemoteID:   remote.ID,
+		Outcome:    outcome,
+		LocalSHA1:  localSHA1,
+		RemoteSHA1: remote.SHA1,
+	})
+}
+
+func uploadSnapshotTimeMatches(snapshot string, actual time.Time) bool {
+	parsed, err := time.ParseInLocation("2006-01-02 15:04:05", strings.TrimSpace(snapshot), time.UTC)
+	if err != nil {
+		return false
+	}
+	return parsed.Equal(actual.UTC().Truncate(time.Second))
 }
 
 func (m *Manager) trackTarget(targetID int64, cancel context.CancelFunc) {

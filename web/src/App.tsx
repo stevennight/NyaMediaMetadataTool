@@ -283,6 +283,7 @@ type UploadTransfer = {
   attempts: number;
   bytesTotal: number;
   bytesTransferred: number;
+  outcome?: 'created' | 'replaced' | 'unchanged' | 'skipped';
   errorSummary: string;
   phase?: string;
   statusMessage?: string;
@@ -993,6 +994,18 @@ function aggregateUploadFileStatus(transfers: UploadTransfer[], targetsByID: Rea
 
 function uploadTransferDisplay(transfer: UploadTransfer, target?: UploadBatchTarget) {
   const status = effectiveUploadTransferStatus(transfer, target);
+  if (status === 'completed') {
+    switch (transfer.outcome) {
+      case 'created':
+        return { className: 'pill ok', label: '已上传' };
+      case 'replaced':
+        return { className: 'pill ok', label: '已替换' };
+      case 'unchanged':
+        return { className: 'pill ignored', label: '未变化' };
+      case 'skipped':
+        return { className: 'pill ignored', label: '已跳过' };
+    }
+  }
   if (status === 'pending' && transfer.status === 'failed' && target?.status === 'pending' && !uploadTransferIsWaiting(transfer)) {
     return { className: uploadStatusPillClass('pending'), label: '等待自动重试' };
   }
@@ -4266,7 +4279,7 @@ function UploadRouteProfile(props: { route: UploadProviderRoute; provider?: Uplo
   const browseDisabled = !props.provider || needsAuthorization;
   return (
     <div className="upload-route-profile">
-      <label>远端根目录<div className="path-input remote-root-input"><input aria-label="远端根目录" value={props.route.remoteRoot} placeholder="/Anime" readOnly required title={props.route.remoteRoot} /><button className="icon-text-button" type="button" aria-label="选择远端根目录" disabled={browseDisabled} title={needsAuthorization ? '请先授权 Provider' : '选择远端根目录'} onClick={() => props.provider && props.onBrowseRemoteDirectory({ provider: props.provider, value: props.route.remoteRoot, onSelect: (remoteRoot) => props.onChange({ remoteRoot }) })}><FolderOpen size={16} />选择</button></div><small>{needsAuthorization ? '请先授权 Provider，再选择已存在的远端目录。' : '只能从已存在的远端目录中选择；暂不支持单独映射本地子目录。'}</small></label><label>碰撞策略<select value={props.route.collisionPolicy} onChange={(event) => props.onChange({ collisionPolicy: event.target.value as UploadCollisionPolicy })}><option value="replace">替换同名不同大小文件</option><option value="skip">跳过同名不同大小文件</option><option value="fail">作为冲突失败</option></select></label>
+      <label>远端根目录<div className="path-input remote-root-input"><input aria-label="远端根目录" value={props.route.remoteRoot} placeholder="/Anime" readOnly required title={props.route.remoteRoot} /><button className="icon-text-button" type="button" aria-label="选择远端根目录" disabled={browseDisabled} title={needsAuthorization ? '请先授权 Provider' : '选择远端根目录'} onClick={() => props.provider && props.onBrowseRemoteDirectory({ provider: props.provider, value: props.route.remoteRoot, onSelect: (remoteRoot) => props.onChange({ remoteRoot }) })}><FolderOpen size={16} />选择</button></div><small>{needsAuthorization ? '请先授权 Provider，再选择已存在的远端目录。' : '只能从已存在的远端目录中选择；暂不支持单独映射本地子目录。'}</small></label><label>碰撞策略<select value={props.route.collisionPolicy} onChange={(event) => props.onChange({ collisionPolicy: event.target.value as UploadCollisionPolicy })}><option value="replace">同名内容不同则替换</option><option value="skip">同名内容不同则跳过</option><option value="fail">同名内容不同则失败</option></select></label>
       <details className="upload-content-details">
         <summary>上传内容 <span>{props.route.includeTypes?.length ?? 0} / {uploadTypeOptions.length}</span></summary>
         <fieldset className="upload-route-type-fieldset">

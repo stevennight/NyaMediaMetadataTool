@@ -751,9 +751,10 @@ func TestUploadEventLeaseLifecycleAndPayload(t *testing.T) {
 		SeriesKey:   "show",
 		SeriesPath:  seriesPath,
 		QuietPeriod: time.Millisecond,
-		Files: []UploadCandidate{{
-			LocalPath: filepath.Join(seriesPath, "S01E01.mkv"), RelativePath: "S01E01.mkv", FileType: "video", Size: 100, ModifiedAt: time.Now().Add(-time.Minute),
-		}},
+		Files: []UploadCandidate{
+			{LocalPath: filepath.Join(seriesPath, "S01E01.mkv"), RelativePath: "S01E01.mkv", FileType: "video", Size: 100, ModifiedAt: time.Now().Add(-time.Minute)},
+			{LocalPath: filepath.Join(seriesPath, "S01E02.mkv"), RelativePath: "S01E02.mkv", FileType: "video", Size: 200, ModifiedAt: time.Now().Add(-time.Minute)},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -773,7 +774,18 @@ func TestUploadEventLeaseLifecycleAndPayload(t *testing.T) {
 		if err := st.StartUploadTransfer(ctx, transfer.ID); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.CompleteUploadTransfer(ctx, transfer.ID, "remote-file"); err != nil {
+		completion := UploadTransferCompletion{
+			RemoteID:   "remote-" + transfer.RelativePath,
+			Outcome:    UploadOutcomeCreated,
+			LocalSHA1:  "LOCAL-" + transfer.RelativePath,
+			RemoteSHA1: "REMOTE-" + transfer.RelativePath,
+		}
+		if transfer.RelativePath == "S01E02.mkv" {
+			completion.Outcome = UploadOutcomeUnchanged
+			completion.LocalSHA1 = "UNCHANGED-SHA1"
+			completion.RemoteSHA1 = "UNCHANGED-SHA1"
+		}
+		if err := st.CompleteUploadTransferWithResult(ctx, transfer.ID, completion); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -787,10 +799,13 @@ func TestUploadEventLeaseLifecycleAndPayload(t *testing.T) {
 	if len(claimed) != 1 || claimed[0].Status != UploadEventProcessing || claimed[0].LeaseID == "" {
 		t.Fatalf("unexpected claimed events: %#v", claimed)
 	}
-	for _, required := range []string{"eventKey", "providerType", "seriesKey", "revision", "files"} {
+	for _, required := range []string{"eventKey", "providerType", "seriesKey", "revision", "remoteChanged", `"outcome":"created"`, "S01E01.mkv"} {
 		if !strings.Contains(claimed[0].Payload, required) {
 			t.Fatalf("event payload lacks %q: %s", required, claimed[0].Payload)
 		}
+	}
+	if strings.Contains(claimed[0].Payload, "S01E02.mkv") {
+		t.Fatalf("unchanged file leaked into remote-change event: %s", claimed[0].Payload)
 	}
 	if err := st.FailUploadEvent(ctx, claimed[0].ID, claimed[0].LeaseID, "temporary", time.Now().Add(-time.Second)); err != nil {
 		t.Fatal(err)
@@ -814,6 +829,94 @@ func TestUploadEventLeaseLifecycleAndPayload(t *testing.T) {
 	}
 	if detail, err := st.GetUploadBatchDetail(ctx, batch.ID); err != nil || detail.Batch.Status != UploadBatchCompleted {
 		t.Fatalf("batch completion failed: detail=%#v err=%v", detail, err)
+	}
+}
+
+func TestUnchangedUploadCompletesWithoutNotificationEventAndCachesSHA1(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	defer st.Close()
+	provider, err := st.CreateUploadProvider(ctx, UploadProvider{Name: "115", Type: UploadProviderType115Cookie, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	dir := createUploadTestWatchDir(t, st, ctx, root, []UploadProviderRoute{{
+		ProviderID: provider.ID, Enabled: true, RemoteRoot: "/Anime", CollisionPolicy: "replace", IncludeTypes: []string{"video"},
+	}})
+	seriesPath := filepath.Join(root, "Show")
+	modifiedAt := time.Now().Add(-time.Minute)
+	candidate := UploadCandidate{
+		LocalPath: filepath.Join(seriesPath, "S01E01.mkv"), RelativePath: "S01E01.mkv", FileType: "video", Size: 100, ModifiedAt: modifiedAt,
+	}
+	batch, _, err := st.CollectUploadBatch(ctx, UploadCollectionInput{
+		WatchDirID: &dir.ID, SeriesKey: "show", SeriesPath: seriesPath, QuietPeriod: time.Millisecond, Files: []UploadCandidate{candidate},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SealDueUploadBatches(ctx, time.Now(), time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	target, err := st.ClaimNextUploadTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfers, err := st.ListUploadTransfersByTarget(ctx, target.ID)
+	if err != nil || len(transfers) != 1 {
+		t.Fatalf("transfers=%#v err=%v", transfers, err)
+	}
+	if err := st.StartUploadTransfer(ctx, transfers[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompleteUploadTransferWithResult(ctx, transfers[0].ID, UploadTransferCompletion{
+		RemoteID: "remote-file", Outcome: UploadOutcomeUnchanged, LocalSHA1: "ABC123", RemoteSHA1: "ABC123",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompleteUploadTarget(ctx, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	events, err := st.ListUploadEvents(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("unchanged target created notification events: %#v", events)
+	}
+	detail, err := st.GetUploadBatchDetail(ctx, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := detail.Transfers[0]; got.Outcome != UploadOutcomeUnchanged || got.BytesTransferred != 0 || got.LocalSHA1 != "ABC123" || got.RemoteSHA1 != "ABC123" {
+		t.Fatalf("unexpected unchanged transfer: %#v", got)
+	}
+
+	nextBatch, created, err := st.CollectUploadBatch(ctx, UploadCollectionInput{
+		WatchDirID: &dir.ID, SeriesKey: "show", SeriesPath: seriesPath, QuietPeriod: time.Minute, Files: []UploadCandidate{candidate},
+	})
+	if err != nil || !created {
+		t.Fatalf("next batch=%#v created=%v err=%v", nextBatch, created, err)
+	}
+	nextDetail, err := st.GetUploadBatchDetail(ctx, nextBatch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nextDetail.Files) != 1 || nextDetail.Files[0].SHA1 != "ABC123" || nextDetail.Transfers[0].LocalSHA1 != "ABC123" {
+		t.Fatalf("local SHA1 cache was not reused: %#v", nextDetail)
+	}
+}
+
+func TestUploadOutcomeChangesRemote(t *testing.T) {
+	for _, outcome := range []string{UploadOutcomeCreated, UploadOutcomeReplaced} {
+		if !UploadOutcomeChangesRemote(outcome) {
+			t.Fatalf("outcome %q must trigger downstream remote processing", outcome)
+		}
+	}
+	for _, outcome := range []string{"", UploadOutcomeUnchanged, UploadOutcomeSkipped, "unknown"} {
+		if UploadOutcomeChangesRemote(outcome) {
+			t.Fatalf("outcome %q must not trigger downstream remote processing", outcome)
+		}
 	}
 }
 

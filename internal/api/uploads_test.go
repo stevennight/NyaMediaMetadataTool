@@ -785,7 +785,7 @@ func (p *fakeDirectoryListingProvider) List(_ context.Context, remotePath string
 	return append([]upload.RemoteEntry(nil), entries...), nil
 }
 
-func (p *fakeDirectoryListingProvider) Upload(context.Context, string, string, int64, string) (upload.RemoteFile, error) {
+func (p *fakeDirectoryListingProvider) Upload(context.Context, string, string, int64, string, string) (upload.RemoteFile, error) {
 	return upload.RemoteFile{}, fmt.Errorf("unexpected upload through directory listing test provider")
 }
 

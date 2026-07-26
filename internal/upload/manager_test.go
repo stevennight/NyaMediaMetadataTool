@@ -65,7 +65,7 @@ func (p *waitReportingProvider) Check(ctx context.Context) error {
 	}
 }
 
-func (p *waitReportingProvider) Upload(ctx context.Context, localPath string, remotePath string, size int64, collisionPolicy string) (RemoteFile, error) {
+func (p *waitReportingProvider) Upload(ctx context.Context, localPath string, remotePath string, size int64, localSHA1 string, collisionPolicy string) (RemoteFile, error) {
 	if p.uploadStarted != nil {
 		if p.progressReporter != nil {
 			p.progressReporter(size / 2)
@@ -77,14 +77,14 @@ func (p *waitReportingProvider) Upload(ctx context.Context, localPath string, re
 		case <-p.continueUpload:
 		}
 	}
-	return p.fakeProvider.Upload(ctx, localPath, remotePath, size, collisionPolicy)
+	return p.fakeProvider.Upload(ctx, localPath, remotePath, size, localSHA1, collisionPolicy)
 }
 
 func (p *fakeProvider) Check(context.Context) error { return nil }
 
 func (p *fakeProvider) List(context.Context, string) ([]RemoteEntry, error) { return nil, nil }
 
-func (p *fakeProvider) Upload(_ context.Context, localPath string, remotePath string, size int64, _ string) (RemoteFile, error) {
+func (p *fakeProvider) Upload(_ context.Context, localPath string, remotePath string, size int64, localSHA1 string, _ string) (RemoteFile, error) {
 	p.mu.Lock()
 	upload := fakeUpload{LocalPath: localPath, RemotePath: remotePath, Size: size}
 	p.attempts = append(p.attempts, upload)
@@ -99,10 +99,10 @@ func (p *fakeProvider) Upload(_ context.Context, localPath string, remotePath st
 	if fail != nil {
 		return RemoteFile{}, fail
 	}
-	return RemoteFile{ID: "remote-" + filepath.Base(remotePath), Size: size}, nil
+	return RemoteFile{ID: "remote-" + filepath.Base(remotePath), Size: size, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeCreated}, nil
 }
 
-func (p *fakeProvider) Verify(_ context.Context, remotePath string, size int64) (RemoteFile, bool, error) {
+func (p *fakeProvider) Verify(_ context.Context, remotePath string, size int64, _ string) (RemoteFile, bool, error) {
 	if p.verifyFile == nil {
 		return RemoteFile{}, false, nil
 	}
@@ -527,13 +527,24 @@ func TestProcessTargetOnlyVerifiesUncertainCommitOnAutomaticRetry(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeProvider{fail: &uncertain115CommitError{stage: "test PUT", err: errors.New("connection reset by peer")}}
+	fake := &fakeProvider{fail: &UploadAttemptError{
+		Outcome:   store.UploadOutcomeCreated,
+		LocalSHA1: "TEST-SHA1",
+		Err:       &uncertain115CommitError{stage: "test PUT", err: errors.New("connection reset by peer")},
+	}}
 	manager := NewWithFactory(Options{QuietPeriod: time.Millisecond, MaxAttempts: 3}, st, slog.Default(), func(context.Context, store.UploadBatchTarget) (Provider, error) {
 		return fake, nil
 	})
 	firstErr := manager.processTarget(ctx, target)
 	if firstErr == nil || !strings.Contains(firstErr.Error(), uncertain115CommitMarker) {
 		t.Fatalf("first attempt error=%v", firstErr)
+	}
+	failedDetail, err := st.GetUploadBatchDetail(ctx, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := failedDetail.Transfers[0]; got.Outcome != store.UploadOutcomeCreated || got.LocalSHA1 != "TEST-SHA1" {
+		t.Fatalf("uncertain upload intent was not persisted: %#v", got)
 	}
 	if err := st.RescheduleUploadTarget(ctx, target.ID, firstErr.Error(), time.Now().Add(-time.Second)); err != nil {
 		t.Fatal(err)
@@ -576,7 +587,9 @@ func TestProcessTargetOnlyVerifiesUncertainCommitOnAutomaticRetry(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Batch.Status != store.UploadBatchCompleted || detail.Transfers[0].Status != store.UploadTransferCompleted {
+	if detail.Batch.Status != store.UploadBatchCompleted ||
+		detail.Transfers[0].Status != store.UploadTransferCompleted ||
+		detail.Transfers[0].Outcome != store.UploadOutcomeCreated {
 		t.Fatalf("verified uncertain upload was not completed: %#v", detail)
 	}
 }

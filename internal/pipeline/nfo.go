@@ -601,8 +601,16 @@ func ensureEpisodeThumbOnly(ctx context.Context, cfg config.Config, episode epis
 func applyTMDBShowAndSeasonScoped(ctx context.Context, cfg config.Config, episode episodeInfo, result *NFOResult, allowShow bool, allowSeason bool) {
 	showPath := filepath.Join(showNFOBaseDir(result.Path), "tvshow.nfo")
 	seasonPath := filepath.Join(filepath.Dir(result.Path), "season.nfo")
-	writeShow := allowShow && (cfg.Processing.OverwriteExisting || !fileExists(showPath))
-	writeSeason := allowSeason && (cfg.Processing.OverwriteExisting || !fileExists(seasonPath))
+	showExists := fileExists(showPath)
+	seasonExists := fileExists(seasonPath)
+	if allowShow && showExists && !cfg.Processing.OverwriteExisting {
+		result.ShowNFOPath = showPath
+	}
+	if allowSeason && seasonExists && !cfg.Processing.OverwriteExisting {
+		result.SeasonNFOPath = seasonPath
+	}
+	writeShow := allowShow && (cfg.Processing.OverwriteExisting || !showExists)
+	writeSeason := allowSeason && (cfg.Processing.OverwriteExisting || !seasonExists)
 	if !writeShow && !writeSeason {
 		return
 	}

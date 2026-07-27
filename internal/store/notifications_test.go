@@ -199,6 +199,58 @@ func TestUploadNotificationTemplateRejectsInvalidHeaders(t *testing.T) {
 	}
 }
 
+func TestUploadNotificationTemplateUpdateAddsVariablesToExistingRoutes(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	defer st.Close()
+	template, err := st.CreateUploadNotificationTemplate(ctx, UploadNotificationTemplate{
+		Name:            "Existing route",
+		URL:             "https://example.test/notify",
+		HeadersTemplate: `{}`,
+		PayloadTemplate: `{"source_path":"{{path}}"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := st.CreateUploadProvider(ctx, UploadProvider{
+		Name:    "115 Existing Route",
+		Type:    UploadProviderType115Cookie,
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := st.CreateWatchDir(ctx, WatchDir{
+		Path:         t.TempDir(),
+		WatchEnabled: true,
+		UploadConfigs: []UploadProviderRoute{{
+			ProviderID:             provider.ID,
+			Enabled:                false,
+			RemoteRoot:             "/",
+			CollisionPolicy:        "fail",
+			IncludeTypes:           []string{"video"},
+			NotificationTemplateID: &template.ID,
+			NotificationVariables:  map[string]string{"existing": "keep-me"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	template.HeadersTemplate = `{"X-Webhook-Token":"{{webhook_token}}"}`
+	template.PayloadTemplate = `{"source_path":"{{path}}","provider_id":"{{provider_id}}"}`
+	if _, err := st.UpdateUploadNotificationTemplate(ctx, template); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := st.GetWatchDir(ctx, dir.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variables := persisted.UploadConfigs[0].NotificationVariables
+	if variables["webhook_token"] != "" || variables["provider_id"] != "" || variables["existing"] != "keep-me" {
+		t.Fatalf("template variables were not synchronized: %#v", variables)
+	}
+}
+
 func TestMigrateAddsUploadNotificationHeaderColumns(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(filepath.Join(t.TempDir(), "legacy-notifications.db"))

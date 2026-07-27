@@ -4403,7 +4403,11 @@ function notificationTemplateVariables(...templates: string[]) {
 
 function variablesForNotificationTemplate(template: UploadNotificationTemplate | undefined, current: Record<string, string> = {}) {
   if (!template) return {};
-  return Object.fromEntries(notificationTemplateVariables(template.headersTemplate, template.payloadTemplate).map((name) => [name, current[name] ?? '']));
+  const variables = { ...current };
+  for (const name of notificationTemplateVariables(template.headersTemplate, template.payloadTemplate)) {
+    if (!(name in variables)) variables[name] = '';
+  }
+  return variables;
 }
 
 function uploadNotificationConfigError(route: UploadProviderRoute, templates: UploadNotificationTemplate[]) {
@@ -4556,6 +4560,19 @@ function UploadRouteProfile(props: { route: UploadProviderRoute; provider?: Uplo
 }
 
 function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; providers: UploadProvider[]; notificationTemplates: UploadNotificationTemplate[]; onChange: (configs: UploadProviderRoute[]) => void; onAddProvider: () => void; onAuthorizeProvider: (provider: UploadProvider) => void; onBrowseRemoteDirectory: (request: RemoteDirectoryPickerRequest) => void }) {
+  useEffect(() => {
+    let changed = false;
+    const configs = props.configs.map((config) => {
+      const template = props.notificationTemplates.find((item) => item.id === config.notificationTemplateId);
+      if (!template) return config;
+      const variables = variablesForNotificationTemplate(template, config.notificationVariables);
+      if (Object.keys(variables).length === Object.keys(config.notificationVariables ?? {}).length) return config;
+      changed = true;
+      return { ...config, notificationVariables: variables };
+    });
+    if (changed) props.onChange(configs);
+  }, [props.configs, props.notificationTemplates, props.onChange]);
+
   function addConfig() {
     const provider = props.providers.find((item) => item.enabled) ?? props.providers[0];
     if (!provider) return;

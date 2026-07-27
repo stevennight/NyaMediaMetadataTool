@@ -121,7 +121,7 @@ func (s *Store) UpdateUploadNotificationTemplate(ctx context.Context, item Uploa
 		return UploadNotificationTemplate{}, err
 	}
 	defer tx.Rollback()
-	if err := validateTemplateRoutesTx(ctx, tx, item.ID, item.HeadersTemplate, item.PayloadTemplate); err != nil {
+	if err := syncTemplateRouteVariablesTx(ctx, tx, item.ID, item.HeadersTemplate, item.PayloadTemplate); err != nil {
 		return UploadNotificationTemplate{}, err
 	}
 	result, err := tx.ExecContext(ctx, `
@@ -295,26 +295,80 @@ func validateNotificationTemplateVariables(headersTemplate string, payloadTempla
 	return fmt.Errorf("notification variables are missing: %s", strings.Join(names, ", "))
 }
 
-func validateTemplateRoutesTx(ctx context.Context, tx *sql.Tx, templateID int64, headersTemplate string, payloadTemplate string) error {
+func notificationTemplateVariableNames(headersTemplate string, payloadTemplate string) []string {
+	names := map[string]struct{}{}
+	for _, template := range []string{headersTemplate, payloadTemplate} {
+		for _, match := range notificationVariablePattern.FindAllStringSubmatch(template, -1) {
+			if match[1] != "path" {
+				names[match[1]] = struct{}{}
+			}
+		}
+	}
+	result := make([]string, 0, len(names))
+	for name := range names {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func syncTemplateRouteVariablesTx(ctx context.Context, tx *sql.Tx, templateID int64, headersTemplate string, payloadTemplate string) error {
 	rows, err := tx.QueryContext(ctx, `
-SELECT notification_variables
+SELECT id, notification_variables
 FROM upload_provider_routes
 WHERE notification_template_id = ?
 `, templateID)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	type routeUpdate struct {
+		id        int64
+		variables string
+	}
+	required := notificationTemplateVariableNames(headersTemplate, payloadTemplate)
+	var updates []routeUpdate
 	for rows.Next() {
+		var id int64
 		var encoded string
-		if err := rows.Scan(&encoded); err != nil {
+		if err := rows.Scan(&id, &encoded); err != nil {
+			rows.Close()
 			return err
 		}
-		if err := validateNotificationTemplateVariables(headersTemplate, payloadTemplate, decodeNotificationVariables(encoded)); err != nil {
+		variables := decodeNotificationVariables(encoded)
+		changed := false
+		for _, name := range required {
+			if _, ok := variables[name]; !ok {
+				variables[name] = ""
+				changed = true
+			}
+		}
+		if !changed {
+			continue
+		}
+		encoded, err = encodeNotificationVariables(variables)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		updates = append(updates, routeUpdate{id: id, variables: encoded})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, update := range updates {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE upload_provider_routes
+SET notification_variables = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = ?
+`, update.variables, update.id); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func renderNotificationJSON(template string, variables map[string]string) (string, error) {

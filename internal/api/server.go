@@ -240,6 +240,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/upload/providers", s.handleListUploadProviders)
 	s.mux.HandleFunc("POST /api/upload/providers", s.handleCreateUploadProvider)
 	s.mux.HandleFunc("/api/upload/providers/", s.handleUploadProviderRoute)
+	s.mux.HandleFunc("GET /api/upload/notification-templates", s.handleListUploadNotificationTemplates)
+	s.mux.HandleFunc("POST /api/upload/notification-templates", s.handleCreateUploadNotificationTemplate)
+	s.mux.HandleFunc("/api/upload/notification-templates/", s.handleUploadNotificationTemplate)
 	s.mux.HandleFunc("GET /api/emby-api-keys", s.handleListEmbyAPIKeys)
 	s.mux.HandleFunc("POST /api/emby-api-keys", s.handleSaveEmbyAPIKey)
 	s.mux.HandleFunc("DELETE /api/emby-api-keys/", s.handleDeleteEmbyAPIKey)
@@ -843,7 +846,7 @@ func (s *Server) handleCreateWatchDir(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.store.CreateWatchDir(r.Context(), input)
 	if err != nil {
-		if errors.Is(err, store.ErrUploadProviderNotFound) || errors.Is(err, store.ErrInvalidUploadConfig) {
+		if errors.Is(err, store.ErrUploadProviderNotFound) || errors.Is(err, store.ErrInvalidUploadConfig) || errors.Is(err, store.ErrUploadNotificationTemplateNotFound) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -891,7 +894,7 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, err)
 			return
 		}
-		if errors.Is(err, store.ErrUploadProviderNotFound) || errors.Is(err, store.ErrInvalidUploadConfig) {
+		if errors.Is(err, store.ErrUploadProviderNotFound) || errors.Is(err, store.ErrInvalidUploadConfig) || errors.Is(err, store.ErrUploadNotificationTemplateNotFound) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}

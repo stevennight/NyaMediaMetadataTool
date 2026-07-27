@@ -226,10 +226,14 @@ func (s *Store) ensureUploadColumns(ctx context.Context) error {
 		update string
 	}{
 		{"upload_providers", "auth_device", `ALTER TABLE upload_providers ADD COLUMN auth_device TEXT NOT NULL DEFAULT ''`, ""},
+		{"upload_provider_routes", "notification_template_id", `ALTER TABLE upload_provider_routes ADD COLUMN notification_template_id INTEGER`, ""},
+		{"upload_provider_routes", "notification_variables", `ALTER TABLE upload_provider_routes ADD COLUMN notification_variables TEXT NOT NULL DEFAULT '{}'`, ""},
 		{"upload_batches", "upload_route_id", `ALTER TABLE upload_batches ADD COLUMN upload_route_id INTEGER`, ""},
 		{"upload_batch_files", "sha1", `ALTER TABLE upload_batch_files ADD COLUMN sha1 TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_batch_targets", "include_types", `ALTER TABLE upload_batch_targets ADD COLUMN include_types TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_batch_targets", "retryable", `ALTER TABLE upload_batch_targets ADD COLUMN retryable INTEGER NOT NULL DEFAULT 1`, ""},
+		{"upload_batch_targets", "notification_template_id", `ALTER TABLE upload_batch_targets ADD COLUMN notification_template_id INTEGER`, ""},
+		{"upload_batch_targets", "notification_variables", `ALTER TABLE upload_batch_targets ADD COLUMN notification_variables TEXT NOT NULL DEFAULT '{}'`, ""},
 		{"upload_transfers", "outcome", `ALTER TABLE upload_transfers ADD COLUMN outcome TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_transfers", "remote_sha1", `ALTER TABLE upload_transfers ADD COLUMN remote_sha1 TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_events", "attempts", `ALTER TABLE upload_events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`, ""},
@@ -651,6 +655,15 @@ CREATE TABLE IF NOT EXISTS upload_provider_secrets (
   FOREIGN KEY(provider_id) REFERENCES upload_providers(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS upload_notification_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  url TEXT NOT NULL,
+  payload_template TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS upload_provider_routes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   provider_id INTEGER NOT NULL,
@@ -659,10 +672,13 @@ CREATE TABLE IF NOT EXISTS upload_provider_routes (
   remote_root TEXT NOT NULL DEFAULT '/',
   collision_policy TEXT NOT NULL DEFAULT 'fail',
   include_types TEXT NOT NULL DEFAULT '',
+  notification_template_id INTEGER,
+  notification_variables TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(provider_id) REFERENCES upload_providers(id) ON DELETE CASCADE,
-  FOREIGN KEY(watch_dir_id) REFERENCES watch_dirs(id) ON DELETE CASCADE
+  FOREIGN KEY(watch_dir_id) REFERENCES watch_dirs(id) ON DELETE CASCADE,
+  FOREIGN KEY(notification_template_id) REFERENCES upload_notification_templates(id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_upload_provider_routes_watch
@@ -731,6 +747,8 @@ CREATE TABLE IF NOT EXISTS upload_batch_targets (
   collision_policy TEXT NOT NULL DEFAULT 'fail',
   include_types TEXT NOT NULL DEFAULT '',
   retryable INTEGER NOT NULL DEFAULT 1,
+  notification_template_id INTEGER,
+  notification_variables TEXT NOT NULL DEFAULT '{}',
   status TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   error_summary TEXT NOT NULL DEFAULT '',
@@ -789,6 +807,27 @@ CREATE TABLE IF NOT EXISTS upload_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_upload_events_status ON upload_events(status, id);
+
+CREATE TABLE IF NOT EXISTS upload_notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_target_id INTEGER NOT NULL UNIQUE,
+  template_id INTEGER NOT NULL,
+  template_name TEXT NOT NULL,
+  url TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  response_status INTEGER NOT NULL DEFAULT 0,
+  error_summary TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  delivered_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(batch_target_id) REFERENCES upload_batch_targets(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_notifications_status_available
+  ON upload_notifications(status, available_at, id);
 
 CREATE TABLE IF NOT EXISTS tool_status (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

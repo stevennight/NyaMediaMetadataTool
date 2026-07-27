@@ -627,9 +627,94 @@ h1 {
   font-weight: 600;
 }
 
+.upload-content-details summary .upload-detail-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+}
+
 .upload-content-details .upload-route-type-fieldset {
   border-width: 1px 0 0;
 }
+
+.upload-notification-config {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding: 10px;
+}
+
+.notification-variable-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.notification-variable-heading strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.notification-variable-list {
+  display: grid;
+  gap: 7px;
+}
+
+.notification-variable-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.55fr) minmax(180px, 1fr) 32px;
+  gap: 7px;
+  align-items: center;
+}
+
+.notification-variable-row.builtin input[readonly] {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+}
+
+.notification-variable-row .pill {
+  justify-self: center;
+}
+
+.modal-card.upload-notification-template-modal {
+  width: min(720px, 100%);
+}
+
+.notification-template-form {
+  display: grid;
+  gap: 12px;
+}
+
+.code-textarea {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+.notification-template-variables {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.notification-template-variables code {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-muted);
+  color: var(--text);
+  padding: 3px 6px;
+}
+
+.upload-notification-template-table code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 
 .upload-route-type-fieldset legend {
   padding: 0 4px;
@@ -780,6 +865,17 @@ h1 {
   flex: 0 0 auto;
   width: auto;
   padding: 0;
+}
+
+@media (max-width: 720px) {
+  .notification-variable-row {
+    grid-template-columns: minmax(0, 1fr) 32px;
+  }
+
+  .notification-variable-row input:nth-child(2) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
 }
 
 

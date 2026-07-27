@@ -35,6 +35,7 @@ import {
   Trash2,
   UploadCloud,
   Undo2,
+  Webhook,
   WandSparkles,
   X
 } from 'lucide-react';
@@ -211,6 +212,17 @@ type UploadProviderRoute = {
   remoteRoot: string;
   collisionPolicy: UploadCollisionPolicy;
   includeTypes: string[];
+  notificationTemplateId?: number;
+  notificationVariables?: Record<string, string>;
+};
+
+type UploadNotificationTemplate = {
+  id: number;
+  name: string;
+  url: string;
+  payloadTemplate: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type UploadProviderDescriptor = {
@@ -502,7 +514,7 @@ type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' |
 type UploadStatusFilter = 'all' | 'collecting' | 'pending' | 'running' | 'completed' | 'partial' | 'failed' | 'canceled';
 type UploadFileStatus = 'running' | 'pending' | 'failed' | 'canceled' | 'completed';
 type UploadFileStatusFilter = 'all' | UploadFileStatus;
-type UploadView = 'batches' | 'providers';
+type UploadView = 'batches' | 'providers' | 'notifications';
 type AuditTab = 'missing' | 'emby' | 'files';
 type ConfirmationRequest = {
   title: string;
@@ -1089,7 +1101,9 @@ function renameStatusLabel(status: string) {
 }
 
 function uploadViewFromPath(pathname: string): UploadView {
-  return pathname === '/uploads/providers' ? 'providers' : 'batches';
+  if (pathname === '/uploads/providers') return 'providers';
+  if (pathname === '/uploads/notifications') return 'notifications';
+  return 'batches';
 }
 
 function logLevelPillClass(level: string) {
@@ -1133,8 +1147,11 @@ export function App() {
   const [uploadBatches, setUploadBatches] = useState<UploadBatch[]>([]);
   const [uploadProviders, setUploadProviders] = useState<UploadProvider[]>([]);
   const [uploadProviderTypes, setUploadProviderTypes] = useState<UploadProviderDescriptor[]>([]);
+  const [uploadNotificationTemplates, setUploadNotificationTemplates] = useState<UploadNotificationTemplate[]>([]);
   const [uploadView, setUploadView] = useState<UploadView>(() => uploadViewFromPath(window.location.pathname));
   const [uploadProviderUsage, setUploadProviderUsage] = useState<UploadProvider | null>(null);
+  const [uploadNotificationTemplateModal, setUploadNotificationTemplateModal] = useState<UploadNotificationTemplate | null>(null);
+  const [newUploadNotificationTemplateOpen, setNewUploadNotificationTemplateOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('basic');
   const [taskTotal, setTaskTotal] = useState(0);
   const [taskPage, setTaskPage] = useState(1);
@@ -1152,6 +1169,7 @@ export function App() {
   const [appliedUploadPathFilter, setAppliedUploadPathFilter] = useState('');
   const [refreshingUploads, setRefreshingUploads] = useState(false);
   const [refreshingUploadProviders, setRefreshingUploadProviders] = useState(false);
+  const [savingUploadNotificationTemplate, setSavingUploadNotificationTemplate] = useState(false);
   const [selectedUploadBatch, setSelectedUploadBatch] = useState<UploadBatchDetail | null>(null);
   const [uploadProviderModal, setUploadProviderModal] = useState<UploadProvider | null>(null);
   const [newUploadProviderOpen, setNewUploadProviderOpen] = useState(false);
@@ -1294,8 +1312,8 @@ export function App() {
   const remoteDirectoryRequestCacheRef = useRef(new Map<string, Promise<RemoteDirectoryList>>());
   const activeModalStackRef = useRef('');
   const modalFocusReturnRef = useRef(new Map<string, HTMLElement | null>());
-  const modalBusyRef = useRef({ applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey, savingWatchDir });
-  modalBusyRef.current = { applyingBatchEpisode, rescanning, savingUploadProvider, savingEmbyKey, savingWatchDir };
+  const modalBusyRef = useRef({ applyingBatchEpisode, rescanning, savingUploadProvider, savingUploadNotificationTemplate, savingEmbyKey, savingWatchDir });
+  modalBusyRef.current = { applyingBatchEpisode, rescanning, savingUploadProvider, savingUploadNotificationTemplate, savingEmbyKey, savingWatchDir };
   const displayTimezone = config?.server.timezone || 'Asia/Shanghai';
   const renameBatchConcurrency = previewWorkerCount(config?.renaming?.concurrency ?? 3);
   const renameErrorCount = renamePreview.filter((item) => item.status === 'error' || item.conflict).length;
@@ -1333,6 +1351,7 @@ export function App() {
     remoteDirectoryPicker && 'remote-directory', directoryPicker && 'directory', targetPathEditor && 'target-path', selectedHistoryBatch && 'history-detail', renameHistoryOpen && 'history',
     renameTemplateEditorOpen && 'template', tmdbEpisodeDetail && 'episode-detail', addEmbyKeyOpen && 'emby-key', auditTmdbMatchOpen && 'audit-tmdb', tmdbMatchOpen && 'tmdb',
     batchEpisodeOpen && 'batch', uploadCookieProvider && 'upload-cookie', uploadProviderUsage && 'upload-provider-usage', (newUploadProviderOpen || uploadProviderModal) && 'upload-provider',
+    (newUploadNotificationTemplateOpen || uploadNotificationTemplateModal) && 'upload-notification-template',
     editingWatchDir && 'edit-dir', addWatchDirOpen && 'add-dir', rescanOpen && 'rescan', selectedUploadBatch && 'upload-detail', selectedTask && 'task-detail',
     recentArtifactsOpen && 'artifacts'
   ].filter(Boolean).join('|');
@@ -1358,6 +1377,7 @@ export function App() {
         artifactsResult,
         providersResult,
         providerTypesResult,
+        notificationTemplatesResult,
         runtimeResult,
         desktopPreferencesResult,
         renameHistoryResult,
@@ -1373,6 +1393,7 @@ export function App() {
         requestJSON<Artifact[]>('/api/artifacts?limit=10', '最近产物'),
         requestJSON<UploadProvider[]>('/api/upload/providers', '上传 Provider'),
         requestJSON<UploadProviderDescriptor[]>('/api/upload/provider-types', 'Provider 类型'),
+        requestJSON<UploadNotificationTemplate[]>('/api/upload/notification-templates', '通知模板'),
         getRuntimeInfo(),
         getDesktopPreferences(),
         loadRenameHistory(true),
@@ -1401,6 +1422,7 @@ export function App() {
       if (artifactsResult.status === 'fulfilled') setArtifacts(asArray<Artifact>(artifactsResult.value));
       if (providersResult.status === 'fulfilled') setUploadProviders(asArray<UploadProvider>(providersResult.value));
       if (providerTypesResult.status === 'fulfilled') setUploadProviderTypes(asArray<UploadProviderDescriptor>(providerTypesResult.value));
+      if (notificationTemplatesResult.status === 'fulfilled') setUploadNotificationTemplates(asArray<UploadNotificationTemplate>(notificationTemplatesResult.value));
       if (runtimeResult.status === 'fulfilled') setRuntimeInfo(runtimeResult.value);
       if (desktopPreferencesResult.status === 'fulfilled') setDesktopPreferences(desktopPreferencesResult.value);
 
@@ -1415,6 +1437,7 @@ export function App() {
         artifactsResult.status === 'rejected' && '最近产物',
         providersResult.status === 'rejected' && '上传 Provider',
         providerTypesResult.status === 'rejected' && 'Provider 类型',
+        notificationTemplatesResult.status === 'rejected' && '通知模板',
         runtimeResult.status === 'rejected' && '桌面运行信息',
         desktopPreferencesResult.status === 'rejected' && '桌面偏好设置',
         renameHistoryResult.status === 'rejected' && '重命名历史',
@@ -1573,6 +1596,7 @@ export function App() {
       else if (uploadCookieProvider && !modalBusyRef.current.savingUploadProvider) requestUploadCookieCloseRef.current();
       else if (uploadProviderUsage) setUploadProviderUsage(null);
       else if ((newUploadProviderOpen || uploadProviderModal) && !modalBusyRef.current.savingUploadProvider) { setNewUploadProviderOpen(false); setUploadProviderModal(null); }
+      else if ((newUploadNotificationTemplateOpen || uploadNotificationTemplateModal) && !modalBusyRef.current.savingUploadNotificationTemplate) { setNewUploadNotificationTemplateOpen(false); setUploadNotificationTemplateModal(null); }
       else if (editingWatchDir && !modalBusyRef.current.savingWatchDir) setEditingWatchDir(null);
       else if (addWatchDirOpen && !modalBusyRef.current.savingWatchDir) setAddWatchDirOpen(false);
       else if (rescanOpen && !modalBusyRef.current.rescanning) setRescanOpen(false);
@@ -1881,7 +1905,7 @@ export function App() {
   function navigateUploadView(view: UploadView) {
     setActivePage('uploads');
     setUploadView(view);
-    const path = view === 'providers' ? '/uploads/providers' : '/uploads';
+    const path = view === 'providers' ? '/uploads/providers' : view === 'notifications' ? '/uploads/notifications' : '/uploads';
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
   }
 
@@ -1916,6 +1940,49 @@ export function App() {
     const response = await fetch('/api/upload/provider-types');
     if (!response.ok) throw new Error(await readErrorMessage(response));
     setUploadProviderTypes(asArray<UploadProviderDescriptor>(await response.json()));
+  }
+
+  async function loadUploadNotificationTemplates() {
+    const response = await fetch('/api/upload/notification-templates');
+    if (!response.ok) throw new Error(await readErrorMessage(response));
+    setUploadNotificationTemplates(asArray<UploadNotificationTemplate>(await response.json()));
+  }
+
+  async function saveUploadNotificationTemplate(template: UploadNotificationTemplate) {
+    setSavingUploadNotificationTemplate(true);
+    setError('');
+    try {
+      const isNew = template.id === 0;
+      const response = await fetch(isNew ? '/api/upload/notification-templates' : `/api/upload/notification-templates/${template.id}`, {
+        method: isNew ? 'POST' : 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(template)
+      });
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      setUploadNotificationTemplateModal(null);
+      setNewUploadNotificationTemplateOpen(false);
+      setNotice(isNew ? '通知模板已添加。' : '通知模板已保存。');
+      await Promise.all([loadUploadNotificationTemplates(), loadWatchDirs()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存通知模板失败');
+    } finally {
+      setSavingUploadNotificationTemplate(false);
+    }
+  }
+
+  function deleteUploadNotificationTemplate(template: UploadNotificationTemplate) {
+    requestConfirmation({
+      title: `删除“${template.name}”？`,
+      message: '正在被上传配置或活动批次使用的模板不能删除。删除后无法恢复。',
+      confirmLabel: '删除模板',
+      tone: 'danger',
+      onConfirm: async () => {
+        const response = await fetch(`/api/upload/notification-templates/${template.id}`, { method: 'DELETE' });
+        if (!response.ok) throw new Error(await readErrorMessage(response));
+        setNotice('通知模板已删除。');
+        await loadUploadNotificationTemplates();
+      }
+    });
   }
 
   async function loadUploadSummary() {
@@ -2212,6 +2279,10 @@ export function App() {
     if (activePage !== 'uploads') return;
     if (uploadView === 'providers') {
       void refreshUploadProviders();
+      return;
+    }
+    if (uploadView === 'notifications') {
+      void loadUploadNotificationTemplates().catch((err) => setError(err instanceof Error ? err.message : '加载通知模板失败'));
       return;
     }
     void refreshUploads(uploadPage, uploadStatusFilter, appliedUploadPathFilter);
@@ -4082,6 +4153,7 @@ export function App() {
           <nav className="page-tabs upload-tabs" role="tablist" aria-label="上传管理子页面">
             <button className={uploadView === 'batches' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={uploadView === 'batches'} onClick={() => navigateUploadView('batches')}>上传批次</button>
             <button className={uploadView === 'providers' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={uploadView === 'providers'} onClick={() => navigateUploadView('providers')}>Provider 账号</button>
+            <button className={uploadView === 'notifications' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={uploadView === 'notifications'} onClick={() => navigateUploadView('notifications')}>通知模板</button>
           </nav>
 
           {uploadView === 'batches' && <>
@@ -4149,6 +4221,29 @@ export function App() {
                       </tr>
                     );
                   }) : <tr><td colSpan={7} className="empty-cell">尚未添加 Provider。先添加并授权账号，再到媒体目录中配置上传步骤。</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </Card>}
+
+          {uploadView === 'notifications' && <Card title="通知模板" action={<div className="inline-actions"><ActionIconButton label="刷新通知模板" icon={RefreshCw} onClick={() => void loadUploadNotificationTemplates()} /><button className="icon-text-button" type="button" onClick={() => setNewUploadNotificationTemplateOpen(true)}><Plus size={16} />添加模板</button></div>}>
+            <div className="task-table-wrap">
+              <table className="task-table upload-notification-template-table">
+                <thead><tr><th>名称</th><th>请求地址</th><th>引用变量</th><th>目录配置</th><th>操作</th></tr></thead>
+                <tbody>
+                  {uploadNotificationTemplates.length ? uploadNotificationTemplates.map((template) => {
+                    const variables = notificationTemplateVariables(template.payloadTemplate);
+                    const routeCount = watchDirs.reduce((count, dir) => count + (dir.uploadConfigs ?? []).filter((route) => route.notificationTemplateId === template.id).length, 0);
+                    return (
+                      <tr key={template.id}>
+                        <td><strong>{template.name}</strong></td>
+                        <td className="path-cell" title={template.url}>{template.url}</td>
+                        <td><code>{['path', ...variables].map((name) => `{{${name}}}`).join(' ')}</code></td>
+                        <td>{routeCount ? `${routeCount} 个` : <span className="pill ignored">未使用</span>}</td>
+                        <td><div className="table-actions"><ActionIconButton label={`编辑通知模板 ${template.name}`} icon={Pencil} onClick={() => setUploadNotificationTemplateModal(template)} /><ActionIconButton label={`删除通知模板 ${template.name}`} icon={Trash2} tone="danger" onClick={() => deleteUploadNotificationTemplate(template)} /></div></td>
+                      </tr>
+                    );
+                  }) : <tr><td colSpan={5} className="empty-cell">尚未添加通知模板。模板定义请求地址和 JSON payload，之后可在媒体目录的上传配置中选择。</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -4229,10 +4324,11 @@ export function App() {
         </div>
       {selectedUploadBatch && <UploadBatchDetailModal detail={selectedUploadBatch} timezone={displayTimezone} actionTargetID={uploadTargetActionID} onClose={() => setSelectedUploadBatch(null)} onRetry={(target) => void actOnUploadTarget(target, 'retry')} onCancel={(target) => void actOnUploadTarget(target, 'cancel')} />}
       {rescanOpen && <RescanModal scope={rescanScope} target={rescanTarget} watchDirId={rescanWatchDirId} useCustomProcessing={rescanUseCustomProcessing} processing={rescanProcessing} directories={watchDirs} rescanning={rescanning} onClose={() => setRescanOpen(false)} onScopeChange={(value) => { setRescanScope(value); setRescanTarget(''); setRescanWatchDirId(''); }} onTargetChange={setRescanTarget} onWatchDirIdChange={(value) => { setRescanWatchDirId(value); setRescanTarget(''); }} onUseCustomProcessingChange={(value) => { setRescanUseCustomProcessing(value); if (value) setRescanProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setRescanProcessing((value) => ({ ...value, ...patch }))} onBrowsePath={() => { const rootPath = rescanScope === 'dir' ? watchDirs.find((dir) => String(dir.id) === rescanWatchDirId)?.path ?? '' : ''; void browseDirectory({ title: '选择扫描路径', value: rescanTarget || rootPath, rootPath: rootPath || undefined, onSelect: setRescanTarget }); }} onSubmit={() => void rescan()} />}
-      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" saving={savingWatchDir} dirty={watchDirDraftDirty} path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} uploadConfigs={newWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setNewWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onBrowseRemoteDirectory={browseRemoteDirectory} onClose={() => requestDiscardChanges(watchDirDraftDirty, () => setAddWatchDirOpen(false))} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
-      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" saving={savingWatchDir} dirty={watchDirDraftDirty} path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} uploadConfigs={editingWatchDirUploadConfigs} providers={uploadProviders} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setEditingWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onBrowseRemoteDirectory={browseRemoteDirectory} onClose={() => requestDiscardChanges(watchDirDraftDirty, () => setEditingWatchDir(null))} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
+      {addWatchDirOpen && <WatchDirModal title="添加媒体目录" submitLabel="添加" saving={savingWatchDir} dirty={watchDirDraftDirty} path={newWatchDir} watchEnabled={newWatchDirWatchEnabled} useGlobalProcessing={newWatchDirUseGlobalProcessing} processing={newWatchDirProcessing} uploadConfigs={newWatchDirUploadConfigs} providers={uploadProviders} notificationTemplates={uploadNotificationTemplates} onPathChange={setNewWatchDir} onWatchEnabledChange={setNewWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setNewWatchDirUseGlobalProcessing(value); if (!value) setNewWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setNewWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setNewWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onBrowseRemoteDirectory={browseRemoteDirectory} onClose={() => requestDiscardChanges(watchDirDraftDirty, () => setAddWatchDirOpen(false))} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: newWatchDir, onSelect: setNewWatchDir })} onSubmit={() => void addWatchDir()} />}
+      {editingWatchDir && <WatchDirModal title="编辑媒体目录" submitLabel="保存" saving={savingWatchDir} dirty={watchDirDraftDirty} path={editingWatchDirPath} watchEnabled={editingWatchDirWatchEnabled} useGlobalProcessing={editingWatchDirUseGlobalProcessing} processing={editingWatchDirProcessing} uploadConfigs={editingWatchDirUploadConfigs} providers={uploadProviders} notificationTemplates={uploadNotificationTemplates} onPathChange={setEditingWatchDirPath} onWatchEnabledChange={setEditingWatchDirWatchEnabled} onUseGlobalProcessingChange={(value) => { setEditingWatchDirUseGlobalProcessing(value); if (!value && editingWatchDirUseGlobalProcessing) setEditingWatchDirProcessing(outputProcessingFromConfig(config)); }} onProcessingChange={(patch) => setEditingWatchDirProcessing((value) => ({ ...value, ...patch }))} onUploadConfigsChange={setEditingWatchDirUploadConfigs} onAddProvider={() => setNewUploadProviderOpen(true)} onAuthorizeProvider={openUploadCookieAuthorization} onBrowseRemoteDirectory={browseRemoteDirectory} onClose={() => requestDiscardChanges(watchDirDraftDirty, () => setEditingWatchDir(null))} onBrowsePath={() => void browseDirectory({ title: '选择媒体目录', value: editingWatchDirPath, onSelect: setEditingWatchDirPath })} onSubmit={() => void submitEditWatchDir()} />}
       {uploadProviderUsage && <UploadProviderUsageModal provider={uploadProviderUsage} watchDirs={watchDirs} onClose={() => setUploadProviderUsage(null)} onEditDirectory={(dir) => { setUploadProviderUsage(null); openEditWatchDir(dir); }} />}
       {(newUploadProviderOpen || uploadProviderModal) && <UploadProviderModal provider={uploadProviderModal ?? undefined} providerTypes={uploadProviderTypes} saving={savingUploadProvider} onClose={(dirty) => requestDiscardChanges(dirty, () => { setNewUploadProviderOpen(false); setUploadProviderModal(null); })} onSubmit={(provider) => void saveUploadProvider(provider)} />}
+      {(newUploadNotificationTemplateOpen || uploadNotificationTemplateModal) && <UploadNotificationTemplateModal template={uploadNotificationTemplateModal ?? undefined} saving={savingUploadNotificationTemplate} onClose={(dirty) => requestDiscardChanges(dirty, () => { setNewUploadNotificationTemplateOpen(false); setUploadNotificationTemplateModal(null); })} onSubmit={(template) => void saveUploadNotificationTemplate(template)} />}
       {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} devices={uploadAuthDevices(uploadCookieProvider.type, uploadProviderTypes)} device={uploadCookieDevice} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onDeviceChange={setUploadCookieDevice} onCookieChange={setUploadCookieValue} onClose={requestCloseUploadCookieModal} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
@@ -4265,14 +4361,54 @@ function newUploadProviderDraft(): UploadProvider {
   };
 }
 
+function newUploadNotificationTemplateDraft(): UploadNotificationTemplate {
+  return {
+    id: 0,
+    name: '',
+    url: '',
+    payloadTemplate: `{
+  "event": "change",
+  "source_path": "{{path}}",
+  "is_dir": true
+}`,
+    createdAt: '',
+    updatedAt: ''
+  };
+}
+
 function newDirectoryUploadConfig(providerId: number): UploadProviderRoute {
   return {
     providerId,
     enabled: true,
     remoteRoot: '/',
     collisionPolicy: 'fail',
-    includeTypes: uploadTypeOptions.map((option) => option.value)
+    includeTypes: uploadTypeOptions.map((option) => option.value),
+    notificationVariables: {}
   };
+}
+
+function notificationTemplateVariables(payloadTemplate: string) {
+  const names = new Set<string>();
+  for (const match of payloadTemplate.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)) {
+    if (match[1] !== 'path') names.add(match[1]);
+  }
+  return Array.from(names);
+}
+
+function variablesForNotificationTemplate(template: UploadNotificationTemplate | undefined, current: Record<string, string> = {}) {
+  if (!template) return {};
+  return Object.fromEntries(notificationTemplateVariables(template.payloadTemplate).map((name) => [name, current[name] ?? '']));
+}
+
+function uploadNotificationConfigError(route: UploadProviderRoute, templates: UploadNotificationTemplate[]) {
+  if (!route.notificationTemplateId) return '';
+  const template = templates.find((item) => item.id === route.notificationTemplateId);
+  if (!template) return '所选通知模板不存在。';
+  const variables = route.notificationVariables ?? {};
+  const invalid = Object.keys(variables).find((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name === 'path');
+  if (invalid) return `变量名“${invalid}”无效。`;
+  const missing = notificationTemplateVariables(template.payloadTemplate).filter((name) => !(name in variables));
+  return missing.length ? `缺少模板变量：${missing.join('、')}。` : '';
 }
 
 function uploadCollisionPolicyLabel(value: UploadCollisionPolicy) {
@@ -4342,9 +4478,33 @@ function nextUploadTypeSelection(current: string[], value: string, checked: bool
   return Array.from(types);
 }
 
-function UploadRouteProfile(props: { route: UploadProviderRoute; provider?: UploadProvider; onChange: (patch: Partial<UploadProviderRoute>) => void; onBrowseRemoteDirectory: (request: RemoteDirectoryPickerRequest) => void }) {
+function UploadRouteProfile(props: { route: UploadProviderRoute; provider?: UploadProvider; notificationTemplates: UploadNotificationTemplate[]; onChange: (patch: Partial<UploadProviderRoute>) => void; onBrowseRemoteDirectory: (request: RemoteDirectoryPickerRequest) => void }) {
   const needsAuthorization = props.provider?.type === '115cookie' && !props.provider.hasCookie;
   const browseDisabled = !props.provider || needsAuthorization;
+  const notificationTemplate = props.notificationTemplates.find((item) => item.id === props.route.notificationTemplateId);
+  const notificationVariables = props.route.notificationVariables ?? {};
+  const notificationError = uploadNotificationConfigError(props.route, props.notificationTemplates);
+
+  function selectNotificationTemplate(value: string) {
+    const notificationTemplateId = Number(value) || undefined;
+    const template = props.notificationTemplates.find((item) => item.id === notificationTemplateId);
+    props.onChange({
+      notificationTemplateId,
+      notificationVariables: variablesForNotificationTemplate(template, notificationVariables)
+    });
+  }
+
+  function updateNotificationVariable(previousName: string, name: string, value: string) {
+    const entries = Object.entries(notificationVariables).filter(([key]) => key !== previousName);
+    props.onChange({ notificationVariables: Object.fromEntries([...entries, [name, value]]) });
+  }
+
+  function addNotificationVariable() {
+    let index = Object.keys(notificationVariables).length + 1;
+    while (`variable_${index}` in notificationVariables) index++;
+    props.onChange({ notificationVariables: { ...notificationVariables, [`variable_${index}`]: '' } });
+  }
+
   return (
     <div className="upload-route-profile">
       <label>远端根目录<div className="path-input remote-root-input"><input aria-label="远端根目录" value={props.route.remoteRoot} placeholder="/Anime" readOnly required title={props.route.remoteRoot} /><button className="icon-text-button" type="button" aria-label="选择远端根目录" disabled={browseDisabled} title={needsAuthorization ? '请先授权 Provider' : '选择远端根目录'} onClick={() => props.provider && props.onBrowseRemoteDirectory({ provider: props.provider, value: props.route.remoteRoot, onSelect: (remoteRoot) => props.onChange({ remoteRoot }) })}><FolderOpen size={16} />选择</button></div><small>{needsAuthorization ? '请先授权 Provider，再选择已存在的远端目录。' : '只能从已存在的远端目录中选择；暂不支持单独映射本地子目录。'}</small></label><label>碰撞策略<select value={props.route.collisionPolicy} onChange={(event) => props.onChange({ collisionPolicy: event.target.value as UploadCollisionPolicy })}><option value="replace">同名内容不同则替换</option><option value="skip">同名内容不同则跳过</option><option value="fail">同名内容不同则失败</option></select></label>
@@ -4358,11 +4518,38 @@ function UploadRouteProfile(props: { route: UploadProviderRoute; provider?: Uplo
           <small>只上传所选类型；至少选择一项。</small>
         </fieldset>
       </details>
+      <details className="upload-content-details upload-notification-details">
+        <summary><span className="upload-detail-title"><Webhook size={15} aria-hidden="true" />上传完成通知</span><span>{notificationTemplate?.name ?? '不通知'}</span></summary>
+        <div className="upload-notification-config">
+          <label>通知模板<select value={props.route.notificationTemplateId ?? ''} onChange={(event) => selectNotificationTemplate(event.target.value)}>
+            <option value="">不发送通知</option>
+            {props.notificationTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+          </select></label>
+          {props.route.notificationTemplateId && <>
+            <div className="notification-variable-heading"><strong>模板变量</strong><button className="secondary icon-text-button" type="button" onClick={addNotificationVariable}><Plus size={15} />添加变量</button></div>
+            <div className="notification-variable-list">
+              <div className="notification-variable-row builtin">
+                <input aria-label="内置变量名" value="path" readOnly />
+                <input aria-label="内置变量说明" value="远端番剧目录（系统自动填入）" readOnly />
+                <span className="pill ok">内置</span>
+              </div>
+              {Object.entries(notificationVariables).map(([name, value]) => (
+                <div className="notification-variable-row" key={name}>
+                  <input aria-label="变量名" value={name} onChange={(event) => updateNotificationVariable(name, event.target.value, value)} placeholder="provider_id" />
+                  <input aria-label={`${name || '自定义'} 变量值`} value={value} onChange={(event) => updateNotificationVariable(name, name, event.target.value)} placeholder="此上传配置使用的值" />
+                  <button className="icon-button" type="button" title={`删除变量 ${name}`} aria-label={`删除变量 ${name}`} onClick={() => props.onChange({ notificationVariables: Object.fromEntries(Object.entries(notificationVariables).filter(([key]) => key !== name)) })}><Trash2 size={15} /></button>
+                </div>
+              ))}
+            </div>
+            {notificationError && <small className="upload-selection-warning">{notificationError}</small>}
+          </>}
+        </div>
+      </details>
     </div>
   );
 }
 
-function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; providers: UploadProvider[]; onChange: (configs: UploadProviderRoute[]) => void; onAddProvider: () => void; onAuthorizeProvider: (provider: UploadProvider) => void; onBrowseRemoteDirectory: (request: RemoteDirectoryPickerRequest) => void }) {
+function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; providers: UploadProvider[]; notificationTemplates: UploadNotificationTemplate[]; onChange: (configs: UploadProviderRoute[]) => void; onAddProvider: () => void; onAuthorizeProvider: (provider: UploadProvider) => void; onBrowseRemoteDirectory: (request: RemoteDirectoryPickerRequest) => void }) {
   function addConfig() {
     const provider = props.providers.find((item) => item.enabled) ?? props.providers[0];
     if (!provider) return;
@@ -4404,7 +4591,7 @@ function DirectoryUploadConfigsEditor(props: { configs: UploadProviderRoute[]; p
                   <button className="icon-button" type="button" title="删除上传配置" aria-label="删除上传配置" onClick={() => props.onChange(props.configs.filter((_, currentIndex) => currentIndex !== index))}><Trash2 size={16} /></button>
                 </div>
               </div>
-              <UploadRouteProfile route={config} provider={provider} onChange={(patch) => updateConfig(index, patch)} onBrowseRemoteDirectory={props.onBrowseRemoteDirectory} />
+              <UploadRouteProfile route={config} provider={provider} notificationTemplates={props.notificationTemplates} onChange={(patch) => updateConfig(index, patch)} onBrowseRemoteDirectory={props.onBrowseRemoteDirectory} />
               {needsAuthorization && <small className="upload-config-warning">该 Provider 尚未授权，启用后上传会失败。</small>}
             </section>
           );
@@ -4438,6 +4625,47 @@ function UploadProviderModal(props: { provider?: UploadProvider; providerTypes: 
           <label>自定义 User-Agent（可选）<input value={draft.userAgent} onChange={(event) => setDraft({ ...draft, userAgent: event.target.value })} placeholder="Mozilla/5.0" /></label>
           <Toggle label="启用此 Provider" checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} />
           <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={() => props.onClose(dirty)} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : (!editing && draft.type === '115cookie' ? '保存并授权' : '保存 Provider')}</button></div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function UploadNotificationTemplateModal(props: { template?: UploadNotificationTemplate; saving: boolean; onClose: (dirty: boolean) => void; onSubmit: (template: UploadNotificationTemplate) => void }) {
+  const initialDraftRef = useRef<UploadNotificationTemplate>(props.template ? { ...props.template } : newUploadNotificationTemplateDraft());
+  const [draft, setDraft] = useState<UploadNotificationTemplate>(() => ({ ...initialDraftRef.current }));
+  const dirty = JSON.stringify(draft) !== JSON.stringify(initialDraftRef.current);
+  let payloadValid = false;
+  try {
+    const parsed = JSON.parse(draft.payloadTemplate);
+    payloadValid = parsed != null && !Array.isArray(parsed) && typeof parsed === 'object';
+  } catch {
+    payloadValid = false;
+  }
+  let urlValid = false;
+  try {
+    const parsed = new URL(draft.url);
+    urlValid = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    urlValid = false;
+  }
+  const variables = ['path', ...notificationTemplateVariables(draft.payloadTemplate)];
+  const canSubmit = !props.saving && Boolean(draft.name.trim()) && urlValid && payloadValid;
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-card upload-notification-template-modal" data-protect-draft={dirty ? 'true' : undefined} role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="upload-notification-template-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <div><h2 id="upload-notification-template-title">{draft.id ? '编辑通知模板' : '添加通知模板'}</h2><small>HTTP POST · application/json</small></div>
+          <IconCloseButton onClick={() => props.onClose(dirty)} disabled={props.saving} />
+        </div>
+        <form className="config-form notification-template-form" onSubmit={(event) => { event.preventDefault(); if (canSubmit) props.onSubmit(draft); }}>
+          <label>模板名称<input autoFocus value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：媒体库刷新" required /></label>
+          <label>请求地址<input type="url" value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="https://example.com/api/notify" required /></label>
+          <label>JSON payload<textarea className="code-textarea" value={draft.payloadTemplate} onChange={(event) => setDraft({ ...draft, payloadTemplate: event.target.value })} rows={13} spellCheck={false} aria-invalid={!payloadValid} /></label>
+          <div className="notification-template-variables"><span>变量</span>{variables.map((name) => <code key={name}>{`{{${name}}}`}</code>)}</div>
+          {!payloadValid && <small className="upload-selection-warning">Payload 必须是有效的 JSON 对象。</small>}
+          <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={() => props.onClose(dirty)} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : '保存模板'}</button></div>
         </form>
       </section>
     </div>
@@ -5105,6 +5333,7 @@ function WatchDirModal(props: {
   processing: OutputProcessingConfig;
   uploadConfigs: UploadProviderRoute[];
   providers: UploadProvider[];
+  notificationTemplates: UploadNotificationTemplate[];
   onPathChange: (value: string) => void;
   onWatchEnabledChange: (value: boolean) => void;
   onUseGlobalProcessingChange: (value: boolean) => void;
@@ -5117,7 +5346,13 @@ function WatchDirModal(props: {
   onBrowsePath: () => void;
   onSubmit: () => void;
 }) {
-  const uploadConfigsValid = props.uploadConfigs.every((config) => config.providerId != null && config.providerId > 0 && config.remoteRoot.trim() && config.includeTypes.length > 0);
+  const uploadConfigsValid = props.uploadConfigs.every((config) =>
+    config.providerId != null
+    && config.providerId > 0
+    && config.remoteRoot.trim()
+    && config.includeTypes.length > 0
+    && !uploadNotificationConfigError(config, props.notificationTemplates)
+  );
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="modal-card watch-dir-modal" data-protect-draft={props.dirty ? 'true' : undefined} role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="watch-dir-modal-title" onClick={(event) => event.stopPropagation()}>
@@ -5145,8 +5380,8 @@ function WatchDirModal(props: {
               <Toggle label="接管剧集/季度图片" checked={props.processing.enableImageTakeover} onChange={(value) => props.onProcessingChange({ enableImageTakeover: value })} />
             </>
           )}
-          <DirectoryUploadConfigsEditor configs={props.uploadConfigs} providers={props.providers} onChange={props.onUploadConfigsChange} onAddProvider={props.onAddProvider} onAuthorizeProvider={props.onAuthorizeProvider} onBrowseRemoteDirectory={props.onBrowseRemoteDirectory} />
-          {!uploadConfigsValid && <small className="upload-selection-warning">每个上传配置必须选择 Provider、填写远端根目录，并至少选择一种上传内容。</small>}
+          <DirectoryUploadConfigsEditor configs={props.uploadConfigs} providers={props.providers} notificationTemplates={props.notificationTemplates} onChange={props.onUploadConfigsChange} onAddProvider={props.onAddProvider} onAuthorizeProvider={props.onAuthorizeProvider} onBrowseRemoteDirectory={props.onBrowseRemoteDirectory} />
+          {!uploadConfigsValid && <small className="upload-selection-warning">请补全上传配置，并检查通知模板所需变量。</small>}
         </fieldset>
         <p className="muted">保存后默认递归处理该目录。自动监听会在保存后立即热更新，无需重启服务。</p>
         <div className="inline-actions modal-actions">

@@ -101,15 +101,17 @@ type UploadProvider struct {
 // UploadProviderRoute is one upload step configured on a watch directory.
 // WatchDirID is always populated; nil is accepted only while decoding a draft.
 type UploadProviderRoute struct {
-	ID              int64    `json:"id"`
-	ProviderID      int64    `json:"providerId"`
-	WatchDirID      *int64   `json:"watchDirId"`
-	Enabled         bool     `json:"enabled"`
-	RemoteRoot      string   `json:"remoteRoot"`
-	CollisionPolicy string   `json:"collisionPolicy"`
-	IncludeTypes    []string `json:"includeTypes"`
-	CreatedAt       string   `json:"createdAt,omitempty"`
-	UpdatedAt       string   `json:"updatedAt,omitempty"`
+	ID                     int64             `json:"id"`
+	ProviderID             int64             `json:"providerId"`
+	WatchDirID             *int64            `json:"watchDirId"`
+	Enabled                bool              `json:"enabled"`
+	RemoteRoot             string            `json:"remoteRoot"`
+	CollisionPolicy        string            `json:"collisionPolicy"`
+	IncludeTypes           []string          `json:"includeTypes"`
+	NotificationTemplateID *int64            `json:"notificationTemplateId,omitempty"`
+	NotificationVariables  map[string]string `json:"notificationVariables,omitempty"`
+	CreatedAt              string            `json:"createdAt,omitempty"`
+	UpdatedAt              string            `json:"updatedAt,omitempty"`
 }
 
 type UploadBatch struct {
@@ -148,24 +150,26 @@ type UploadBatchFile struct {
 }
 
 type UploadBatchTarget struct {
-	ID              int64    `json:"id"`
-	BatchID         int64    `json:"batchId"`
-	ProviderID      int64    `json:"providerId"`
-	ProviderName    string   `json:"providerName"`
-	ProviderType    string   `json:"providerType"`
-	RemoteRoot      string   `json:"remoteRoot"`
-	UserAgent       string   `json:"userAgent"`
-	CollisionPolicy string   `json:"collisionPolicy"`
-	IncludeTypes    []string `json:"includeTypes"`
-	Retryable       bool     `json:"retryable"`
-	Status          string   `json:"status"`
-	Attempts        int      `json:"attempts"`
-	ErrorSummary    string   `json:"errorSummary"`
-	AvailableAt     string   `json:"availableAt"`
-	StartedAt       string   `json:"startedAt"`
-	FinishedAt      string   `json:"finishedAt"`
-	CreatedAt       string   `json:"createdAt"`
-	UpdatedAt       string   `json:"updatedAt"`
+	ID                     int64             `json:"id"`
+	BatchID                int64             `json:"batchId"`
+	ProviderID             int64             `json:"providerId"`
+	ProviderName           string            `json:"providerName"`
+	ProviderType           string            `json:"providerType"`
+	RemoteRoot             string            `json:"remoteRoot"`
+	UserAgent              string            `json:"userAgent"`
+	CollisionPolicy        string            `json:"collisionPolicy"`
+	IncludeTypes           []string          `json:"includeTypes"`
+	Retryable              bool              `json:"retryable"`
+	NotificationTemplateID *int64            `json:"notificationTemplateId,omitempty"`
+	NotificationVariables  map[string]string `json:"notificationVariables,omitempty"`
+	Status                 string            `json:"status"`
+	Attempts               int               `json:"attempts"`
+	ErrorSummary           string            `json:"errorSummary"`
+	AvailableAt            string            `json:"availableAt"`
+	StartedAt              string            `json:"startedAt"`
+	FinishedAt             string            `json:"finishedAt"`
+	CreatedAt              string            `json:"createdAt"`
+	UpdatedAt              string            `json:"updatedAt"`
 }
 
 type UploadTransfer struct {
@@ -394,7 +398,8 @@ func (s *Store) DeleteUploadProvider(ctx context.Context, id int64) error {
 
 func (s *Store) ListWatchDirUploadConfigs(ctx context.Context, watchDirID int64) ([]UploadProviderRoute, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types, created_at, updated_at
+SELECT id, provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types,
+       notification_template_id, notification_variables, created_at, updated_at
 FROM upload_provider_routes
 WHERE watch_dir_id = ?
 ORDER BY id
@@ -425,6 +430,9 @@ func ValidateUploadProviderRoutes(routes []UploadProviderRoute) error {
 		if len(normalizeStoredUploadTypes(route.IncludeTypes)) == 0 {
 			return fmt.Errorf("%w: at least one include type is required", ErrInvalidUploadConfig)
 		}
+		if _, err := encodeNotificationVariables(route.NotificationVariables); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidUploadConfig, err)
+		}
 	}
 	return nil
 }
@@ -450,10 +458,30 @@ func replaceWatchDirUploadConfigsTx(ctx context.Context, tx *sql.Tx, watchDirID 
 		if err != nil {
 			return err
 		}
+		encodedVariables, err := encodeNotificationVariables(route.NotificationVariables)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidUploadConfig, err)
+		}
+		if route.NotificationTemplateID != nil {
+			var payloadTemplate string
+			err := tx.QueryRowContext(ctx, `
+SELECT payload_template FROM upload_notification_templates WHERE id = ?
+`, *route.NotificationTemplateID).Scan(&payloadTemplate)
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrUploadNotificationTemplateNotFound
+			}
+			if err != nil {
+				return err
+			}
+			if err := validateNotificationPayloadVariables(payloadTemplate, route.NotificationVariables); err != nil {
+				return fmt.Errorf("%w: %v", ErrInvalidUploadConfig, err)
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO upload_provider_routes (provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-`, route.ProviderID, watchDirID, boolToInt(route.Enabled), route.RemoteRoot, route.CollisionPolicy, string(encodedTypes)); err != nil {
+INSERT INTO upload_provider_routes
+  (provider_id, watch_dir_id, enabled, remote_root, collision_policy, include_types, notification_template_id, notification_variables, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+`, route.ProviderID, watchDirID, boolToInt(route.Enabled), route.RemoteRoot, route.CollisionPolicy, string(encodedTypes), route.NotificationTemplateID, encodedVariables); err != nil {
 			return err
 		}
 	}
@@ -645,10 +673,18 @@ VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			if err != nil {
 				return nil, 0, err
 			}
+			encodedVariables, err := encodeNotificationVariables(configured.route.NotificationVariables)
+			if err != nil {
+				return nil, 0, err
+			}
 			if _, err := tx.ExecContext(ctx, `
-INSERT INTO upload_batch_targets (batch_id, provider_id, provider_name, provider_type, remote_root, user_agent, collision_policy, include_types, status, available_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, batchID, configured.provider.ID, configured.provider.Name, configured.provider.Type, configured.route.RemoteRoot, configured.provider.UserAgent, configured.route.CollisionPolicy, string(encodedTypes), UploadTargetWaiting, readyAt); err != nil {
+INSERT INTO upload_batch_targets
+  (batch_id, provider_id, provider_name, provider_type, remote_root, user_agent, collision_policy, include_types,
+   notification_template_id, notification_variables, status, available_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, batchID, configured.provider.ID, configured.provider.Name, configured.provider.Type, configured.route.RemoteRoot,
+				configured.provider.UserAgent, configured.route.CollisionPolicy, string(encodedTypes),
+				configured.route.NotificationTemplateID, encodedVariables, UploadTargetWaiting, readyAt); err != nil {
 				return nil, 0, err
 			}
 			created++
@@ -993,6 +1029,9 @@ WHERE id = ?
 	INSERT OR IGNORE INTO upload_events (batch_target_id, type, payload, status, available_at)
 	VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
 `, targetID, UploadEventTargetVerified, string(payload), UploadEventPending); err != nil {
+			return err
+		}
+		if err := enqueueUploadNotificationTx(ctx, tx, target); err != nil {
 			return err
 		}
 	}
@@ -1494,6 +1533,13 @@ WHERE status = ?
 `, UploadEventPending, UploadEventProcessing); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE upload_notifications
+SET status = ?, available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+WHERE status = ?
+`, UploadNotificationPending, UploadNotificationProcessing); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -1543,7 +1589,8 @@ FROM upload_batches b`
 
 const uploadBatchTargetSelect = `
 SELECT t.id, t.batch_id, t.provider_id, t.provider_name, t.provider_type, t.remote_root, t.user_agent, t.collision_policy, t.include_types,
-       t.retryable, t.status, t.attempts, t.error_summary, t.available_at, COALESCE(t.started_at, ''), COALESCE(t.finished_at, ''), t.created_at, t.updated_at
+       t.retryable, t.notification_template_id, t.notification_variables,
+       t.status, t.attempts, t.error_summary, t.available_at, COALESCE(t.started_at, ''), COALESCE(t.finished_at, ''), t.created_at, t.updated_at
 FROM upload_batch_targets t
 JOIN upload_batches b ON b.id = t.batch_id`
 
@@ -1576,9 +1623,14 @@ type uploadProviderRouteScanner interface {
 func scanUploadProviderRoute(scanner uploadProviderRouteScanner) (UploadProviderRoute, error) {
 	var item UploadProviderRoute
 	var watchDirID sql.NullInt64
+	var notificationTemplateID sql.NullInt64
 	var enabled int
 	var encodedTypes string
-	err := scanner.Scan(&item.ID, &item.ProviderID, &watchDirID, &enabled, &item.RemoteRoot, &item.CollisionPolicy, &encodedTypes, &item.CreatedAt, &item.UpdatedAt)
+	var encodedVariables string
+	err := scanner.Scan(
+		&item.ID, &item.ProviderID, &watchDirID, &enabled, &item.RemoteRoot, &item.CollisionPolicy, &encodedTypes,
+		&notificationTemplateID, &encodedVariables, &item.CreatedAt, &item.UpdatedAt,
+	)
 	if watchDirID.Valid {
 		item.WatchDirID = &watchDirID.Int64
 	}
@@ -1586,6 +1638,10 @@ func scanUploadProviderRoute(scanner uploadProviderRouteScanner) (UploadProvider
 	item.RemoteRoot = normalizeRemoteRoot(item.RemoteRoot)
 	item.CollisionPolicy = normalizeCollisionPolicy(item.CollisionPolicy)
 	item.IncludeTypes = decodeStoredUploadTypes(encodedTypes)
+	if notificationTemplateID.Valid {
+		item.NotificationTemplateID = &notificationTemplateID.Int64
+	}
+	item.NotificationVariables = decodeNotificationVariables(encodedVariables)
 	return item, err
 }
 
@@ -1634,10 +1690,21 @@ type uploadTargetScanner interface {
 func scanUploadBatchTarget(scanner uploadTargetScanner) (UploadBatchTarget, error) {
 	var item UploadBatchTarget
 	var encodedTypes string
+	var notificationTemplateID sql.NullInt64
+	var encodedVariables string
 	var retryable int
-	err := scanner.Scan(&item.ID, &item.BatchID, &item.ProviderID, &item.ProviderName, &item.ProviderType, &item.RemoteRoot, &item.UserAgent, &item.CollisionPolicy, &encodedTypes, &retryable, &item.Status, &item.Attempts, &item.ErrorSummary, &item.AvailableAt, &item.StartedAt, &item.FinishedAt, &item.CreatedAt, &item.UpdatedAt)
+	err := scanner.Scan(
+		&item.ID, &item.BatchID, &item.ProviderID, &item.ProviderName, &item.ProviderType, &item.RemoteRoot,
+		&item.UserAgent, &item.CollisionPolicy, &encodedTypes, &retryable, &notificationTemplateID, &encodedVariables,
+		&item.Status, &item.Attempts, &item.ErrorSummary, &item.AvailableAt, &item.StartedAt, &item.FinishedAt,
+		&item.CreatedAt, &item.UpdatedAt,
+	)
 	item.IncludeTypes = decodeStoredUploadTypes(encodedTypes)
 	item.Retryable = retryable == 1
+	if notificationTemplateID.Valid {
+		item.NotificationTemplateID = &notificationTemplateID.Int64
+	}
+	item.NotificationVariables = decodeNotificationVariables(encodedVariables)
 	return item, err
 }
 
@@ -1807,8 +1874,9 @@ func listEnabledWatchDirUploadTargetsTx(ctx context.Context, tx *sql.Tx, watchDi
 	rows, err := tx.QueryContext(ctx, `
 SELECT p.id, p.name, p.type, p.enabled, p.user_agent,
        EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = p.id AND s.secret_key = 'cookie' AND s.secret_value <> ''),
-       p.created_at, p.updated_at,
-       r.id, r.provider_id, r.watch_dir_id, r.enabled, r.remote_root, r.collision_policy, r.include_types, r.created_at, r.updated_at
+       p.auth_device, p.created_at, p.updated_at,
+       r.id, r.provider_id, r.watch_dir_id, r.enabled, r.remote_root, r.collision_policy, r.include_types,
+       r.notification_template_id, r.notification_variables, r.created_at, r.updated_at
 FROM upload_provider_routes r
 JOIN upload_providers p ON p.id = r.provider_id
 WHERE r.watch_dir_id = ? AND r.enabled = 1 AND p.enabled = 1
@@ -1824,13 +1892,16 @@ ORDER BY r.id
 		var providerEnabled int
 		var hasCookie int
 		var routeWatchDirID sql.NullInt64
+		var notificationTemplateID sql.NullInt64
 		var routeEnabled int
 		var encodedTypes string
+		var encodedVariables string
 		if err := rows.Scan(
 			&item.provider.ID, &item.provider.Name, &item.provider.Type, &providerEnabled, &item.provider.UserAgent,
-			&hasCookie, &item.provider.CreatedAt, &item.provider.UpdatedAt,
+			&hasCookie, &item.provider.AuthDevice, &item.provider.CreatedAt, &item.provider.UpdatedAt,
 			&item.route.ID, &item.route.ProviderID, &routeWatchDirID, &routeEnabled, &item.route.RemoteRoot,
-			&item.route.CollisionPolicy, &encodedTypes, &item.route.CreatedAt, &item.route.UpdatedAt,
+			&item.route.CollisionPolicy, &encodedTypes, &notificationTemplateID, &encodedVariables,
+			&item.route.CreatedAt, &item.route.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1843,6 +1914,10 @@ ORDER BY r.id
 		item.route.RemoteRoot = normalizeRemoteRoot(item.route.RemoteRoot)
 		item.route.CollisionPolicy = normalizeCollisionPolicy(item.route.CollisionPolicy)
 		item.route.IncludeTypes = decodeStoredUploadTypes(encodedTypes)
+		if notificationTemplateID.Valid {
+			item.route.NotificationTemplateID = &notificationTemplateID.Int64
+		}
+		item.route.NotificationVariables = decodeNotificationVariables(encodedVariables)
 		items = append(items, item)
 	}
 	return items, rows.Err()

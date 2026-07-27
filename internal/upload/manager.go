@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -116,6 +117,7 @@ type Manager struct {
 	cookie115Guards  map[int64]*cookie115RequestGuard
 	runtimeMu        sync.RWMutex
 	transferRuntime  map[int64]TransferRuntimeState
+	notificationHTTP *http.Client
 }
 
 func New(st *store.Store, logger *slog.Logger) *Manager {
@@ -133,15 +135,16 @@ func NewWithFactory(options Options, st *store.Store, logger *slog.Logger, facto
 func newManager(options Options, st *store.Store, logger *slog.Logger, factory ProviderFactory) *Manager {
 	options = normalizeOptions(options)
 	manager := &Manager{
-		options:         options,
-		store:           st,
-		logger:          logger,
-		active:          make(map[int64]context.CancelFunc),
-		authFlows:       make(map[string]*cookie115AuthFlow),
-		builders:        make(map[string]ProviderBuilder),
-		providers:       providerDescriptorMap(),
-		cookie115Guards: make(map[int64]*cookie115RequestGuard),
-		transferRuntime: make(map[int64]TransferRuntimeState),
+		options:          options,
+		store:            st,
+		logger:           logger,
+		active:           make(map[int64]context.CancelFunc),
+		authFlows:        make(map[string]*cookie115AuthFlow),
+		builders:         make(map[string]ProviderBuilder),
+		providers:        providerDescriptorMap(),
+		cookie115Guards:  make(map[int64]*cookie115RequestGuard),
+		transferRuntime:  make(map[int64]TransferRuntimeState),
+		notificationHTTP: &http.Client{Timeout: 10 * time.Second},
 	}
 	manager.registerBuiltInProviders()
 	if factory == nil {
@@ -368,6 +371,11 @@ func (m *Manager) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		m.sealer(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		m.notificationWorker(ctx)
 	}()
 	<-ctx.Done()
 	m.CancelRunningTargets()

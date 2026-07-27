@@ -4666,6 +4666,7 @@ function UploadNotificationTemplateModal(props: { template?: UploadNotificationT
     payloadValid = false;
   }
   let headersValid = false;
+  let headerBindings: Array<{ name: string; variables: string[] }> = [];
   try {
     const parsed = JSON.parse(draft.headersTemplate || '{}');
     const headerNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
@@ -4673,6 +4674,12 @@ function UploadNotificationTemplateModal(props: { template?: UploadNotificationT
       && !Array.isArray(parsed)
       && typeof parsed === 'object'
       && Object.entries(parsed).every(([name, value]) => headerNamePattern.test(name) && typeof value === 'string' && !/[\r\n]/.test(value));
+    if (headersValid) {
+      headerBindings = Object.entries(parsed as Record<string, string>).map(([name, value]) => ({
+        name,
+        variables: notificationTemplateVariables(value)
+      }));
+    }
   } catch {
     headersValid = false;
   }
@@ -4697,6 +4704,7 @@ function UploadNotificationTemplateModal(props: { template?: UploadNotificationT
           <label>模板名称<input autoFocus value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：媒体库刷新" required /></label>
           <label>请求地址<input type="url" value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="https://example.com/api/notify" required /></label>
           <label>Header JSON<textarea className="code-textarea" value={draft.headersTemplate} onChange={(event) => setDraft({ ...draft, headersTemplate: event.target.value })} rows={6} spellCheck={false} aria-invalid={!headersValid} placeholder={'{\n  "X-Webhook-Token": "{{webhook_token}}"\n}'} /></label>
+          {headersValid && headerBindings.length > 0 && <div className="notification-template-variables"><span>Header 绑定</span>{headerBindings.map(({ name, variables: headerVariables }) => <code key={name}>{headerVariables.length ? `${name}: ${headerVariables.map((variable) => `{{${variable}}}`).join(', ')}` : `${name}: 固定值`}</code>)}</div>}
           <label>JSON payload<textarea className="code-textarea" value={draft.payloadTemplate} onChange={(event) => setDraft({ ...draft, payloadTemplate: event.target.value })} rows={13} spellCheck={false} aria-invalid={!payloadValid} /></label>
           <div className="notification-template-variables"><span>变量</span>{variables.map((name) => <code key={name}>{`{{${name}}}`}</code>)}</div>
           {!headersValid && <small className="upload-selection-warning">Header 必须是有效的 JSON 对象，并且每个值都必须是字符串。</small>}

@@ -3,6 +3,7 @@ package upload
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -72,6 +73,15 @@ func (m *Manager) deliverNotification(ctx context.Context, notification store.Up
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	headers := map[string]string{}
+	if strings.TrimSpace(notification.Headers) != "" {
+		if err := json.Unmarshal([]byte(notification.Headers), &headers); err != nil {
+			return 0, fmt.Errorf("decode notification headers: %w", err)
+		}
+	}
+	for name, value := range headers {
+		request.Header.Set(name, value)
+	}
 	response, err := m.notificationHTTP.Do(request)
 	if err != nil {
 		return 0, err

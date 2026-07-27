@@ -226,6 +226,7 @@ func (s *Store) ensureUploadColumns(ctx context.Context) error {
 		update string
 	}{
 		{"upload_providers", "auth_device", `ALTER TABLE upload_providers ADD COLUMN auth_device TEXT NOT NULL DEFAULT ''`, ""},
+		{"upload_notification_templates", "headers_template", `ALTER TABLE upload_notification_templates ADD COLUMN headers_template TEXT NOT NULL DEFAULT '{}'`, ""},
 		{"upload_provider_routes", "notification_template_id", `ALTER TABLE upload_provider_routes ADD COLUMN notification_template_id INTEGER`, ""},
 		{"upload_provider_routes", "notification_variables", `ALTER TABLE upload_provider_routes ADD COLUMN notification_variables TEXT NOT NULL DEFAULT '{}'`, ""},
 		{"upload_batches", "upload_route_id", `ALTER TABLE upload_batches ADD COLUMN upload_route_id INTEGER`, ""},
@@ -242,6 +243,7 @@ func (s *Store) ensureUploadColumns(ctx context.Context) error {
 		{"upload_events", "lease_until", `ALTER TABLE upload_events ADD COLUMN lease_until TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_events", "error_summary", `ALTER TABLE upload_events ADD COLUMN error_summary TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_events", "updated_at", `ALTER TABLE upload_events ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`, `UPDATE upload_events SET updated_at = created_at WHERE updated_at = ''`},
+		{"upload_notifications", "headers", `ALTER TABLE upload_notifications ADD COLUMN headers TEXT NOT NULL DEFAULT '{}'`, ""},
 	}
 	for _, column := range columns {
 		exists, err := s.hasColumn(ctx, column.table, column.name)
@@ -659,6 +661,7 @@ CREATE TABLE IF NOT EXISTS upload_notification_templates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
   url TEXT NOT NULL,
+  headers_template TEXT NOT NULL DEFAULT '{}',
   payload_template TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -814,6 +817,7 @@ CREATE TABLE IF NOT EXISTS upload_notifications (
   template_id INTEGER NOT NULL,
   template_name TEXT NOT NULL,
   url TEXT NOT NULL,
+  headers TEXT NOT NULL DEFAULT '{}',
   payload TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0,

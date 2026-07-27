@@ -16,6 +16,10 @@ func TestUploadCompletionNotificationUsesRemoteSeriesDirectoryAndRouteVariables(
 	template, err := st.CreateUploadNotificationTemplate(ctx, UploadNotificationTemplate{
 		Name: "Media library refresh",
 		URL:  "https://example.test/notify",
+		HeadersTemplate: `{
+			"X-Webhook-Token": "{{webhook_token}}",
+			"X-Notification-Mode": "fixed"
+		}`,
 		PayloadTemplate: `{
 			"event": "change",
 			"source_path": "{{path}}",
@@ -44,8 +48,9 @@ func TestUploadCompletionNotificationUsesRemoteSeriesDirectoryAndRouteVariables(
 		IncludeTypes:           []string{"video"},
 		NotificationTemplateID: &template.ID,
 		NotificationVariables: map[string]string{
-			"provider_id": "provider-a",
-			"library_id":  "library-b",
+			"provider_id":   "provider-a",
+			"library_id":    "library-b",
+			"webhook_token": "secret-token",
 		},
 	}})
 	seriesPath := filepath.Join(root, "示例番剧")
@@ -107,6 +112,13 @@ func TestUploadCompletionNotificationUsesRemoteSeriesDirectoryAndRouteVariables(
 		payload["library_id"] != "library-b" || payload["is_dir"] != true {
 		t.Fatalf("unexpected notification payload: %#v", payload)
 	}
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(notification.Headers), &headers); err != nil {
+		t.Fatal(err)
+	}
+	if headers["X-Webhook-Token"] != "secret-token" || headers["X-Notification-Mode"] != "fixed" {
+		t.Fatalf("unexpected notification headers: %#v", headers)
+	}
 }
 
 func TestUploadNotificationTemplateRejectsMissingRouteVariableAndDeleteWhileInUse(t *testing.T) {
@@ -116,6 +128,7 @@ func TestUploadNotificationTemplateRejectsMissingRouteVariableAndDeleteWhileInUs
 	template, err := st.CreateUploadNotificationTemplate(ctx, UploadNotificationTemplate{
 		Name:            "Needs provider",
 		URL:             "https://example.test/notify",
+		HeadersTemplate: `{"X-Webhook-Token":"{{webhook_token}}"}`,
 		PayloadTemplate: `{"source_path":"{{path}}","provider_id":"{{provider_id}}"}`,
 	})
 	if err != nil {
@@ -150,7 +163,7 @@ func TestUploadNotificationTemplateRejectsMissingRouteVariableAndDeleteWhileInUs
 			CollisionPolicy:        "fail",
 			IncludeTypes:           []string{"video"},
 			NotificationTemplateID: &template.ID,
-			NotificationVariables:  map[string]string{"provider_id": "configured"},
+			NotificationVariables:  map[string]string{"provider_id": "configured", "webhook_token": "secret"},
 		}},
 	})
 	if err != nil {
@@ -161,5 +174,76 @@ func TestUploadNotificationTemplateRejectsMissingRouteVariableAndDeleteWhileInUs
 	}
 	if err := st.DeleteUploadNotificationTemplate(ctx, template.ID); err != ErrUploadNotificationTemplateInUse {
 		t.Fatalf("delete in-use template error=%v", err)
+	}
+}
+
+func TestUploadNotificationTemplateRejectsInvalidHeaders(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	defer st.Close()
+	for _, headers := range []string{
+		`{"X-Webhook-Token":123}`,
+		`{"Invalid Header":"token"}`,
+		"{\"X-Webhook-Token\":\"line1\\nline2\"}",
+		`null`,
+	} {
+		_, err := st.CreateUploadNotificationTemplate(ctx, UploadNotificationTemplate{
+			Name:            "Invalid headers",
+			URL:             "https://example.test/notify",
+			HeadersTemplate: headers,
+			PayloadTemplate: `{}`,
+		})
+		if err == nil {
+			t.Fatalf("invalid headers were accepted: %s", headers)
+		}
+	}
+}
+
+func TestMigrateAddsUploadNotificationHeaderColumns(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "legacy-notifications.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.db.ExecContext(ctx, `
+CREATE TABLE upload_notification_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  url TEXT NOT NULL,
+  payload_template TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE upload_notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_target_id INTEGER NOT NULL UNIQUE,
+  template_id INTEGER NOT NULL,
+  template_name TEXT NOT NULL,
+  url TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  response_status INTEGER NOT NULL DEFAULT 0,
+  error_summary TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  delivered_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for table, column := range map[string]string{
+		"upload_notification_templates": "headers_template",
+		"upload_notifications":          "headers",
+	} {
+		exists, err := st.hasColumn(ctx, table, column)
+		if err != nil || !exists {
+			t.Fatalf("%s.%s exists=%v err=%v", table, column, exists, err)
+		}
 	}
 }

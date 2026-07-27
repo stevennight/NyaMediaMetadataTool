@@ -26,7 +26,7 @@ func TestUploadNotificationTemplateCRUDAPI(t *testing.T) {
 	handler := NewServer(config.Default(), filepath.Join(t.TempDir(), "config.yaml"), st, nil, nil, slog.Default())
 
 	create := httptest.NewRequest(http.MethodPost, "/api/upload/notification-templates", bytes.NewBufferString(
-		`{"name":"Refresh","url":"https://example.test/notify","payloadTemplate":"{\"source_path\":\"{{path}}\"}"}`,
+		`{"name":"Refresh","url":"https://example.test/notify","headersTemplate":"{\"X-Webhook-Token\":\"{{webhook_token}}\"}","payloadTemplate":"{\"source_path\":\"{{path}}\"}"}`,
 	))
 	create.Header.Set("Content-Type", "application/json")
 	createResponse := httptest.NewRecorder()
@@ -38,7 +38,7 @@ func TestUploadNotificationTemplateCRUDAPI(t *testing.T) {
 	if err := json.Unmarshal(createResponse.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID <= 0 || created.Name != "Refresh" {
+	if created.ID <= 0 || created.Name != "Refresh" || created.HeadersTemplate != "{\n  \"X-Webhook-Token\": \"{{webhook_token}}\"\n}" {
 		t.Fatalf("unexpected created template: %#v", created)
 	}
 

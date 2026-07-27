@@ -463,17 +463,17 @@ func replaceWatchDirUploadConfigsTx(ctx context.Context, tx *sql.Tx, watchDirID 
 			return fmt.Errorf("%w: %v", ErrInvalidUploadConfig, err)
 		}
 		if route.NotificationTemplateID != nil {
-			var payloadTemplate string
+			var headersTemplate, payloadTemplate string
 			err := tx.QueryRowContext(ctx, `
-SELECT payload_template FROM upload_notification_templates WHERE id = ?
-`, *route.NotificationTemplateID).Scan(&payloadTemplate)
+SELECT headers_template, payload_template FROM upload_notification_templates WHERE id = ?
+`, *route.NotificationTemplateID).Scan(&headersTemplate, &payloadTemplate)
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrUploadNotificationTemplateNotFound
 			}
 			if err != nil {
 				return err
 			}
-			if err := validateNotificationPayloadVariables(payloadTemplate, route.NotificationVariables); err != nil {
+			if err := validateNotificationTemplateVariables(headersTemplate, payloadTemplate, route.NotificationVariables); err != nil {
 				return fmt.Errorf("%w: %v", ErrInvalidUploadConfig, err)
 			}
 		}

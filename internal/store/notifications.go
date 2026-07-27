@@ -34,6 +34,7 @@ type UploadNotificationTemplate struct {
 	ID              int64  `json:"id"`
 	Name            string `json:"name"`
 	URL             string `json:"url"`
+	HeadersTemplate string `json:"headersTemplate"`
 	PayloadTemplate string `json:"payloadTemplate"`
 	CreatedAt       string `json:"createdAt"`
 	UpdatedAt       string `json:"updatedAt"`
@@ -45,6 +46,7 @@ type UploadNotification struct {
 	TemplateID     int64  `json:"templateId"`
 	TemplateName   string `json:"templateName"`
 	URL            string `json:"url"`
+	Headers        string `json:"headers"`
 	Payload        string `json:"payload"`
 	Status         string `json:"status"`
 	Attempts       int    `json:"attempts"`
@@ -58,7 +60,7 @@ type UploadNotification struct {
 
 func (s *Store) ListUploadNotificationTemplates(ctx context.Context) ([]UploadNotificationTemplate, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, name, url, payload_template, created_at, updated_at
+SELECT id, name, url, headers_template, payload_template, created_at, updated_at
 FROM upload_notification_templates
 ORDER BY name, id
 `)
@@ -79,7 +81,7 @@ ORDER BY name, id
 
 func (s *Store) GetUploadNotificationTemplate(ctx context.Context, id int64) (UploadNotificationTemplate, error) {
 	item, err := scanUploadNotificationTemplate(s.db.QueryRowContext(ctx, `
-SELECT id, name, url, payload_template, created_at, updated_at
+SELECT id, name, url, headers_template, payload_template, created_at, updated_at
 FROM upload_notification_templates
 WHERE id = ?
 `, id))
@@ -94,9 +96,9 @@ func (s *Store) CreateUploadNotificationTemplate(ctx context.Context, item Uploa
 		return UploadNotificationTemplate{}, err
 	}
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO upload_notification_templates (name, url, payload_template, updated_at)
-VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-`, strings.TrimSpace(item.Name), strings.TrimSpace(item.URL), normalizeJSON(item.PayloadTemplate))
+INSERT INTO upload_notification_templates (name, url, headers_template, payload_template, updated_at)
+VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+`, strings.TrimSpace(item.Name), strings.TrimSpace(item.URL), normalizeHeadersJSON(item.HeadersTemplate), normalizeJSON(item.PayloadTemplate))
 	if err != nil {
 		return UploadNotificationTemplate{}, err
 	}
@@ -119,14 +121,14 @@ func (s *Store) UpdateUploadNotificationTemplate(ctx context.Context, item Uploa
 		return UploadNotificationTemplate{}, err
 	}
 	defer tx.Rollback()
-	if err := validateTemplateRoutesTx(ctx, tx, item.ID, item.PayloadTemplate); err != nil {
+	if err := validateTemplateRoutesTx(ctx, tx, item.ID, item.HeadersTemplate, item.PayloadTemplate); err != nil {
 		return UploadNotificationTemplate{}, err
 	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE upload_notification_templates
-SET name = ?, url = ?, payload_template = ?, updated_at = CURRENT_TIMESTAMP
+SET name = ?, url = ?, headers_template = ?, payload_template = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
-`, strings.TrimSpace(item.Name), strings.TrimSpace(item.URL), normalizeJSON(item.PayloadTemplate), item.ID)
+`, strings.TrimSpace(item.Name), strings.TrimSpace(item.URL), normalizeHeadersJSON(item.HeadersTemplate), normalizeJSON(item.PayloadTemplate), item.ID)
 	if err != nil {
 		return UploadNotificationTemplate{}, err
 	}
@@ -189,6 +191,36 @@ func validateUploadNotificationTemplate(item UploadNotificationTemplate) error {
 	if _, ok := payload.(map[string]any); !ok {
 		return errors.New("notification payload must be a JSON object")
 	}
+	if err := validateNotificationHeadersTemplate(item.HeadersTemplate); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateNotificationHeadersTemplate(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	var headers map[string]any
+	if err := json.Unmarshal([]byte(value), &headers); err != nil {
+		return fmt.Errorf("notification headers must be a valid JSON object: %w", err)
+	}
+	if headers == nil {
+		return errors.New("notification headers must be a JSON object")
+	}
+	headerNamePattern := regexp.MustCompile("^[!#$%&'*+\\-.^_`|~0-9A-Za-z]+$")
+	for name, value := range headers {
+		if !headerNamePattern.MatchString(name) {
+			return fmt.Errorf("invalid notification header name %q", name)
+		}
+		text, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("notification header %q must have a string value", name)
+		}
+		if strings.ContainsAny(text, "\r\n") {
+			return fmt.Errorf("notification header %q contains a line break", name)
+		}
+	}
 	return nil
 }
 
@@ -202,6 +234,13 @@ func normalizeJSON(value string) string {
 		return strings.TrimSpace(value)
 	}
 	return string(encoded)
+}
+
+func normalizeHeadersJSON(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "{}"
+	}
+	return normalizeJSON(value)
 }
 
 func encodeNotificationVariables(variables map[string]string) (string, error) {
@@ -231,16 +270,18 @@ func decodeNotificationVariables(value string) map[string]string {
 	return result
 }
 
-func validateNotificationPayloadVariables(payloadTemplate string, variables map[string]string) error {
+func validateNotificationTemplateVariables(headersTemplate string, payloadTemplate string, variables map[string]string) error {
 	available := make(map[string]struct{}, len(variables)+1)
 	available["path"] = struct{}{}
 	for key := range variables {
 		available[key] = struct{}{}
 	}
 	missing := make(map[string]struct{})
-	for _, match := range notificationVariablePattern.FindAllStringSubmatch(payloadTemplate, -1) {
-		if _, ok := available[match[1]]; !ok {
-			missing[match[1]] = struct{}{}
+	for _, template := range []string{headersTemplate, payloadTemplate} {
+		for _, match := range notificationVariablePattern.FindAllStringSubmatch(template, -1) {
+			if _, ok := available[match[1]]; !ok {
+				missing[match[1]] = struct{}{}
+			}
 		}
 	}
 	if len(missing) == 0 {
@@ -254,7 +295,7 @@ func validateNotificationPayloadVariables(payloadTemplate string, variables map[
 	return fmt.Errorf("notification variables are missing: %s", strings.Join(names, ", "))
 }
 
-func validateTemplateRoutesTx(ctx context.Context, tx *sql.Tx, templateID int64, payloadTemplate string) error {
+func validateTemplateRoutesTx(ctx context.Context, tx *sql.Tx, templateID int64, headersTemplate string, payloadTemplate string) error {
 	rows, err := tx.QueryContext(ctx, `
 SELECT notification_variables
 FROM upload_provider_routes
@@ -269,19 +310,16 @@ WHERE notification_template_id = ?
 		if err := rows.Scan(&encoded); err != nil {
 			return err
 		}
-		if err := validateNotificationPayloadVariables(payloadTemplate, decodeNotificationVariables(encoded)); err != nil {
+		if err := validateNotificationTemplateVariables(headersTemplate, payloadTemplate, decodeNotificationVariables(encoded)); err != nil {
 			return err
 		}
 	}
 	return rows.Err()
 }
 
-func renderNotificationPayload(payloadTemplate string, variables map[string]string) (string, error) {
-	if err := validateNotificationPayloadVariables(payloadTemplate, variables); err != nil {
-		return "", err
-	}
-	var payload any
-	if err := json.Unmarshal([]byte(payloadTemplate), &payload); err != nil {
+func renderNotificationJSON(template string, variables map[string]string) (string, error) {
+	var value any
+	if err := json.Unmarshal([]byte(template), &value); err != nil {
 		return "", err
 	}
 	var replace func(any) any
@@ -306,8 +344,23 @@ func renderNotificationPayload(payloadTemplate string, variables map[string]stri
 			return typed
 		}
 	}
-	encoded, err := json.Marshal(replace(payload))
+	encoded, err := json.Marshal(replace(value))
 	return string(encoded), err
+}
+
+func renderNotificationTemplates(headersTemplate string, payloadTemplate string, variables map[string]string) (string, string, error) {
+	if err := validateNotificationTemplateVariables(headersTemplate, payloadTemplate, variables); err != nil {
+		return "", "", err
+	}
+	headers, err := renderNotificationJSON(normalizeHeadersJSON(headersTemplate), variables)
+	if err != nil {
+		return "", "", err
+	}
+	payload, err := renderNotificationJSON(payloadTemplate, variables)
+	if err != nil {
+		return "", "", err
+	}
+	return headers, payload, nil
 }
 
 func enqueueUploadNotificationTx(ctx context.Context, tx *sql.Tx, target UploadBatchTarget) error {
@@ -315,7 +368,7 @@ func enqueueUploadNotificationTx(ctx context.Context, tx *sql.Tx, target UploadB
 		return nil
 	}
 	template, err := scanUploadNotificationTemplate(tx.QueryRowContext(ctx, `
-SELECT id, name, url, payload_template, created_at, updated_at
+SELECT id, name, url, headers_template, payload_template, created_at, updated_at
 FROM upload_notification_templates
 WHERE id = ?
 `, *target.NotificationTemplateID))
@@ -334,19 +387,20 @@ WHERE id = ?
 		variables[key] = value
 	}
 	variables["path"] = remoteSeriesPath
-	payload, renderErr := renderNotificationPayload(template.PayloadTemplate, variables)
+	headers, payload, renderErr := renderNotificationTemplates(template.HeadersTemplate, template.PayloadTemplate, variables)
 	status := UploadNotificationPending
 	errorSummary := ""
 	if renderErr != nil {
 		status = UploadNotificationFailed
 		errorSummary = renderErr.Error()
+		headers = normalizeHeadersJSON(template.HeadersTemplate)
 		payload = template.PayloadTemplate
 	}
 	_, err = tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO upload_notifications
-  (batch_target_id, template_id, template_name, url, payload, status, available_at, error_summary, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
-`, target.ID, template.ID, template.Name, template.URL, payload, status, errorSummary)
+  (batch_target_id, template_id, template_name, url, headers, payload, status, available_at, error_summary, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
+`, target.ID, template.ID, template.Name, template.URL, headers, payload, status, errorSummary)
 	return err
 }
 
@@ -447,7 +501,7 @@ WHERE status = ?
 }
 
 const uploadNotificationSelect = `
-SELECT id, batch_target_id, template_id, template_name, url, payload, status, attempts,
+SELECT id, batch_target_id, template_id, template_name, url, headers, payload, status, attempts,
        available_at, response_status, error_summary, created_at, COALESCE(delivered_at, ''), updated_at
 FROM upload_notifications
 `
@@ -458,7 +512,7 @@ type notificationTemplateScanner interface {
 
 func scanUploadNotificationTemplate(scanner notificationTemplateScanner) (UploadNotificationTemplate, error) {
 	var item UploadNotificationTemplate
-	err := scanner.Scan(&item.ID, &item.Name, &item.URL, &item.PayloadTemplate, &item.CreatedAt, &item.UpdatedAt)
+	err := scanner.Scan(&item.ID, &item.Name, &item.URL, &item.HeadersTemplate, &item.PayloadTemplate, &item.CreatedAt, &item.UpdatedAt)
 	return item, err
 }
 
@@ -469,7 +523,7 @@ type notificationScanner interface {
 func scanUploadNotification(scanner notificationScanner) (UploadNotification, error) {
 	var item UploadNotification
 	err := scanner.Scan(
-		&item.ID, &item.BatchTargetID, &item.TemplateID, &item.TemplateName, &item.URL, &item.Payload,
+		&item.ID, &item.BatchTargetID, &item.TemplateID, &item.TemplateName, &item.URL, &item.Headers, &item.Payload,
 		&item.Status, &item.Attempts, &item.AvailableAt, &item.ResponseStatus, &item.ErrorSummary,
 		&item.CreatedAt, &item.DeliveredAt, &item.UpdatedAt,
 	)

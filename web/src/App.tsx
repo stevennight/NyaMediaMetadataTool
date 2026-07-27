@@ -220,6 +220,7 @@ type UploadNotificationTemplate = {
   id: number;
   name: string;
   url: string;
+  headersTemplate: string;
   payloadTemplate: string;
   createdAt: string;
   updatedAt: string;
@@ -4232,7 +4233,7 @@ export function App() {
                 <thead><tr><th>名称</th><th>请求地址</th><th>引用变量</th><th>目录配置</th><th>操作</th></tr></thead>
                 <tbody>
                   {uploadNotificationTemplates.length ? uploadNotificationTemplates.map((template) => {
-                    const variables = notificationTemplateVariables(template.payloadTemplate);
+                    const variables = notificationTemplateVariables(template.headersTemplate, template.payloadTemplate);
                     const routeCount = watchDirs.reduce((count, dir) => count + (dir.uploadConfigs ?? []).filter((route) => route.notificationTemplateId === template.id).length, 0);
                     return (
                       <tr key={template.id}>
@@ -4366,6 +4367,9 @@ function newUploadNotificationTemplateDraft(): UploadNotificationTemplate {
     id: 0,
     name: '',
     url: '',
+    headersTemplate: `{
+  "X-Webhook-Token": "{{webhook_token}}"
+}`,
     payloadTemplate: `{
   "event": "change",
   "source_path": "{{path}}",
@@ -4387,17 +4391,19 @@ function newDirectoryUploadConfig(providerId: number): UploadProviderRoute {
   };
 }
 
-function notificationTemplateVariables(payloadTemplate: string) {
+function notificationTemplateVariables(...templates: string[]) {
   const names = new Set<string>();
-  for (const match of payloadTemplate.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)) {
-    if (match[1] !== 'path') names.add(match[1]);
+  for (const template of templates) {
+    for (const match of template.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)) {
+      if (match[1] !== 'path') names.add(match[1]);
+    }
   }
   return Array.from(names);
 }
 
 function variablesForNotificationTemplate(template: UploadNotificationTemplate | undefined, current: Record<string, string> = {}) {
   if (!template) return {};
-  return Object.fromEntries(notificationTemplateVariables(template.payloadTemplate).map((name) => [name, current[name] ?? '']));
+  return Object.fromEntries(notificationTemplateVariables(template.headersTemplate, template.payloadTemplate).map((name) => [name, current[name] ?? '']));
 }
 
 function uploadNotificationConfigError(route: UploadProviderRoute, templates: UploadNotificationTemplate[]) {
@@ -4407,7 +4413,7 @@ function uploadNotificationConfigError(route: UploadProviderRoute, templates: Up
   const variables = route.notificationVariables ?? {};
   const invalid = Object.keys(variables).find((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name === 'path');
   if (invalid) return `变量名“${invalid}”无效。`;
-  const missing = notificationTemplateVariables(template.payloadTemplate).filter((name) => !(name in variables));
+  const missing = notificationTemplateVariables(template.headersTemplate, template.payloadTemplate).filter((name) => !(name in variables));
   return missing.length ? `缺少模板变量：${missing.join('、')}。` : '';
 }
 
@@ -4642,6 +4648,17 @@ function UploadNotificationTemplateModal(props: { template?: UploadNotificationT
   } catch {
     payloadValid = false;
   }
+  let headersValid = false;
+  try {
+    const parsed = JSON.parse(draft.headersTemplate || '{}');
+    const headerNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+    headersValid = parsed != null
+      && !Array.isArray(parsed)
+      && typeof parsed === 'object'
+      && Object.entries(parsed).every(([name, value]) => headerNamePattern.test(name) && typeof value === 'string' && !/[\r\n]/.test(value));
+  } catch {
+    headersValid = false;
+  }
   let urlValid = false;
   try {
     const parsed = new URL(draft.url);
@@ -4649,8 +4666,8 @@ function UploadNotificationTemplateModal(props: { template?: UploadNotificationT
   } catch {
     urlValid = false;
   }
-  const variables = ['path', ...notificationTemplateVariables(draft.payloadTemplate)];
-  const canSubmit = !props.saving && Boolean(draft.name.trim()) && urlValid && payloadValid;
+  const variables = ['path', ...notificationTemplateVariables(draft.headersTemplate, draft.payloadTemplate)];
+  const canSubmit = !props.saving && Boolean(draft.name.trim()) && urlValid && headersValid && payloadValid;
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -4662,8 +4679,10 @@ function UploadNotificationTemplateModal(props: { template?: UploadNotificationT
         <form className="config-form notification-template-form" onSubmit={(event) => { event.preventDefault(); if (canSubmit) props.onSubmit(draft); }}>
           <label>模板名称<input autoFocus value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：媒体库刷新" required /></label>
           <label>请求地址<input type="url" value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="https://example.com/api/notify" required /></label>
+          <label>Header JSON<textarea className="code-textarea" value={draft.headersTemplate} onChange={(event) => setDraft({ ...draft, headersTemplate: event.target.value })} rows={6} spellCheck={false} aria-invalid={!headersValid} placeholder={'{\n  "X-Webhook-Token": "{{webhook_token}}"\n}'} /></label>
           <label>JSON payload<textarea className="code-textarea" value={draft.payloadTemplate} onChange={(event) => setDraft({ ...draft, payloadTemplate: event.target.value })} rows={13} spellCheck={false} aria-invalid={!payloadValid} /></label>
           <div className="notification-template-variables"><span>变量</span>{variables.map((name) => <code key={name}>{`{{${name}}}`}</code>)}</div>
+          {!headersValid && <small className="upload-selection-warning">Header 必须是有效的 JSON 对象，并且每个值都必须是字符串。</small>}
           {!payloadValid && <small className="upload-selection-warning">Payload 必须是有效的 JSON 对象。</small>}
           <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={() => props.onClose(dirty)} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : '保存模板'}</button></div>
         </form>

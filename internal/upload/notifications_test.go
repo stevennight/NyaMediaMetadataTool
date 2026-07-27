@@ -13,10 +13,12 @@ import (
 )
 
 func TestDeliverUploadNotificationPostsJSON(t *testing.T) {
-	var method, contentType, payload string
+	var method, contentType, token, fixedHeader, payload string
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method = r.Method
 		contentType = r.Header.Get("Content-Type")
+		token = r.Header.Get("X-Webhook-Token")
+		fixedHeader = r.Header.Get("X-Notification-Mode")
 		body, _ := io.ReadAll(r.Body)
 		payload = string(body)
 		w.WriteHeader(http.StatusAccepted)
@@ -27,14 +29,16 @@ func TestDeliverUploadNotificationPostsJSON(t *testing.T) {
 	manager.notificationHTTP = endpoint.Client()
 	status, err := manager.deliverNotification(context.Background(), store.UploadNotification{
 		URL:     endpoint.URL,
+		Headers: `{"X-Webhook-Token":"secret-token","X-Notification-Mode":"fixed"}`,
 		Payload: `{"source_path":"/影视/番剧/示例番剧"}`,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if status != http.StatusAccepted || method != http.MethodPost || contentType != "application/json" ||
+		token != "secret-token" || fixedHeader != "fixed" ||
 		!strings.Contains(payload, "source_path") {
-		t.Fatalf("status=%d method=%s contentType=%s payload=%s", status, method, contentType, payload)
+		t.Fatalf("status=%d method=%s contentType=%s token=%s fixed=%s payload=%s", status, method, contentType, token, fixedHeader, payload)
 	}
 }
 

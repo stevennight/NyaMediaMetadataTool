@@ -480,7 +480,7 @@ func TestProcessTargetContinuesAfterOneTransferFails(t *testing.T) {
 	}
 }
 
-func TestProcessTargetOnlyVerifiesUncertainCommitOnAutomaticRetry(t *testing.T) {
+func TestProcessTargetVerifiesThenReplaysUncertainCommitOnFinalAutomaticRetry(t *testing.T) {
 	ctx := context.Background()
 	st := openUploadTestStore(t)
 	defer st.Close()
@@ -489,13 +489,20 @@ func TestProcessTargetOnlyVerifiesUncertainCommitOnAutomaticRetry(t *testing.T) 
 	if err := os.MkdirAll(showPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	localPath := filepath.Join(showPath, "episode.mkv")
-	if err := os.WriteFile(localPath, []byte("video"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(localPath)
-	if err != nil {
-		t.Fatal(err)
+	var candidates []store.UploadCandidate
+	for _, name := range []string{"episode-one.mkv", "episode-two.mkv"} {
+		localPath := filepath.Join(showPath, name)
+		if err := os.WriteFile(localPath, []byte("video"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(localPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, store.UploadCandidate{
+			LocalPath: localPath, RelativePath: filepath.ToSlash(filepath.Join("Show", name)),
+			FileType: "video", Size: info.Size(), ModifiedAt: info.ModTime(),
+		})
 	}
 	providerRecord, err := st.CreateUploadProvider(ctx, store.UploadProvider{Name: "Archive", Type: store.UploadProviderType115Cookie, Enabled: true})
 	if err != nil {
@@ -513,9 +520,7 @@ func TestProcessTargetOnlyVerifiesUncertainCommitOnAutomaticRetry(t *testing.T) 
 	}
 	batch, created, err := st.CollectUploadBatch(ctx, store.UploadCollectionInput{
 		WatchDirID: &dir.ID, SeriesKey: "show", SeriesPath: showPath, QuietPeriod: time.Millisecond,
-		Files: []store.UploadCandidate{{
-			LocalPath: localPath, RelativePath: "Show/episode.mkv", FileType: "video", Size: info.Size(), ModifiedAt: info.ModTime(),
-		}},
+		Files: candidates,
 	})
 	if err != nil || !created {
 		t.Fatalf("collect batch: batch=%#v created=%v err=%v", batch, created, err)
@@ -543,16 +548,21 @@ func TestProcessTargetOnlyVerifiesUncertainCommitOnAutomaticRetry(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := failedDetail.Transfers[0]; got.Outcome != store.UploadOutcomeCreated || got.LocalSHA1 != "TEST-SHA1" {
-		t.Fatalf("uncertain upload intent was not persisted: %#v", got)
+	for _, transfer := range failedDetail.Transfers {
+		if transfer.Outcome != store.UploadOutcomeCreated || transfer.LocalSHA1 != "TEST-SHA1" {
+			t.Fatalf("uncertain upload intent was not persisted: %#v", transfer)
+		}
 	}
 	if err := st.RescheduleUploadTarget(ctx, target.ID, firstErr.Error(), time.Now().Add(-time.Second)); err != nil {
 		t.Fatal(err)
 	}
 
 	verifyCalls := 0
-	fake.verifyFile = func(string, int64) (RemoteFile, bool, error) {
+	fake.verifyFile = func(remotePath string, size int64) (RemoteFile, bool, error) {
 		verifyCalls++
+		if strings.HasSuffix(remotePath, "episode-one.mkv") {
+			return RemoteFile{ID: "remote-episode-one", Size: size}, true, nil
+		}
 		return RemoteFile{}, false, nil
 	}
 	retryTarget, err := st.ClaimNextUploadTarget(ctx)
@@ -563,34 +573,35 @@ func TestProcessTargetOnlyVerifiesUncertainCommitOnAutomaticRetry(t *testing.T) 
 	if secondErr == nil || !strings.Contains(secondErr.Error(), uncertain115CommitMarker) {
 		t.Fatalf("verification-only retry error=%v", secondErr)
 	}
-	if len(fake.attempts) != 1 || verifyCalls != 1 {
-		t.Fatalf("automatic retry replayed an uncertain upload: uploads=%d verifies=%d", len(fake.attempts), verifyCalls)
+	if len(fake.attempts) != 2 || verifyCalls != 2 {
+		t.Fatalf("first automatic retry replayed an uncertain upload: uploads=%d verifies=%d", len(fake.attempts), verifyCalls)
 	}
 	if err := st.RescheduleUploadTarget(ctx, retryTarget.ID, secondErr.Error(), time.Now().Add(-time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	fake.verifyFile = func(_ string, size int64) (RemoteFile, bool, error) {
-		verifyCalls++
-		return RemoteFile{ID: "remote-episode", Size: size}, true, nil
-	}
+	fake.fail = nil
 	finalTarget, err := st.ClaimNextUploadTarget(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.processTarget(ctx, finalTarget); err != nil {
-		t.Fatalf("remote verification should complete target: %v", err)
+		t.Fatalf("final automatic retry should replay the unconfirmed upload: %v", err)
 	}
-	if len(fake.attempts) != 1 || verifyCalls != 2 {
-		t.Fatalf("remote completion replayed upload: uploads=%d verifies=%d", len(fake.attempts), verifyCalls)
+	if len(fake.attempts) != 3 || len(fake.uploads) != 1 || verifyCalls != 3 {
+		t.Fatalf("final automatic retry did not replay only the unconfirmed upload: attempts=%d uploads=%d verifies=%d", len(fake.attempts), len(fake.uploads), verifyCalls)
 	}
 	detail, err := st.GetUploadBatchDetail(ctx, batch.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if detail.Batch.Status != store.UploadBatchCompleted ||
-		detail.Transfers[0].Status != store.UploadTransferCompleted ||
-		detail.Transfers[0].Outcome != store.UploadOutcomeCreated {
+		detail.Targets[0].Status != store.UploadTargetCompleted {
 		t.Fatalf("verified uncertain upload was not completed: %#v", detail)
+	}
+	for _, transfer := range detail.Transfers {
+		if transfer.Status != store.UploadTransferCompleted || transfer.Outcome != store.UploadOutcomeCreated {
+			t.Fatalf("uncertain transfer was not completed: %#v", transfer)
+		}
 	}
 }
 

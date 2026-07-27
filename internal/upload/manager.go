@@ -613,10 +613,12 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 					verificationErr = fmt.Errorf("%s: verify remote file: %w", uncertain115CommitMarker, err)
 				}
 			}
-			if err := recordFailure(transfer.ID, verificationErr); err != nil {
-				return err
+			if target.Attempts < m.options.MaxAttempts {
+				if err := recordFailure(transfer.ID, verificationErr); err != nil {
+					return err
+				}
+				continue
 			}
-			continue
 		}
 		setActiveTransfer(transfer.ID, transfer.BytesTotal, "preparing", "正在准备上传")
 		if err := m.store.StartUploadTransfer(ctx, transfer.ID); err != nil {

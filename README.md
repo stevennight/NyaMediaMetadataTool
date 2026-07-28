@@ -108,7 +108,7 @@ Linux x64 二进制，需要在安装了 GTK/WebKitGTK 开发依赖的 Linux 主
 wails build -clean -platform linux/amd64 -tags webkit2_41 -ldflags "-X main.version=0.1.0"
 ```
 
-上述 Linux 示例面向提供 WebKitGTK 4.1 的新发行版；仍提供 WebKitGTK 4.0 的系统可以去掉 `-tags webkit2_41` 并安装对应开发包。`build/linux/nya-media.desktop` 是发行包使用的桌面入口元数据，打包时将 `build/appicon.png` 安装为主题图标 `nya-media`。
+上述 Linux 示例面向提供 WebKitGTK 4.1 的新发行版；仍提供 WebKitGTK 4.0 的系统可以去掉 `-tags webkit2_41` 并安装对应开发包。`build/linux/nya-media-metadata-tool.desktop` 是发行包使用的桌面入口元数据，打包时将 `build/appicon.png` 安装为主题图标 `nya-media-metadata-tool`。
 
 `.github/workflows/desktop-build.yml` 会在三种原生 GitHub Runner 上执行 Go 测试、前端构建和 Wails 打包，并上传 14 天保留的未签名产物。正式对外分发前还需要在受保护的发布流水线中配置代码签名；macOS 发行版还需要公证。版本发布时同步修改 workflow、`wails.json` 中的 `info.productVersion` 和上述 `main.version` 注入值。
 

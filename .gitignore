@@ -12,6 +12,8 @@ web/*.tsbuildinfo
 web/wailsjs/
 web/package.json.md5
 
+.idea/
+
 .env
 .env.*
 config.yaml

@@ -646,7 +646,7 @@ func TestUploadProviderTypesExposeFutureCapabilities(t *testing.T) {
 			}
 		}
 	}
-	if !implemented[store.UploadProviderType115Cookie] || implemented[store.UploadProviderType115Open] || implemented[store.UploadProviderType123Pan] || implemented[store.UploadProviderTypeBaiduPan] {
+	if !implemented[store.UploadProviderType115Cookie] || !implemented[store.UploadProviderType115Open] || implemented[store.UploadProviderType123Pan] || implemented[store.UploadProviderTypeBaiduPan] {
 		t.Fatalf("unexpected provider descriptors: %#v", descriptors)
 	}
 	for _, code := range []string{"web", "android", "ios", "tv", "alipaymini", "wechatmini", "qandroid"} {
@@ -668,7 +668,7 @@ func TestUploadProviderRejectsUnknownOrUnavailableEnabledType(t *testing.T) {
 	manager := upload.New(st, slog.Default())
 	handler := NewServer(config.Default(), filepath.Join(t.TempDir(), "config.yaml"), st, nil, nil, slog.Default(), manager)
 	for _, body := range []string{
-		`{"name":"Future","type":"115open","enabled":true,"remoteRoot":"/Archive"}`,
+		`{"name":"Future","type":"123pan","enabled":true,"remoteRoot":"/Archive"}`,
 		`{"name":"Typo","type":"not-a-provider","enabled":true,"remoteRoot":"/Archive"}`,
 	} {
 		request := httptest.NewRequest(http.MethodPost, "/api/upload/providers", bytes.NewBufferString(body))
@@ -680,7 +680,7 @@ func TestUploadProviderRejectsUnknownOrUnavailableEnabledType(t *testing.T) {
 		}
 	}
 
-	disabled := httptest.NewRequest(http.MethodPost, "/api/upload/providers", bytes.NewBufferString(`{"name":"Future disabled","type":"115open","enabled":false,"remoteRoot":"/Archive"}`))
+	disabled := httptest.NewRequest(http.MethodPost, "/api/upload/providers", bytes.NewBufferString(`{"name":"Future disabled","type":"123pan","enabled":false,"remoteRoot":"/Archive"}`))
 	disabled.Header.Set("Content-Type", "application/json")
 	disabledResponse := httptest.NewRecorder()
 	handler.ServeHTTP(disabledResponse, disabled)
@@ -764,6 +764,63 @@ func TestUploadProviderGenericSecretsUseDescriptorKeysWithoutResponseLeak(t *tes
 	handler.ServeHTTP(invalidResponse, invalid)
 	if invalidResponse.Code != http.StatusBadRequest {
 		t.Fatalf("invalid credential key status=%d body=%s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+}
+
+func TestUploadProviderOpen115TokenImport(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	manager := upload.New(st, slog.Default())
+	handler := NewServer(config.Default(), filepath.Join(t.TempDir(), "config.yaml"), st, nil, nil, slog.Default(), manager)
+	provider, err := st.CreateUploadProvider(ctx, store.UploadProvider{Name: "Third Party", Type: store.UploadProviderType115Open, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPut, "/api/upload/providers/"+jsonNumber(provider.ID)+"/auth/115open", bytes.NewBufferString(`{
+		"accessToken":"access-third-party",
+		"refreshToken":"refresh-third-party"
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("import status=%d body=%s", response.Code, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("access-third-party")) || bytes.Contains(response.Body.Bytes(), []byte("refresh-third-party")) {
+		t.Fatalf("token import response leaked credentials: %s", response.Body.String())
+	}
+	var saved store.UploadProvider
+	if err := json.Unmarshal(response.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if !saved.HasCredentials {
+		t.Fatalf("provider did not report imported credentials: %#v", saved)
+	}
+	for key, want := range map[string]string{"access_token": "access-third-party", "refresh_token": "refresh-third-party"} {
+		got, err := st.GetUploadProviderSecret(ctx, provider.ID, key)
+		if err != nil || got != want {
+			t.Fatalf("secret %s=%q err=%v want=%q", key, got, err, want)
+		}
+	}
+
+	partial := httptest.NewRequest(http.MethodPut, "/api/upload/providers/"+jsonNumber(provider.ID)+"/auth/115open", bytes.NewBufferString(`{"refreshToken":"refresh-rotated"}`))
+	partial.Header.Set("Content-Type", "application/json")
+	partialResponse := httptest.NewRecorder()
+	handler.ServeHTTP(partialResponse, partial)
+	if partialResponse.Code != http.StatusOK {
+		t.Fatalf("partial import status=%d body=%s", partialResponse.Code, partialResponse.Body.String())
+	}
+	accessToken, err := st.GetUploadProviderSecret(ctx, provider.ID, "access_token")
+	if err != nil || accessToken != "access-third-party" {
+		t.Fatalf("partial import changed access token: value=%q err=%v", accessToken, err)
 	}
 }
 

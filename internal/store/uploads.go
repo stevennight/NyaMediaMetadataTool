@@ -53,6 +53,10 @@ const (
 	UploadEventProcessing = "processing"
 	UploadEventDelivered  = "delivered"
 	UploadEventFailed     = "failed"
+
+	DefaultUploadRequestIntervalMS = 500
+	MinUploadRequestIntervalMS     = 250
+	MaxUploadRequestIntervalMS     = 10000
 )
 
 var (
@@ -87,15 +91,17 @@ var uploadFileTypeSet = func() map[string]struct{} {
 // UploadProvider is one configured account instance. Secrets are deliberately
 // excluded so API list responses cannot expose credentials.
 type UploadProvider struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	Enabled    bool   `json:"enabled"`
-	UserAgent  string `json:"userAgent"`
-	HasCookie  bool   `json:"hasCookie"`
-	AuthDevice string `json:"authDevice"`
-	CreatedAt  string `json:"createdAt"`
-	UpdatedAt  string `json:"updatedAt"`
+	ID                int64  `json:"id"`
+	Name              string `json:"name"`
+	Type              string `json:"type"`
+	Enabled           bool   `json:"enabled"`
+	UserAgent         string `json:"userAgent"`
+	HasCookie         bool   `json:"hasCookie"`
+	HasCredentials    bool   `json:"hasCredentials"`
+	AuthDevice        string `json:"authDevice"`
+	RequestIntervalMS int    `json:"requestIntervalMs"`
+	CreatedAt         string `json:"createdAt"`
+	UpdatedAt         string `json:"updatedAt"`
 }
 
 // UploadProviderRoute is one upload step configured on a watch directory.
@@ -157,6 +163,7 @@ type UploadBatchTarget struct {
 	ProviderType           string            `json:"providerType"`
 	RemoteRoot             string            `json:"remoteRoot"`
 	UserAgent              string            `json:"userAgent"`
+	RequestIntervalMS      int               `json:"requestIntervalMs"`
 	CollisionPolicy        string            `json:"collisionPolicy"`
 	IncludeTypes           []string          `json:"includeTypes"`
 	Retryable              bool              `json:"retryable"`
@@ -280,9 +287,9 @@ func (s *Store) CreateUploadProvider(ctx context.Context, provider UploadProvide
 		return UploadProvider{}, err
 	}
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO upload_providers (name, type, enabled, user_agent, auth_device, updated_at)
-VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-`, provider.Name, provider.Type, boolToInt(provider.Enabled), provider.UserAgent, provider.AuthDevice)
+INSERT INTO upload_providers (name, type, enabled, user_agent, auth_device, request_interval_ms, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+`, provider.Name, provider.Type, boolToInt(provider.Enabled), provider.UserAgent, provider.AuthDevice, provider.RequestIntervalMS)
 	if err != nil {
 		return UploadProvider{}, err
 	}
@@ -342,9 +349,10 @@ UPDATE upload_providers
 SET name = ?,
     enabled = ?,
     user_agent = ?,
+    request_interval_ms = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND type = ?
-`, provider.Name, boolToInt(provider.Enabled), provider.UserAgent, provider.ID, provider.Type)
+`, provider.Name, boolToInt(provider.Enabled), provider.UserAgent, provider.RequestIntervalMS, provider.ID, provider.Type)
 	if err != nil {
 		return UploadProvider{}, err
 	}
@@ -517,6 +525,142 @@ ON CONFLICT(provider_id, secret_key) DO UPDATE SET secret_value = excluded.secre
 	return tx.Commit()
 }
 
+func (s *Store) SetUploadProvider115OpenCredentials(ctx context.Context, providerID int64, clientID, accessToken, refreshToken string) error {
+	return s.SetUploadProvider115OpenCredentialsWithExpiry(ctx, providerID, clientID, accessToken, refreshToken, "")
+}
+
+func (s *Store) SetUploadProvider115OpenCredentialsWithExpiry(ctx context.Context, providerID int64, clientID, accessToken, refreshToken, expiresAt string) error {
+	clientID = strings.TrimSpace(clientID)
+	accessToken = strings.TrimSpace(accessToken)
+	refreshToken = strings.TrimSpace(refreshToken)
+	expiresAt = strings.TrimSpace(expiresAt)
+	if providerID <= 0 || clientID == "" || accessToken == "" || refreshToken == "" {
+		return errors.New("provider id and complete 115 Open credentials are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := require115OpenProviderTx(ctx, tx, providerID); err != nil {
+		return err
+	}
+	for key, value := range map[string]string{
+		"client_id":     clientID,
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+	} {
+		if err := setUploadProviderSecretTx(ctx, tx, providerID, key, value); err != nil {
+			return err
+		}
+	}
+	if expiresAt == "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_secrets WHERE provider_id = ? AND secret_key = 'access_token_expires_at'`, providerID); err != nil {
+			return err
+		}
+	} else if err := setUploadProviderSecretTx(ctx, tx, providerID, "access_token_expires_at", expiresAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) SetUploadProvider115OpenTokens(ctx context.Context, providerID int64, clientID, accessToken, refreshToken string) error {
+	clientID = strings.TrimSpace(clientID)
+	accessToken = strings.TrimSpace(accessToken)
+	refreshToken = strings.TrimSpace(refreshToken)
+	if providerID <= 0 || (accessToken == "" && refreshToken == "") {
+		return errors.New("provider id and at least one 115 Open token are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := require115OpenProviderTx(ctx, tx, providerID); err != nil {
+		return err
+	}
+	for key, value := range map[string]string{
+		"client_id":     clientID,
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+	} {
+		if value != "" {
+			if err := setUploadProviderSecretTx(ctx, tx, providerID, key, value); err != nil {
+				return err
+			}
+		}
+	}
+	if accessToken != "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_secrets WHERE provider_id = ? AND secret_key = 'access_token_expires_at'`, providerID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) SetUploadProvider115OpenRefreshedTokens(ctx context.Context, providerID int64, accessToken, refreshToken, expiresAt string) error {
+	accessToken = strings.TrimSpace(accessToken)
+	refreshToken = strings.TrimSpace(refreshToken)
+	expiresAt = strings.TrimSpace(expiresAt)
+	if providerID <= 0 || accessToken == "" || refreshToken == "" {
+		return errors.New("provider id and refreshed 115 Open tokens are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := require115OpenProviderTx(ctx, tx, providerID); err != nil {
+		return err
+	}
+	for key, value := range map[string]string{
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+	} {
+		if err := setUploadProviderSecretTx(ctx, tx, providerID, key, value); err != nil {
+			return err
+		}
+	}
+	if expiresAt == "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_secrets WHERE provider_id = ? AND secret_key = 'access_token_expires_at'`, providerID); err != nil {
+			return err
+		}
+	} else if err := setUploadProviderSecretTx(ctx, tx, providerID, "access_token_expires_at", expiresAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func require115OpenProviderTx(ctx context.Context, tx *sql.Tx, providerID int64) error {
+	var providerType string
+	if err := tx.QueryRowContext(ctx, `SELECT type FROM upload_providers WHERE id = ?`, providerID).Scan(&providerType); errors.Is(err, sql.ErrNoRows) {
+		return ErrUploadProviderNotFound
+	} else if err != nil {
+		return err
+	}
+	if providerType != UploadProviderType115Open {
+		return errors.New("provider does not use 115 Open authentication")
+	}
+	return nil
+}
+
+func setUploadProviderSecretTx(ctx context.Context, tx *sql.Tx, providerID int64, key, value string) error {
+	_, err := tx.ExecContext(ctx, `
+INSERT INTO upload_provider_secrets (provider_id, secret_key, secret_value, updated_at)
+VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(provider_id, secret_key) DO UPDATE SET secret_value = excluded.secret_value, updated_at = CURRENT_TIMESTAMP
+`, providerID, key, value)
+	return err
+}
 func (s *Store) SetUploadProviderCookie(ctx context.Context, providerID int64, cookie string, authDevice string) error {
 	cookie = strings.TrimSpace(cookie)
 	authDevice, err := normalizeUploadProviderAuthDevice(authDevice)
@@ -679,11 +823,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			}
 			if _, err := tx.ExecContext(ctx, `
 INSERT INTO upload_batch_targets
-  (batch_id, provider_id, provider_name, provider_type, remote_root, user_agent, collision_policy, include_types,
+  (batch_id, provider_id, provider_name, provider_type, remote_root, user_agent, request_interval_ms, collision_policy, include_types,
    notification_template_id, notification_variables, status, available_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, batchID, configured.provider.ID, configured.provider.Name, configured.provider.Type, configured.route.RemoteRoot,
-				configured.provider.UserAgent, configured.route.CollisionPolicy, string(encodedTypes),
+				configured.provider.UserAgent, configured.provider.RequestIntervalMS, configured.route.CollisionPolicy, string(encodedTypes),
 				configured.route.NotificationTemplateID, encodedVariables, UploadTargetWaiting, readyAt); err != nil {
 				return nil, 0, err
 			}
@@ -1559,8 +1703,9 @@ func (s *Store) CountUploadTargetsByStatuses(ctx context.Context, statuses ...st
 }
 
 const uploadProviderSelect = `
-SELECT id, name, type, enabled, user_agent,
+SELECT id, name, type, enabled, user_agent, request_interval_ms,
        EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = upload_providers.id AND s.secret_key = 'cookie' AND s.secret_value <> ''),
+       EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = upload_providers.id AND s.secret_key IN ('access_token', 'refresh_token') AND s.secret_value <> ''),
        auth_device, created_at, updated_at
 FROM upload_providers`
 
@@ -1588,7 +1733,7 @@ SELECT b.id, b.watch_dir_id, b.upload_route_id, b.series_key, b.series_path, b.s
 FROM upload_batches b`
 
 const uploadBatchTargetSelect = `
-SELECT t.id, t.batch_id, t.provider_id, t.provider_name, t.provider_type, t.remote_root, t.user_agent, t.collision_policy, t.include_types,
+SELECT t.id, t.batch_id, t.provider_id, t.provider_name, t.provider_type, t.remote_root, t.user_agent, t.request_interval_ms, t.collision_policy, t.include_types,
        t.retryable, t.notification_template_id, t.notification_variables,
        t.status, t.attempts, t.error_summary, t.available_at, COALESCE(t.started_at, ''), COALESCE(t.finished_at, ''), t.created_at, t.updated_at
 FROM upload_batch_targets t
@@ -1610,9 +1755,11 @@ func scanUploadProvider(scanner uploadProviderScanner) (UploadProvider, error) {
 	var item UploadProvider
 	var enabled int
 	var hasCookie int
-	err := scanner.Scan(&item.ID, &item.Name, &item.Type, &enabled, &item.UserAgent, &hasCookie, &item.AuthDevice, &item.CreatedAt, &item.UpdatedAt)
+	var hasCredentials int
+	err := scanner.Scan(&item.ID, &item.Name, &item.Type, &enabled, &item.UserAgent, &item.RequestIntervalMS, &hasCookie, &hasCredentials, &item.AuthDevice, &item.CreatedAt, &item.UpdatedAt)
 	item.Enabled = enabled == 1
 	item.HasCookie = hasCookie == 1
+	item.HasCredentials = hasCredentials == 1
 	return item, err
 }
 
@@ -1695,7 +1842,7 @@ func scanUploadBatchTarget(scanner uploadTargetScanner) (UploadBatchTarget, erro
 	var retryable int
 	err := scanner.Scan(
 		&item.ID, &item.BatchID, &item.ProviderID, &item.ProviderName, &item.ProviderType, &item.RemoteRoot,
-		&item.UserAgent, &item.CollisionPolicy, &encodedTypes, &retryable, &notificationTemplateID, &encodedVariables,
+		&item.UserAgent, &item.RequestIntervalMS, &item.CollisionPolicy, &encodedTypes, &retryable, &notificationTemplateID, &encodedVariables,
 		&item.Status, &item.Attempts, &item.ErrorSummary, &item.AvailableAt, &item.StartedAt, &item.FinishedAt,
 		&item.CreatedAt, &item.UpdatedAt,
 	)
@@ -1744,6 +1891,7 @@ func normalizeUploadProvider(provider *UploadProvider) error {
 	provider.Name = strings.TrimSpace(provider.Name)
 	provider.Type = strings.ToLower(strings.TrimSpace(provider.Type))
 	provider.UserAgent = strings.TrimSpace(provider.UserAgent)
+	provider.RequestIntervalMS = NormalizeUploadRequestIntervalMS(provider.RequestIntervalMS)
 	if provider.Name == "" || provider.Type == "" {
 		return errors.New("provider name and type are required")
 	}
@@ -1761,6 +1909,19 @@ func normalizeUploadProvider(provider *UploadProvider) error {
 	}
 	provider.AuthDevice = authDevice
 	return nil
+}
+
+func NormalizeUploadRequestIntervalMS(value int) int {
+	if value <= 0 {
+		return DefaultUploadRequestIntervalMS
+	}
+	if value < MinUploadRequestIntervalMS {
+		return MinUploadRequestIntervalMS
+	}
+	if value > MaxUploadRequestIntervalMS {
+		return MaxUploadRequestIntervalMS
+	}
+	return value
 }
 
 func normalizeUploadProviderAuthDevice(value string) (string, error) {
@@ -1872,8 +2033,9 @@ type configuredUploadTarget struct {
 
 func listEnabledWatchDirUploadTargetsTx(ctx context.Context, tx *sql.Tx, watchDirID int64) ([]configuredUploadTarget, error) {
 	rows, err := tx.QueryContext(ctx, `
-SELECT p.id, p.name, p.type, p.enabled, p.user_agent,
+SELECT p.id, p.name, p.type, p.enabled, p.user_agent, p.request_interval_ms,
        EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = p.id AND s.secret_key = 'cookie' AND s.secret_value <> ''),
+       EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = p.id AND s.secret_key IN ('access_token', 'refresh_token') AND s.secret_value <> ''),
        p.auth_device, p.created_at, p.updated_at,
        r.id, r.provider_id, r.watch_dir_id, r.enabled, r.remote_root, r.collision_policy, r.include_types,
        r.notification_template_id, r.notification_variables, r.created_at, r.updated_at
@@ -1891,6 +2053,7 @@ ORDER BY r.id
 		var item configuredUploadTarget
 		var providerEnabled int
 		var hasCookie int
+		var hasCredentials int
 		var routeWatchDirID sql.NullInt64
 		var notificationTemplateID sql.NullInt64
 		var routeEnabled int
@@ -1898,7 +2061,7 @@ ORDER BY r.id
 		var encodedVariables string
 		if err := rows.Scan(
 			&item.provider.ID, &item.provider.Name, &item.provider.Type, &providerEnabled, &item.provider.UserAgent,
-			&hasCookie, &item.provider.AuthDevice, &item.provider.CreatedAt, &item.provider.UpdatedAt,
+			&item.provider.RequestIntervalMS, &hasCookie, &hasCredentials, &item.provider.AuthDevice, &item.provider.CreatedAt, &item.provider.UpdatedAt,
 			&item.route.ID, &item.route.ProviderID, &routeWatchDirID, &routeEnabled, &item.route.RemoteRoot,
 			&item.route.CollisionPolicy, &encodedTypes, &notificationTemplateID, &encodedVariables,
 			&item.route.CreatedAt, &item.route.UpdatedAt,
@@ -1907,6 +2070,7 @@ ORDER BY r.id
 		}
 		item.provider.Enabled = providerEnabled == 1
 		item.provider.HasCookie = hasCookie == 1
+		item.provider.HasCredentials = hasCredentials == 1
 		item.route.Enabled = routeEnabled == 1
 		if routeWatchDirID.Valid {
 			item.route.WatchDirID = &routeWatchDirID.Int64

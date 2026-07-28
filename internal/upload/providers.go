@@ -46,7 +46,7 @@ var defaultProviderDescriptors = map[string]ProviderDescriptor{
 		Type:        store.UploadProviderType115Open,
 		Name:        "115 Open",
 		Implemented: false,
-		SecretKeys:  []string{"client_id", "access_token", "refresh_token"},
+		SecretKeys:  []string{"client_id", "access_token", "refresh_token", "access_token_expires_at"},
 	},
 	store.UploadProviderType123Pan: {
 		Type:        store.UploadProviderType123Pan,

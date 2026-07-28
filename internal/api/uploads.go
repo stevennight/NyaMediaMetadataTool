@@ -272,6 +272,14 @@ func (s *Server) handleUploadProviderRoute(w http.ResponseWriter, r *http.Reques
 		s.handleUploadProviderDirectory(w, r, providerID)
 		return
 	}
+	if len(parts) == 3 && parts[1] == "auth" && parts[2] == "115open" {
+		s.handleUploadProviderOpen115Auth(w, r, providerID)
+		return
+	}
+	if len(parts) == 5 && parts[1] == "auth" && parts[2] == "115open" && parts[4] == "qrcode" && r.Method == http.MethodGet {
+		s.handleUploadProviderOpen115QRCode(w, r, providerID, parts[3])
+		return
+	}
 	if len(parts) == 3 && parts[1] == "auth" && parts[2] == "115cookie" {
 		s.handleUploadProviderCookieAuth(w, r, providerID)
 		return
@@ -470,6 +478,74 @@ func (s *Server) handleUploadProviderDirectory(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": remotePath, "entries": entries})
+}
+
+func (s *Server) handleUploadProviderOpen115Auth(w http.ResponseWriter, r *http.Request, providerID int64) {
+	if s.uploads == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("upload manager is unavailable"))
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var input struct {
+			ClientID string `json:"clientId"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		status, err := s.uploads.StartOpen115Auth(r.Context(), providerID, input.ClientID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	case http.MethodPut:
+		var input struct {
+			ClientID     string `json:"clientId"`
+			AccessToken  string `json:"accessToken"`
+			RefreshToken string `json:"refreshToken"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		provider, err := s.uploads.ImportOpen115Tokens(r.Context(), providerID, input.ClientID, input.AccessToken, input.RefreshToken)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, provider)
+	case http.MethodGet:
+		sessionID := strings.TrimSpace(r.URL.Query().Get("sessionId"))
+		if sessionID == "" {
+			writeError(w, http.StatusBadRequest, errors.New("sessionId is required"))
+			return
+		}
+		status, err := s.uploads.PollOpen115Auth(r.Context(), providerID, sessionID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+	}
+}
+
+func (s *Server) handleUploadProviderOpen115QRCode(w http.ResponseWriter, r *http.Request, providerID int64, sessionID string) {
+	if s.uploads == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("upload manager is unavailable"))
+		return
+	}
+	image, err := s.uploads.Open115AuthQRCode(r.Context(), providerID, sessionID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(image)
 }
 
 func (s *Server) handleUploadProviderCookieAuth(w http.ResponseWriter, r *http.Request, providerID int64) {

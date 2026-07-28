@@ -108,13 +108,18 @@ type Manager struct {
 	providers  map[string]ProviderDescriptor
 	providerMu sync.RWMutex
 
-	mu        sync.Mutex
-	active    map[int64]context.CancelFunc
-	authMu    sync.Mutex
-	authFlows map[string]*cookie115AuthFlow
+	mu               sync.Mutex
+	active           map[int64]context.CancelFunc
+	authMu           sync.Mutex
+	authFlows        map[string]*cookie115AuthFlow
+	open115AuthMu    sync.Mutex
+	open115AuthFlows map[string]*open115AuthFlow
 
 	cookie115GuardMu sync.Mutex
 	cookie115Guards  map[int64]*cookie115RequestGuard
+	open115Mu        sync.Mutex
+	open115Sessions  map[int64]*open115Session
+
 	runtimeMu        sync.RWMutex
 	transferRuntime  map[int64]TransferRuntimeState
 	notificationHTTP *http.Client
@@ -140,9 +145,11 @@ func newManager(options Options, st *store.Store, logger *slog.Logger, factory P
 		logger:           logger,
 		active:           make(map[int64]context.CancelFunc),
 		authFlows:        make(map[string]*cookie115AuthFlow),
+		open115AuthFlows: make(map[string]*open115AuthFlow),
 		builders:         make(map[string]ProviderBuilder),
 		providers:        providerDescriptorMap(),
 		cookie115Guards:  make(map[int64]*cookie115RequestGuard),
+		open115Sessions:  make(map[int64]*open115Session),
 		transferRuntime:  make(map[int64]TransferRuntimeState),
 		notificationHTTP: &http.Client{Timeout: 10 * time.Second},
 	}
@@ -220,8 +227,49 @@ func (m *Manager) registerBuiltInProviders() {
 		provider.requestGuard = m.cookie115RequestGuard(target.ProviderID)
 		return provider, nil
 	})
+	m.RegisterProvider(store.UploadProviderType115Open, func(ctx context.Context, target store.UploadBatchTarget, lookup SecretLookup) (Provider, error) {
+		accessToken, err := lookup(ctx, "access_token")
+		if err != nil {
+			return nil, err
+		}
+		refreshToken, err := lookup(ctx, "refresh_token")
+		if err != nil {
+			return nil, err
+		}
+		expiresAt, err := lookup(ctx, "access_token_expires_at")
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(accessToken) == "" && strings.TrimSpace(refreshToken) == "" {
+			return nil, fmt.Errorf("115 Open tokens are not configured for destination %q", target.ProviderName)
+		}
+		session := m.open115Session(target.ProviderID, accessToken, refreshToken, expiresAt, target.UserAgent)
+		provider, err := newOpen115Provider(session)
+		if err != nil {
+			return nil, err
+		}
+		provider.requestGuard = m.cookie115RequestGuard(target.ProviderID)
+		provider.requestInterval = time.Duration(store.NormalizeUploadRequestIntervalMS(target.RequestIntervalMS)) * time.Millisecond
+		return provider, nil
+	})
 }
 
+func (m *Manager) open115Session(providerID int64, accessToken, refreshToken, expiresAt, userAgent string) *open115Session {
+	m.open115Mu.Lock()
+	defer m.open115Mu.Unlock()
+	if session := m.open115Sessions[providerID]; session != nil && session.matches(accessToken, refreshToken, expiresAt) {
+		return session
+	}
+	session := newOpen115Session(accessToken, refreshToken, expiresAt, userAgent, func(updatedAccessToken, updatedRefreshToken, updatedExpiresAt string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := m.store.SetUploadProvider115OpenRefreshedTokens(ctx, providerID, updatedAccessToken, updatedRefreshToken, updatedExpiresAt); err != nil && m.logger != nil {
+			m.logger.Error("persist refreshed 115 Open tokens", "provider_id", providerID, "error", err)
+		}
+	})
+	m.open115Sessions[providerID] = session
+	return session
+}
 func (m *Manager) cookie115RequestGuard(providerID int64) *cookie115RequestGuard {
 	if providerID <= 0 {
 		return newCookie115RequestGuard()
@@ -711,12 +759,13 @@ func (m *Manager) untrackTarget(targetID int64) {
 
 func targetFromProvider(provider store.UploadProvider) store.UploadBatchTarget {
 	return store.UploadBatchTarget{
-		ProviderID:      provider.ID,
-		ProviderName:    provider.Name,
-		ProviderType:    provider.Type,
-		UserAgent:       provider.UserAgent,
-		RemoteRoot:      "/",
-		CollisionPolicy: "fail",
+		ProviderID:        provider.ID,
+		ProviderName:      provider.Name,
+		ProviderType:      provider.Type,
+		UserAgent:         provider.UserAgent,
+		RequestIntervalMS: provider.RequestIntervalMS,
+		RemoteRoot:        "/",
+		CollisionPolicy:   "fail",
 	}
 }
 

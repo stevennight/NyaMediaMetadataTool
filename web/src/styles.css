@@ -936,6 +936,10 @@ h1 {
   align-content: start;
 }
 
+.upload-auth-import-panel {
+  grid-column: 1 / -1;
+}
+
 .upload-auth-panel h3,
 .upload-detail-section h3 {
   margin: 0;

@@ -142,7 +142,7 @@ func TestCollectUploadBatchesCoalescesFilesByRoute(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	defer st.Close()
-	first, err := st.CreateUploadProvider(ctx, UploadProvider{Name: "115 A", Type: UploadProviderType115Cookie, Enabled: true})
+	first, err := st.CreateUploadProvider(ctx, UploadProvider{Name: "115 A", Type: UploadProviderType115Cookie, Enabled: true, RequestIntervalMS: 750})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestCollectUploadBatchesCoalescesFilesByRoute(t *testing.T) {
 		if index == 1 {
 			wantRoot = "/B"
 		}
-		if detail.Targets[0].ProviderID != first.ID || detail.Targets[0].RemoteRoot != wantRoot {
+		if detail.Targets[0].ProviderID != first.ID || detail.Targets[0].RemoteRoot != wantRoot || detail.Targets[0].RequestIntervalMS != 750 {
 			t.Fatalf("unexpected target: %#v", detail.Targets[0])
 		}
 	}
@@ -1331,4 +1331,67 @@ func createUploadTestWatchDir(t *testing.T, st *Store, ctx context.Context, path
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func TestUploadProviderRequestIntervalIsNormalizedAndPersisted(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	defer st.Close()
+
+	provider, err := st.CreateUploadProvider(ctx, UploadProvider{
+		Name:              "Open 115 Rate",
+		Type:              UploadProviderType115Open,
+		Enabled:           true,
+		RequestIntervalMS: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.RequestIntervalMS != MinUploadRequestIntervalMS {
+		t.Fatalf("created request interval=%d, want %d", provider.RequestIntervalMS, MinUploadRequestIntervalMS)
+	}
+	provider.RequestIntervalMS = 20000
+	provider, err = st.UpdateUploadProvider(ctx, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.RequestIntervalMS != MaxUploadRequestIntervalMS {
+		t.Fatalf("updated request interval=%d, want %d", provider.RequestIntervalMS, MaxUploadRequestIntervalMS)
+	}
+	provider.RequestIntervalMS = 0
+	provider, err = st.UpdateUploadProvider(ctx, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.RequestIntervalMS != DefaultUploadRequestIntervalMS {
+		t.Fatalf("default request interval=%d, want %d", provider.RequestIntervalMS, DefaultUploadRequestIntervalMS)
+	}
+}
+
+func TestUploadProvider115OpenRefreshedTokensPersistTogether(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	defer st.Close()
+
+	provider, err := st.CreateUploadProvider(ctx, UploadProvider{Name: "Open 115 Tokens", Type: UploadProviderType115Open, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetUploadProvider115OpenCredentialsWithExpiry(ctx, provider.ID, "client-old", "access-old", "refresh-old", "2000-01-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	const expiresAt = "2099-01-01T00:00:00Z"
+	if err := st.SetUploadProvider115OpenRefreshedTokens(ctx, provider.ID, "access-new", "refresh-new", expiresAt); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"access_token":            "access-new",
+		"refresh_token":           "refresh-new",
+		"access_token_expires_at": expiresAt,
+	} {
+		got, err := st.GetUploadProviderSecret(ctx, provider.ID, key)
+		if err != nil || got != want {
+			t.Fatalf("secret %s=%q err=%v, want %q", key, got, err, want)
+		}
+	}
 }

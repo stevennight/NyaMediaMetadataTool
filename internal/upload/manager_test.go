@@ -692,3 +692,39 @@ func openUploadTestStore(t *testing.T) *store.Store {
 	}
 	return st
 }
+
+func TestDefaultProviderFactoryAppliesOpen115RequestInterval(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	providerModel, err := st.CreateUploadProvider(ctx, store.UploadProvider{
+		Name:              "Open 115 Rate",
+		Type:              store.UploadProviderType115Open,
+		Enabled:           true,
+		RequestIntervalMS: 750,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetUploadProvider115OpenTokens(ctx, providerModel.ID, "", "access", "refresh"); err != nil {
+		t.Fatal(err)
+	}
+	manager := New(st, slog.Default())
+	built, err := manager.defaultProviderFactory(ctx, targetFromProvider(providerModel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, ok := built.(*open115Provider)
+	if !ok {
+		t.Fatalf("provider type=%T, want *open115Provider", built)
+	}
+	if provider.requestInterval != 750*time.Millisecond {
+		t.Fatalf("request interval=%s, want 750ms", provider.requestInterval)
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +45,10 @@ func (f *fakeOpen115API) GetFiles(_ context.Context, request *sdk115.GetFilesReq
 	}
 	response.Data = items[start:end]
 	return response, nil
+}
+
+func (f *fakeOpen115API) GetInfoByPath(context.Context, string) (*open115PathInfo, error) {
+	return nil, &sdk115.Error{Code: open115PathNotFoundCode, Message: "not found"}
 }
 
 func (f *fakeOpen115API) Mkdir(_ context.Context, parentID, name string) (*sdk115.MkdirResp, error) {
@@ -85,11 +91,12 @@ func (f *fakeOpen115API) UploadGetToken(context.Context) (*sdk115.UploadGetToken
 
 func newFakeOpen115Provider(client open115API) *open115Provider {
 	return &open115Provider{
-		client:           client,
-		requestGuard:     newCookie115RequestGuard(),
-		requestInterval:  0,
-		directoryIDs:     map[string]string{"/": "0"},
-		uploadRetryDelay: func(int) time.Duration { return 0 },
+		client:             client,
+		requestGuard:       newCookie115RequestGuard(),
+		requestInterval:    0,
+		directoryIDs:       map[string]string{"/": "0"},
+		pathInfoRetryDelay: 0,
+		uploadRetryDelay:   func(int) time.Duration { return 0 },
 	}
 }
 
@@ -218,5 +225,150 @@ func TestOpen115SessionDoesNotRefreshUsableToken(t *testing.T) {
 	}
 	if _, err := session.UserInfo(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type directPathOpen115API struct {
+	*fakeOpen115API
+	infos         map[string]*open115PathInfo
+	pathInfoCalls int
+	getFilesCalls int
+}
+
+func (f *directPathOpen115API) GetInfoByPath(_ context.Context, providerPath string) (*open115PathInfo, error) {
+	f.pathInfoCalls++
+	if info := f.infos[normalize115Path(providerPath)]; info != nil {
+		copy := *info
+		return &copy, nil
+	}
+	return nil, &sdk115.Error{Code: open115PathNotFoundCode, Message: "not found"}
+}
+
+func (f *directPathOpen115API) GetFiles(ctx context.Context, request *sdk115.GetFilesReq) (*sdk115.GetFilesResp, error) {
+	f.getFilesCalls++
+	return f.fakeOpen115API.GetFiles(ctx, request)
+}
+
+type memoryOpen115Cache struct {
+	values map[string]string
+}
+
+func newMemoryOpen115Cache() *memoryOpen115Cache {
+	return &memoryOpen115Cache{values: make(map[string]string)}
+}
+
+func (c *memoryOpen115Cache) Get(_ context.Context, key string) (string, bool, error) {
+	value, ok := c.values[key]
+	return value, ok, nil
+}
+
+func (c *memoryOpen115Cache) Set(_ context.Context, key, value string) error {
+	c.values[key] = value
+	return nil
+}
+
+func (c *memoryOpen115Cache) SetWithTTL(ctx context.Context, key, value string, _ time.Duration) error {
+	return c.Set(ctx, key, value)
+}
+
+func (c *memoryOpen115Cache) Delete(_ context.Context, key string) error {
+	delete(c.values, key)
+	return nil
+}
+
+func TestOpen115ResolveDirectoryUsesPathInfoBeforeListing(t *testing.T) {
+	client := &directPathOpen115API{
+		fakeOpen115API: newFakeOpen115API(),
+		infos: map[string]*open115PathInfo{
+			"/Anime/Season 1": {FileID: "season-1", FileName: "Season 1", FileCategory: "0"},
+		},
+	}
+	provider := newFakeOpen115Provider(client)
+	id, err := provider.resolveDirectory(context.Background(), "/Anime/Season 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "season-1" || client.pathInfoCalls != 1 || client.getFilesCalls != 0 {
+		t.Fatalf("id=%q path calls=%d list calls=%d", id, client.pathInfoCalls, client.getFilesCalls)
+	}
+}
+
+func TestOpen115ResolveDirectoryFallsBackToRootTraversal(t *testing.T) {
+	base := newFakeOpen115API()
+	base.files["0"] = []sdk115.GetFilesResp_File{{Fid: "anime", Pid: "0", Fn: "Anime", Fc: "0"}}
+	base.files["anime"] = []sdk115.GetFilesResp_File{{Fid: "season-1", Pid: "anime", Fn: "Season 1", Fc: "0"}}
+	client := &directPathOpen115API{fakeOpen115API: base, infos: map[string]*open115PathInfo{}}
+	provider := newFakeOpen115Provider(client)
+	id, err := provider.resolveDirectory(context.Background(), "/Anime/Season 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "season-1" || client.pathInfoCalls != 2 || client.getFilesCalls != 2 {
+		t.Fatalf("id=%q path calls=%d list calls=%d", id, client.pathInfoCalls, client.getFilesCalls)
+	}
+}
+
+func TestOpen115DirectoryAndChildrenCacheSurviveProviderRecreation(t *testing.T) {
+	cache := newMemoryOpen115Cache()
+	client := &directPathOpen115API{
+		fakeOpen115API: newFakeOpen115API(),
+		infos: map[string]*open115PathInfo{
+			"/Anime": {FileID: "anime", FileName: "Anime", FileCategory: "0"},
+		},
+	}
+	client.files["anime"] = []sdk115.GetFilesResp_File{{Fid: "season-1", Pid: "anime", Fn: "Season 1", Fc: "0"}}
+	first := newFakeOpen115Provider(client)
+	first.cacheStore = cache
+	items, err := first.List(context.Background(), "/Anime")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("first list items=%+v err=%v", items, err)
+	}
+	if client.pathInfoCalls != 1 || client.getFilesCalls != 1 {
+		t.Fatalf("first list path calls=%d list calls=%d", client.pathInfoCalls, client.getFilesCalls)
+	}
+
+	second := newFakeOpen115Provider(client)
+	second.cacheStore = cache
+	items, err = second.List(context.Background(), "/Anime")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("second list items=%+v err=%v", items, err)
+	}
+	if client.pathInfoCalls != 1 || client.getFilesCalls != 1 {
+		t.Fatalf("cached list made remote calls: path=%d list=%d cache=%v", client.pathInfoCalls, client.getFilesCalls, cache.values)
+	}
+}
+
+func TestOpen115SessionRequestsPathInfoByFullPath(t *testing.T) {
+	session := newOpen115Session("access", "refresh", "", "", nil)
+	client, ok := session.client.(*sdk115.Client)
+	if !ok {
+		t.Fatalf("session client type=%T", session.client)
+	}
+	client.SetHttpClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodPost || request.URL.Path != "/open/folder/get_info" {
+			t.Fatalf("request=%s %s", request.Method, request.URL.Path)
+		}
+		if err := request.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if got := request.Form.Get("path"); got != "/Anime/Season 1" {
+			t.Fatalf("path form=%q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"state":true,"code":0,
+				"data":{"file_id":"season-1","file_name":"Season 1","file_category":"0","size":"0"}
+			}`)),
+			Request: request,
+		}, nil
+	})})
+	info, err := session.GetInfoByPath(context.Background(), "/Anime/Season 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.FileID != "season-1" || info.FileCategory != "0" {
+		t.Fatalf("path info=%+v", info)
 	}
 }

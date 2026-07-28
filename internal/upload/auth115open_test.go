@@ -50,6 +50,10 @@ func TestOpen115AuthorizationPersistsCredentialsAndQRCode(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := st.SetUploadProviderCache(ctx, provider.ID, "node:/Stale", "stale"); err != nil {
+		t.Fatal(err)
+	}
+
 	remote := &fakeOpen115AuthRemote{}
 	originalFactory := newOpen115AuthRemote
 	newOpen115AuthRemote = func(string) open115AuthRemote { return remote }
@@ -78,6 +82,9 @@ func TestOpen115AuthorizationPersistsCredentialsAndQRCode(t *testing.T) {
 	if completed.State != "authorized" || remote.exchangedUID != "uid-1" || remote.exchangedVerifier == "" {
 		t.Fatalf("unexpected completed state: status=%#v remote=%#v", completed, remote)
 	}
+	if _, ok, err := st.GetUploadProviderCache(ctx, provider.ID, "node:/Stale"); err != nil || ok {
+		t.Fatalf("authorization did not clear provider cache: ok=%v err=%v", ok, err)
+	}
 	for key, want := range map[string]string{"client_id": "client-1", "access_token": "access-1", "refresh_token": "refresh-1"} {
 		got, err := st.GetUploadProviderSecret(ctx, provider.ID, key)
 		if err != nil || got != want {
@@ -101,12 +108,18 @@ func TestOpen115AuthorizationPersistsCredentialsAndQRCode(t *testing.T) {
 		t.Fatalf("provider did not report saved credentials: %#v", listed)
 	}
 
+	if err := st.SetUploadProviderCache(ctx, provider.ID, "node:/Imported", "stale"); err != nil {
+		t.Fatal(err)
+	}
 	imported, err := manager.ImportOpen115Tokens(ctx, provider.ID, "", "", "refresh-2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !imported.HasCredentials {
 		t.Fatalf("imported provider did not report credentials: %#v", imported)
+	}
+	if _, ok, err := st.GetUploadProviderCache(ctx, provider.ID, "node:/Imported"); err != nil || ok {
+		t.Fatalf("token import did not clear provider cache: ok=%v err=%v", ok, err)
 	}
 	accessToken, err := st.GetUploadProviderSecret(ctx, provider.ID, "access_token")
 	if err != nil || accessToken != "access-1" {

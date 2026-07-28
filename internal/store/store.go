@@ -660,6 +660,18 @@ CREATE TABLE IF NOT EXISTS upload_provider_secrets (
   FOREIGN KEY(provider_id) REFERENCES upload_providers(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS upload_provider_cache (
+  provider_id INTEGER NOT NULL,
+  cache_key TEXT NOT NULL,
+  cache_value TEXT NOT NULL,
+  expires_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(provider_id, cache_key),
+  FOREIGN KEY(provider_id) REFERENCES upload_providers(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_provider_cache_expiry ON upload_provider_cache(expires_at);
+
 CREATE TABLE IF NOT EXISTS upload_notification_templates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,

@@ -522,6 +522,11 @@ ON CONFLICT(provider_id, secret_key) DO UPDATE SET secret_value = excluded.secre
 `, providerID, key, value); err != nil {
 		return err
 	}
+	if providerType == UploadProviderType115Open {
+		if err := deleteUploadProviderCacheTx(ctx, tx, providerID); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -564,6 +569,9 @@ func (s *Store) SetUploadProvider115OpenCredentialsWithExpiry(ctx context.Contex
 	if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
 		return err
 	}
+	if err := deleteUploadProviderCacheTx(ctx, tx, providerID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -599,6 +607,9 @@ func (s *Store) SetUploadProvider115OpenTokens(ctx context.Context, providerID i
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
+		return err
+	}
+	if err := deleteUploadProviderCacheTx(ctx, tx, providerID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -724,6 +735,9 @@ func (s *Store) DeleteUploadProviderSecret(ctx context.Context, providerID int64
 		if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET auth_device = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
 			return err
 		}
+	}
+	if err := deleteUploadProviderCacheTx(ctx, tx, providerID); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

@@ -17,7 +17,10 @@ import (
 	"NyaMediaMetadataTool/internal/store"
 )
 
-const schedulerInterval = 2 * time.Second
+const (
+	schedulerInterval            = 2 * time.Second
+	providerCacheCleanupInterval = 10 * time.Minute
+)
 
 type Options struct {
 	Concurrency int
@@ -98,6 +101,27 @@ type providerProgressReporter interface {
 }
 
 type ProviderFactory func(ctx context.Context, target store.UploadBatchTarget) (Provider, error)
+
+type open115ProviderCacheScope struct {
+	store      *store.Store
+	providerID int64
+}
+
+func (scope open115ProviderCacheScope) Get(ctx context.Context, key string) (string, bool, error) {
+	return scope.store.GetUploadProviderCache(ctx, scope.providerID, key)
+}
+
+func (scope open115ProviderCacheScope) Set(ctx context.Context, key, value string) error {
+	return scope.store.SetUploadProviderCache(ctx, scope.providerID, key, value)
+}
+
+func (scope open115ProviderCacheScope) SetWithTTL(ctx context.Context, key, value string, ttl time.Duration) error {
+	return scope.store.SetUploadProviderCacheWithTTL(ctx, scope.providerID, key, value, ttl)
+}
+
+func (scope open115ProviderCacheScope) Delete(ctx context.Context, key string) error {
+	return scope.store.DeleteUploadProviderCacheKey(ctx, scope.providerID, key)
+}
 
 type Manager struct {
 	options    Options
@@ -244,7 +268,7 @@ func (m *Manager) registerBuiltInProviders() {
 			return nil, fmt.Errorf("115 Open tokens are not configured for destination %q", target.ProviderName)
 		}
 		session := m.open115Session(target.ProviderID, accessToken, refreshToken, expiresAt, target.UserAgent)
-		provider, err := newOpen115Provider(session)
+		provider, err := newOpen115Provider(session, open115ProviderCacheScope{store: m.store, providerID: target.ProviderID})
 		if err != nil {
 			return nil, err
 		}
@@ -425,10 +449,38 @@ func (m *Manager) Run(ctx context.Context) error {
 		defer wg.Done()
 		m.notificationWorker(ctx)
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		m.providerCacheJanitor(ctx)
+	}()
 	<-ctx.Done()
 	m.CancelRunningTargets()
 	wg.Wait()
 	return nil
+}
+
+func (m *Manager) providerCacheJanitor(ctx context.Context) {
+	if m.store == nil {
+		<-ctx.Done()
+		return
+	}
+	cleanup := func() {
+		if _, err := m.store.DeleteExpiredUploadProviderCache(ctx); err != nil && !errors.Is(err, context.Canceled) && m.logger != nil {
+			m.logger.Warn("delete expired upload provider cache", "error", err)
+		}
+	}
+	cleanup()
+	ticker := time.NewTicker(providerCacheCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cleanup()
+		}
+	}
 }
 
 func (m *Manager) CancelRunningTargets() int {

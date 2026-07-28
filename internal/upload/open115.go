@@ -2,11 +2,13 @@ package upload
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	pathpkg "path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,12 +19,57 @@ import (
 )
 
 const (
-	open115ListPageSize      = int64(200)
-	open115RequestInterval   = 500 * time.Millisecond
-	maxOpen115UploadAttempts = 3
+	open115ListPageSize       = int64(200)
+	open115RequestInterval    = 500 * time.Millisecond
+	open115PathInfoRetryDelay = 250 * time.Millisecond
+	open115ChildrenCacheTTL   = 10 * time.Minute
+	open115PathNotFoundCode   = int64(20018)
+	maxOpen115UploadAttempts  = 3
 )
 
-type open115API interface {
+type open115PathInfo struct {
+	Size         string `json:"size"`
+	PTime        string `json:"ptime"`
+	UTime        string `json:"utime"`
+	FileName     string `json:"file_name"`
+	PickCode     string `json:"pick_code"`
+	SHA1         string `json:"sha1"`
+	FileID       string `json:"file_id"`
+	FileCategory string `json:"file_category"`
+}
+
+type open115CachedNode struct {
+	ID       string `json:"id"`
+	ParentID string `json:"parentId,omitempty"`
+	Path     string `json:"path"`
+	Name     string `json:"name"`
+	IsDir    bool   `json:"isDir"`
+	Size     int64  `json:"size,omitempty"`
+	SHA1     string `json:"sha1,omitempty"`
+}
+
+type open115CachedFile struct {
+	ID       string `json:"id"`
+	ParentID string `json:"parentId,omitempty"`
+	Name     string `json:"name"`
+	Category string `json:"category"`
+	PickCode string `json:"pickCode,omitempty"`
+	SHA1     string `json:"sha1,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+}
+
+type open115ChildrenCache struct {
+	Files []open115CachedFile `json:"files"`
+}
+
+type open115CacheStore interface {
+	Get(context.Context, string) (string, bool, error)
+	Set(context.Context, string, string) error
+	SetWithTTL(context.Context, string, string, time.Duration) error
+	Delete(context.Context, string) error
+}
+
+type open115SDKAPI interface {
 	UserInfo(context.Context) (*sdk115.UserInfoResp, error)
 	GetFiles(context.Context, *sdk115.GetFilesReq) (*sdk115.GetFilesResp, error)
 	Mkdir(context.Context, string, string) (*sdk115.MkdirResp, error)
@@ -31,9 +78,15 @@ type open115API interface {
 	UploadGetToken(context.Context) (*sdk115.UploadGetTokenResp, error)
 }
 
+type open115API interface {
+	open115SDKAPI
+	GetInfoByPath(context.Context, string) (*open115PathInfo, error)
+}
+
 type open115Session struct {
-	client  open115API
-	refresh func(context.Context) (*sdk115.RefreshTokenResp, error)
+	client   open115SDKAPI
+	refresh  func(context.Context) (*sdk115.RefreshTokenResp, error)
+	pathInfo func(context.Context, string) (*open115PathInfo, error)
 
 	apiMu sync.Mutex
 	mu    sync.RWMutex
@@ -62,6 +115,14 @@ func newOpen115Session(accessToken, refreshToken, expiresAt, userAgent string, o
 	}
 	session.client = client
 	session.refresh = client.RefreshToken
+	session.pathInfo = func(ctx context.Context, providerPath string) (*open115PathInfo, error) {
+		var info open115PathInfo
+		_, err := client.AuthRequest(ctx, sdk115.ApiFsGetFolderInfo, http.MethodPost, &info, sdk115.ReqWithForm(sdk115.Form{"path": providerPath}))
+		if err != nil {
+			return nil, err
+		}
+		return &info, nil
+	}
 	return session
 }
 
@@ -182,6 +243,18 @@ func (s *open115Session) GetFiles(ctx context.Context, request *sdk115.GetFilesR
 	return s.client.GetFiles(ctx, request)
 }
 
+func (s *open115Session) GetInfoByPath(ctx context.Context, providerPath string) (*open115PathInfo, error) {
+	s.apiMu.Lock()
+	defer s.apiMu.Unlock()
+	if err := s.ensureAccessToken(ctx); err != nil {
+		return nil, err
+	}
+	if s.pathInfo == nil {
+		return nil, errors.New("115 Open path info is unavailable")
+	}
+	return s.pathInfo(ctx, providerPath)
+}
+
 func (s *open115Session) Mkdir(ctx context.Context, parentID, name string) (*sdk115.MkdirResp, error) {
 	s.apiMu.Lock()
 	defer s.apiMu.Unlock()
@@ -228,6 +301,9 @@ type open115Provider struct {
 
 	directoryMu  sync.RWMutex
 	directoryIDs map[string]string
+	cacheStore   open115CacheStore
+
+	pathInfoRetryDelay time.Duration
 
 	uploadContent    func(context.Context, string, string, int64, *os.File, *open115Digest) error
 	lookupChild      func(context.Context, string, string) (sdk115.GetFilesResp_File, bool, error)
@@ -239,17 +315,22 @@ type open115Provider struct {
 	ossTokenExpiresAt time.Time
 }
 
-func newOpen115Provider(session *open115Session) (*open115Provider, error) {
+func newOpen115Provider(session *open115Session, cacheStores ...open115CacheStore) (*open115Provider, error) {
 	if session == nil || session.client == nil {
 		return nil, errors.New("115 Open session is unavailable")
 	}
-	return &open115Provider{
-		client:          session,
-		requestGuard:    newCookie115RequestGuard(),
-		requestInterval: open115RequestInterval,
-		directoryIDs:    map[string]string{"/": "0"},
-		ossHTTPClient:   new115OSSHTTPClient(),
-	}, nil
+	provider := &open115Provider{
+		client:             session,
+		requestGuard:       newCookie115RequestGuard(),
+		requestInterval:    open115RequestInterval,
+		directoryIDs:       map[string]string{"/": "0"},
+		pathInfoRetryDelay: open115PathInfoRetryDelay,
+		ossHTTPClient:      new115OSSHTTPClient(),
+	}
+	if len(cacheStores) > 0 {
+		provider.cacheStore = cacheStores[0]
+	}
+	return provider, nil
 }
 
 func (p *open115Provider) Check(ctx context.Context) error {
@@ -312,7 +393,7 @@ func (p *open115Provider) Upload(ctx context.Context, localPath, remotePath stri
 		return RemoteFile{}, fmt.Errorf("local file changed after batch snapshot: %s", localPath)
 	}
 
-	existing, found, err := p.findChild(ctx, parentID, name)
+	existing, found, err := p.findPathEntry(ctx, remotePath, parentID, name, -1)
 	if err != nil {
 		return RemoteFile{}, err
 	}
@@ -353,7 +434,7 @@ func (p *open115Provider) Upload(ctx context.Context, localPath, remotePath stri
 			return RemoteFile{ID: existing.Fid, Size: existing.FS, SHA1: existing.Sha1, LocalSHA1: localSHA1, Outcome: decision.outcome}, nil
 		}
 		intendedOutcome = store.UploadOutcomeReplaced
-		if err := p.deleteFile(ctx, parentID, existing.Fid); err != nil {
+		if err := p.deleteFile(ctx, remotePath, parentID, existing.Fid); err != nil {
 			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("replace existing 115 Open file %s: %w", remotePath, err)}
 		}
 	}
@@ -363,10 +444,11 @@ func (p *open115Provider) Upload(ctx context.Context, localPath, remotePath stri
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("hash local file for upload: %w", err)}
 	}
 	localSHA1 = resolved.SHA1
-	remote, err := p.uploadAndVerify(ctx, parentID, name, size, file, resolved)
+	remote, err := p.uploadAndVerify(ctx, remotePath, parentID, name, size, file, resolved)
 	if err != nil {
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("115 Open upload %s: %w", remotePath, err)}
 	}
+	p.invalidateChildren(pathpkg.Dir(remotePath))
 	remote.Outcome = intendedOutcome
 	remote.LocalSHA1 = localSHA1
 	if strings.TrimSpace(remote.SHA1) == "" {
@@ -399,7 +481,7 @@ func (p *open115Provider) Verify(ctx context.Context, remotePath string, size in
 	if err != nil {
 		return RemoteFile{}, false, err
 	}
-	remote, found, err := p.findChildMatchingSize(ctx, parentID, name, size)
+	remote, found, err := p.findPathEntry(ctx, remotePath, parentID, name, size)
 	if err != nil || !found || remote.Fc == "0" || remote.FS != size {
 		return RemoteFile{}, false, err
 	}
@@ -410,7 +492,7 @@ func (p *open115Provider) Verify(ctx context.Context, remotePath string, size in
 	return RemoteFile{ID: remote.Fid, Size: remote.FS, SHA1: remote.Sha1, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeCreated}, true, nil
 }
 
-func (p *open115Provider) uploadAndVerify(ctx context.Context, parentID, name string, size int64, file *os.File, digest *open115Digest) (RemoteFile, error) {
+func (p *open115Provider) uploadAndVerify(ctx context.Context, remotePath, parentID, name string, size int64, file *os.File, digest *open115Digest) (RemoteFile, error) {
 	upload := p.uploadOpen115Content
 	if p.uploadContent != nil {
 		upload = p.uploadContent
@@ -422,7 +504,7 @@ func (p *open115Provider) uploadAndVerify(ctx context.Context, parentID, name st
 		}
 		uploadErr := upload(ctx, parentID, name, size, file, digest)
 		if uploadErr == nil {
-			remote, verifyErr := p.waitForFile(ctx, parentID, name, size)
+			remote, verifyErr := p.waitForFile(ctx, remotePath, parentID, name, size)
 			if verifyErr == nil && strings.TrimSpace(remote.SHA1) != "" && !strings.EqualFold(remote.SHA1, digest.SHA1) {
 				verifyErr = errors.New("verified 115 Open file has different content")
 			}
@@ -437,7 +519,7 @@ func (p *open115Provider) uploadAndVerify(ctx context.Context, parentID, name st
 		lastErr = uploadErr
 		var uncertain *uncertain115CommitError
 		if errors.As(uploadErr, &uncertain) {
-			remote, verifyErr := p.waitForFile(ctx, parentID, name, size)
+			remote, verifyErr := p.waitForFile(ctx, remotePath, parentID, name, size)
 			if verifyErr == nil && (strings.TrimSpace(remote.SHA1) == "" || strings.EqualFold(remote.SHA1, digest.SHA1)) {
 				return remote, nil
 			}
@@ -446,7 +528,7 @@ func (p *open115Provider) uploadAndVerify(ctx context.Context, parentID, name st
 		if !isRetryable115Error(uploadErr) {
 			return RemoteFile{}, uploadErr
 		}
-		remote, found, lookupErr := p.findChildMatchingSize(ctx, parentID, name, size)
+		remote, found, lookupErr := p.findPathEntry(ctx, remotePath, parentID, name, size)
 		if lookupErr != nil {
 			return RemoteFile{}, fmt.Errorf("%w; remote check before retry also failed: %v", uploadErr, lookupErr)
 		}
@@ -465,11 +547,73 @@ func (p *open115Provider) uploadAndVerify(ctx context.Context, parentID, name st
 	return RemoteFile{}, fmt.Errorf("failed after %d attempts: %w", maxOpen115UploadAttempts, lastErr)
 }
 
+func (p *open115Provider) getInfoByPath(ctx context.Context, remotePath string) (*open115PathInfo, error) {
+	info, err := p.getInfoByPathOnce(ctx, remotePath)
+	if err == nil || !isOpen115PathNotFound(err) {
+		return info, err
+	}
+	if p.pathInfoRetryDelay > 0 {
+		timer := time.NewTimer(p.pathInfoRetryDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return p.getInfoByPathOnce(ctx, remotePath)
+}
+
+func (p *open115Provider) getInfoByPathOnce(ctx context.Context, remotePath string) (*open115PathInfo, error) {
+	if err := p.waitRequest(ctx); err != nil {
+		return nil, err
+	}
+	return p.client.GetInfoByPath(ctx, normalize115Path(remotePath))
+}
+
+func isOpen115PathNotFound(err error) bool {
+	var apiErr *sdk115.Error
+	return errors.As(err, &apiErr) && apiErr.Code == open115PathNotFoundCode
+}
+
+func open115FileFromPathInfo(info *open115PathInfo, parentID, fallbackName string) sdk115.GetFilesResp_File {
+	if info == nil {
+		return sdk115.GetFilesResp_File{}
+	}
+	size, _ := strconv.ParseInt(strings.TrimSpace(info.Size), 10, 64)
+	name := strings.TrimSpace(info.FileName)
+	if name == "" {
+		name = fallbackName
+	}
+	return sdk115.GetFilesResp_File{
+		Fid:  strings.TrimSpace(info.FileID),
+		Pid:  strings.TrimSpace(parentID),
+		Fc:   strings.TrimSpace(info.FileCategory),
+		Fn:   name,
+		Pc:   strings.TrimSpace(info.PickCode),
+		Sha1: strings.TrimSpace(info.SHA1),
+		FS:   size,
+	}
+}
+
 func (p *open115Provider) ensureDirectory(ctx context.Context, remotePath string) (string, error) {
 	remotePath = normalize115Path(remotePath)
 	if id, ok := p.cachedDirectoryID(remotePath); ok {
 		return id, nil
 	}
+	if info, err := p.getInfoByPath(ctx, remotePath); err == nil {
+		if strings.TrimSpace(info.FileID) == "" {
+			return "", fmt.Errorf("115 Open path info returned no file_id for %s", remotePath)
+		}
+		if info.FileCategory != "0" {
+			return "", fmt.Errorf("115 Open path is not a directory: %s", remotePath)
+		}
+		p.cacheDirectoryID(remotePath, info.FileID)
+		return info.FileID, nil
+	} else if !isOpen115PathNotFound(err) {
+		return "", fmt.Errorf("resolve 115 Open directory %s: %w", remotePath, err)
+	}
+
 	currentID, currentPath := "0", "/"
 	for _, segment := range strings.Split(strings.Trim(remotePath, "/"), "/") {
 		currentPath = pathpkg.Join(currentPath, segment)
@@ -496,6 +640,7 @@ func (p *open115Provider) ensureDirectory(ctx context.Context, remotePath string
 		if createErr == nil && created != nil && strings.TrimSpace(created.FileID) != "" {
 			currentID = created.FileID
 			p.cacheDirectoryID(currentPath, currentID)
+			p.invalidateChildren(pathpkg.Dir(currentPath))
 			continue
 		}
 		child, found, lookupErr := p.findChild(ctx, currentID, segment)
@@ -517,6 +662,16 @@ func (p *open115Provider) resolveDirectory(ctx context.Context, remotePath strin
 	if id, ok := p.cachedDirectoryID(remotePath); ok {
 		return id, nil
 	}
+	if info, err := p.getInfoByPath(ctx, remotePath); err == nil {
+		if strings.TrimSpace(info.FileID) == "" || info.FileCategory != "0" {
+			return "", fmt.Errorf("115 Open directory not found: %s", remotePath)
+		}
+		p.cacheDirectoryID(remotePath, info.FileID)
+		return info.FileID, nil
+	} else if !isOpen115PathNotFound(err) {
+		return "", fmt.Errorf("resolve 115 Open directory %s: %w", remotePath, err)
+	}
+
 	currentID, currentPath := "0", "/"
 	for _, segment := range strings.Split(strings.Trim(remotePath, "/"), "/") {
 		currentPath = pathpkg.Join(currentPath, segment)
@@ -533,12 +688,31 @@ func (p *open115Provider) resolveDirectory(ctx context.Context, remotePath strin
 	return currentID, nil
 }
 
-func (p *open115Provider) deleteFile(ctx context.Context, parentID, fileID string) error {
+func (p *open115Provider) deleteFile(ctx context.Context, remotePath, parentID, fileID string) error {
 	if err := p.waitRequest(ctx); err != nil {
 		return err
 	}
 	_, err := p.client.DelFile(ctx, &sdk115.DelFileReq{FileIDs: fileID, ParentID: parentID})
+	if err == nil {
+		p.invalidateNode(remotePath)
+		p.invalidateChildren(pathpkg.Dir(remotePath))
+	}
 	return err
+}
+
+func (p *open115Provider) findPathEntry(ctx context.Context, remotePath, parentID, name string, preferredSize int64) (sdk115.GetFilesResp_File, bool, error) {
+	info, err := p.getInfoByPath(ctx, remotePath)
+	if err == nil {
+		item := open115FileFromPathInfo(info, parentID, name)
+		if strings.TrimSpace(item.Fid) == "" {
+			return sdk115.GetFilesResp_File{}, false, fmt.Errorf("115 Open path info returned no file_id for %s", remotePath)
+		}
+		return item, true, nil
+	}
+	if !isOpen115PathNotFound(err) {
+		return sdk115.GetFilesResp_File{}, false, err
+	}
+	return p.findChildWithPreferredSize(ctx, parentID, name, preferredSize)
 }
 
 func (p *open115Provider) findChild(ctx context.Context, parentID, name string) (sdk115.GetFilesResp_File, bool, error) {
@@ -577,6 +751,10 @@ func (p *open115Provider) findChildWithPreferredSize(ctx context.Context, parent
 }
 
 func (p *open115Provider) listFiles(ctx context.Context, parentID, remotePath string) ([]sdk115.GetFilesResp_File, error) {
+	remotePath = normalize115Path(remotePath)
+	if files, ok := p.cachedChildren(ctx, remotePath); ok {
+		return files, nil
+	}
 	var files []sdk115.GetFilesResp_File
 	for offset := int64(0); ; offset += open115ListPageSize {
 		page, count, err := p.listPage(ctx, parentID, offset)
@@ -585,9 +763,16 @@ func (p *open115Provider) listFiles(ctx context.Context, parentID, remotePath st
 		}
 		files = append(files, page...)
 		if int64(len(files)) >= count || len(page) == 0 {
-			return files, nil
+			break
 		}
 	}
+	for _, file := range files {
+		if file.Fc == "0" && strings.TrimSpace(file.Fid) != "" {
+			p.cacheDirectoryID(pathpkg.Join(remotePath, file.Fn), file.Fid)
+		}
+	}
+	p.cacheChildren(ctx, remotePath, files)
+	return files, nil
 }
 
 func (p *open115Provider) listPage(ctx context.Context, parentID string, offset int64) ([]sdk115.GetFilesResp_File, int64, error) {
@@ -604,9 +789,9 @@ func (p *open115Provider) listPage(ctx context.Context, parentID string, offset 
 	return result.Data, result.Count, nil
 }
 
-func (p *open115Provider) waitForFile(ctx context.Context, parentID, name string, size int64) (RemoteFile, error) {
+func (p *open115Provider) waitForFile(ctx context.Context, remotePath, parentID, name string, size int64) (RemoteFile, error) {
 	for attempt := 0; attempt < 4; attempt++ {
-		file, found, err := p.findChildMatchingSize(ctx, parentID, name, size)
+		file, found, err := p.findPathEntry(ctx, remotePath, parentID, name, size)
 		if err != nil {
 			return RemoteFile{}, err
 		}
@@ -618,23 +803,104 @@ func (p *open115Provider) waitForFile(ctx context.Context, parentID, name string
 }
 
 func (p *open115Provider) cachedDirectoryID(remotePath string) (string, bool) {
+	remotePath = normalize115Path(remotePath)
 	p.directoryMu.RLock()
-	defer p.directoryMu.RUnlock()
-	id, ok := p.directoryIDs[normalize115Path(remotePath)]
-	return id, ok && strings.TrimSpace(id) != ""
+	id, ok := p.directoryIDs[remotePath]
+	p.directoryMu.RUnlock()
+	if ok && strings.TrimSpace(id) != "" {
+		return id, true
+	}
+	if p.cacheStore == nil {
+		return "", false
+	}
+	value, ok, err := p.cacheStore.Get(context.Background(), "node:"+remotePath)
+	if err != nil || !ok {
+		return "", false
+	}
+	var node open115CachedNode
+	if err := json.Unmarshal([]byte(value), &node); err != nil || !node.IsDir || strings.TrimSpace(node.ID) == "" {
+		return "", false
+	}
+	p.directoryMu.Lock()
+	p.directoryIDs[remotePath] = node.ID
+	p.directoryMu.Unlock()
+	return node.ID, true
 }
 
 func (p *open115Provider) cacheDirectoryID(remotePath, id string) {
+	remotePath = normalize115Path(remotePath)
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return
 	}
 	p.directoryMu.Lock()
-	defer p.directoryMu.Unlock()
 	if p.directoryIDs == nil {
 		p.directoryIDs = map[string]string{"/": "0"}
 	}
-	p.directoryIDs[normalize115Path(remotePath)] = id
+	p.directoryIDs[remotePath] = id
+	p.directoryMu.Unlock()
+	if p.cacheStore == nil || remotePath == "/" {
+		return
+	}
+	encoded, err := json.Marshal(open115CachedNode{ID: id, Path: remotePath, Name: pathpkg.Base(remotePath), IsDir: true})
+	if err == nil {
+		_ = p.cacheStore.Set(context.Background(), "node:"+remotePath, string(encoded))
+	}
+}
+
+func (p *open115Provider) cachedChildren(ctx context.Context, remotePath string) ([]sdk115.GetFilesResp_File, bool) {
+	if p.cacheStore == nil {
+		return nil, false
+	}
+	value, ok, err := p.cacheStore.Get(ctx, "children:"+normalize115Path(remotePath))
+	if err != nil || !ok {
+		return nil, false
+	}
+	var cached open115ChildrenCache
+	if err := json.Unmarshal([]byte(value), &cached); err != nil {
+		return nil, false
+	}
+	files := make([]sdk115.GetFilesResp_File, 0, len(cached.Files))
+	for _, file := range cached.Files {
+		files = append(files, sdk115.GetFilesResp_File{
+			Fid: file.ID, Pid: file.ParentID, Fn: file.Name, Fc: file.Category,
+			Pc: file.PickCode, Sha1: file.SHA1, FS: file.Size,
+		})
+	}
+	return files, true
+}
+
+func (p *open115Provider) cacheChildren(ctx context.Context, remotePath string, files []sdk115.GetFilesResp_File) {
+	if p.cacheStore == nil {
+		return
+	}
+	cachedFiles := make([]open115CachedFile, 0, len(files))
+	for _, file := range files {
+		cachedFiles = append(cachedFiles, open115CachedFile{
+			ID: file.Fid, ParentID: file.Pid, Name: file.Fn, Category: file.Fc,
+			PickCode: file.Pc, SHA1: file.Sha1, Size: file.FS,
+		})
+	}
+	encoded, err := json.Marshal(open115ChildrenCache{Files: cachedFiles})
+	if err == nil {
+		_ = p.cacheStore.SetWithTTL(ctx, "children:"+normalize115Path(remotePath), string(encoded), open115ChildrenCacheTTL)
+	}
+}
+
+func (p *open115Provider) invalidateNode(remotePath string) {
+	remotePath = normalize115Path(remotePath)
+	p.directoryMu.Lock()
+	delete(p.directoryIDs, remotePath)
+	p.directoryMu.Unlock()
+	if p.cacheStore != nil {
+		_ = p.cacheStore.Delete(context.Background(), "node:"+remotePath)
+	}
+}
+
+func (p *open115Provider) invalidateChildren(remotePath string) {
+	if p.cacheStore != nil {
+		_ = p.cacheStore.Delete(context.Background(), "children:"+normalize115Path(remotePath))
+	}
 }
 
 func (p *open115Provider) waitRequest(ctx context.Context) error {

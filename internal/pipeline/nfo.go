@@ -21,6 +21,7 @@ import (
 	"NyaMediaMetadataTool/internal/episodeparse"
 	"NyaMediaMetadataTool/internal/executil"
 	"NyaMediaMetadataTool/internal/fanart"
+	"NyaMediaMetadataTool/internal/mediapath"
 	"NyaMediaMetadataTool/internal/store"
 	"NyaMediaMetadataTool/internal/tmdb"
 )
@@ -360,7 +361,7 @@ func claimSeriesScopes(ctx context.Context, claim SeriesScopeClaimFunc, showType
 }
 
 func parseEpisodeInfo(path string, cfg config.Config) (episodeInfo, bool) {
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	name := strings.TrimSuffix(mediapath.Base(path), mediapath.Ext(path))
 	parsed, ok := episodeparse.Parse(name)
 	if !ok {
 		return episodeInfo{}, false
@@ -389,7 +390,7 @@ func parseShowName(path string, fileTitle string, episodeToken string) string {
 	if show != "" {
 		return show
 	}
-	return cleanTMDBQuery(filepath.Base(showDirectory(path)))
+	return cleanTMDBQuery(mediapath.Base(showDirectory(path)))
 }
 
 func cleanTMDBQuery(value string) string {
@@ -413,7 +414,7 @@ func cleanTMDBQuery(value string) string {
 }
 
 func parseTMDBShowIDFromPath(path string) int {
-	match := tmdbIDPattern.FindStringSubmatch(filepath.Base(path))
+	match := tmdbIDPattern.FindStringSubmatch(mediapath.Base(path))
 	if len(match) == 2 {
 		id, err := strconv.Atoi(match[1])
 		if err == nil && id > 0 {
@@ -424,7 +425,7 @@ func parseTMDBShowIDFromPath(path string) int {
 }
 
 func parseDirectoryYearFromPath(path string) string {
-	match := directoryYearPattern.FindStringSubmatch(filepath.Base(path))
+	match := directoryYearPattern.FindStringSubmatch(mediapath.Base(path))
 	if len(match) > 0 {
 		return strings.Trim(match[0], " []{}()")
 	}
@@ -432,9 +433,9 @@ func parseDirectoryYearFromPath(path string) string {
 }
 
 func showDirectory(path string) string {
-	dir := filepath.Dir(path)
-	if seasonDirPattern.MatchString(filepath.Base(dir)) {
-		return filepath.Dir(dir)
+	dir := mediapath.Dir(path)
+	if seasonDirPattern.MatchString(mediapath.Base(dir)) {
+		return mediapath.Dir(dir)
 	}
 	return dir
 }
@@ -444,7 +445,7 @@ func showDirectory(path string) string {
 // prevents a show with multiple seasons from being split into separate upload
 // batches or merged with an unrelated sibling directory.
 func SeriesDirectory(path string) string {
-	return filepath.Clean(showDirectory(path))
+	return mediapath.Clean(showDirectory(path))
 }
 
 func findTMDBEpisode(ctx context.Context, client *tmdb.Client, episode episodeInfo) (tmdb.Episode, error) {

@@ -20,6 +20,7 @@ import (
 
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/episodeparse"
+	"NyaMediaMetadataTool/internal/mediapath"
 	"NyaMediaMetadataTool/internal/tmdb"
 )
 
@@ -798,11 +799,11 @@ func finalizeItem(path string, template string, item *PreviewItem) {
 	item.SanitizedTitle = sanitizeFilenamePart(item.Title)
 	rendered := applyTemplate(template, *item)
 	if strings.TrimSpace(rendered) == "" {
-		rendered = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		rendered = strings.TrimSuffix(mediapath.Base(path), mediapath.Ext(path))
 	}
 	item.RenderedTarget = strings.TrimSpace(rendered)
 	item.NewPath = targetPathFromTemplate(path, rendered)
-	item.NewName = filepath.Base(item.NewPath)
+	item.NewName = mediapath.Base(item.NewPath)
 	applyConflict(path, item)
 }
 
@@ -811,15 +812,15 @@ func targetPathFromTemplate(sourcePath string, rendered string) string {
 	if rendered == "" {
 		return ""
 	}
-	sourceExt := filepath.Ext(sourcePath)
-	if strings.EqualFold(filepath.Ext(rendered), sourceExt) {
-		rendered = strings.TrimSuffix(rendered, filepath.Ext(rendered))
+	sourceExt := mediapath.Ext(sourcePath)
+	if strings.EqualFold(mediapath.Ext(rendered), sourceExt) {
+		rendered = strings.TrimSuffix(rendered, mediapath.Ext(rendered))
 	}
 	rendered = sanitizePath(rendered) + sourceExt
 	if isAbsoluteTargetPath(rendered) {
-		return filepath.Clean(rendered)
+		return mediapath.Clean(rendered)
 	}
-	return filepath.Join(filepath.Dir(sourcePath), rendered)
+	return mediapath.Join(mediapath.Dir(sourcePath), rendered)
 }
 
 func sanitizePath(value string) string {
@@ -838,10 +839,11 @@ func sanitizePath(value string) string {
 			cleaned = append(cleaned, part)
 		}
 	}
-	joined := filepath.Join(cleaned...)
-	if joined == "." {
-		joined = ""
+	separator := string(os.PathSeparator)
+	if strings.Contains(value, `\`) {
+		separator = `\`
 	}
+	joined := strings.Join(cleaned, separator)
 	return volume + separatorPrefix + joined
 }
 
@@ -887,7 +889,7 @@ type parsedEpisode struct {
 }
 
 func parseEpisode(path string, cfg config.Config) (parsedEpisode, bool) {
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	name := strings.TrimSuffix(mediapath.Base(path), mediapath.Ext(path))
 	parsed, ok := episodeparse.Parse(name)
 	if !ok {
 		showDir := showDirectory(path)
@@ -897,7 +899,7 @@ func parseEpisode(path string, cfg config.Config) (parsedEpisode, bool) {
 	releaseGroup := parseReleaseGroup(name)
 	show := parseShowName(path, name, parsed.Token)
 	if show == "" {
-		show = cleanTMDBQuery(filepath.Base(showDir))
+		show = cleanTMDBQuery(mediapath.Base(showDir))
 	}
 	return parsedEpisode{show: show, releaseGroup: releaseGroup, year: parseDirectoryYearFromPath(showDir), tmdbShowID: parseTMDBShowIDFromPath(showDir), season: parsed.Season, episode: parsed.Episode}, true
 }
@@ -922,11 +924,11 @@ func parseShowName(path string, fileTitle string, episodeToken string) string {
 	if show != "" {
 		return show
 	}
-	return cleanTMDBQuery(filepath.Base(showDirectory(path)))
+	return cleanTMDBQuery(mediapath.Base(showDirectory(path)))
 }
 
 func parseTMDBShowIDFromPath(path string) int {
-	match := tmdbIDPattern.FindStringSubmatch(filepath.Base(path))
+	match := tmdbIDPattern.FindStringSubmatch(mediapath.Base(path))
 	if len(match) == 2 {
 		id, err := strconv.Atoi(match[1])
 		if err == nil && id > 0 {
@@ -937,7 +939,7 @@ func parseTMDBShowIDFromPath(path string) int {
 }
 
 func parseDirectoryYearFromPath(path string) string {
-	match := directoryYearPattern.FindStringSubmatch(filepath.Base(path))
+	match := directoryYearPattern.FindStringSubmatch(mediapath.Base(path))
 	if len(match) > 0 {
 		return strings.Trim(match[0], " []{}()")
 	}
@@ -945,9 +947,9 @@ func parseDirectoryYearFromPath(path string) string {
 }
 
 func showDirectory(path string) string {
-	dir := filepath.Dir(path)
-	if seasonDirPattern.MatchString(filepath.Base(dir)) {
-		return filepath.Dir(dir)
+	dir := mediapath.Dir(path)
+	if seasonDirPattern.MatchString(mediapath.Base(dir)) {
+		return mediapath.Dir(dir)
 	}
 	return dir
 }

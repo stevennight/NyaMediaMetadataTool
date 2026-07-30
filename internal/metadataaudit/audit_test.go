@@ -285,6 +285,20 @@ func TestCompareEmbyDecodesURLEncodedSourcePaths(t *testing.T) {
 	}
 }
 
+func TestMediaBaseNameSupportsWindowsAndUnixSeparators(t *testing.T) {
+	t.Parallel()
+
+	const expected = "Show - S01E01.mkv"
+	for _, path := range []string{
+		`E:\TV\Show - S01E01.mkv`,
+		`/media/tv/Show - S01E01.mkv`,
+	} {
+		if actual := mediaBaseName(path); actual != expected {
+			t.Fatalf("mediaBaseName(%q) = %q, want %q", path, actual, expected)
+		}
+	}
+}
+
 func TestApplyMissingEpisodesDoesNotAssumeOneBasedWhenCountOnlyMatches(t *testing.T) {
 	t.Parallel()
 

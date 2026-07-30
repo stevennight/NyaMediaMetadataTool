@@ -1128,7 +1128,10 @@ func mediaStemKey(path string) string {
 }
 
 func mediaBaseName(path string) string {
-	name := filepath.Base(strings.TrimSpace(path))
+	name := strings.TrimSpace(path)
+	if separator := strings.LastIndexAny(name, `/\`); separator >= 0 {
+		name = name[separator+1:]
+	}
 	if decoded, err := url.PathUnescape(name); err == nil {
 		return decoded
 	}

@@ -9,7 +9,7 @@
 - 媒体目录管理：支持多个目录、递归扫描、实时监控、手动重扫、目录级处理策略覆盖。
 - 任务队列：SQLite 记录任务、日志、产物和工具状态；支持并发处理、失败重试、取消运行中任务、重新排队和忽略失败任务。
 - 伴生文件生成：支持字幕抽取、`mediainfo.json`、BIF 预览索引、单集 NFO、剧集/季度 NFO、单集缩略图。
-- 网盘发布：上传作为每个媒体目录的独立处理步骤；一个目录可配置多个 Provider 实例，并分别设置远端根目录映射、碰撞策略和文件类型。批次按配置独立重试、校验、记录文件清单，并在完成后写入可租约消费的 outbox 事件。首个 Provider 为 `115cookie`，`115open`、123 云盘和百度网盘已保留运行时注册与凭据契约。
+- 网盘发布：上传作为每个媒体目录的独立处理步骤；一个目录可配置多个 Provider 实例，并分别设置远端根目录映射、碰撞策略和文件类型。批次按配置独立重试、校验、记录文件清单，并在完成后写入可租约消费的 outbox 事件。当前支持 `115cookie` 和带 PKCE/Token 自动刷新的第三方 `115open`；123 云盘和百度网盘保留运行时注册与凭据契约。
 - 元数据增强：支持 TMDB 查询、缓存、语言/地区配置、备用语言、代理，以及可选 fanart.tv 图片来源。
 - 图片接管：默认关闭；开启后可生成 `poster.jpg`、`fanart.jpg`、`clearlogo.png`、`clearart.png` 和季度海报。
 - 桌面工作台：提供仪表盘、首次运行检查、设置、媒体目录、任务、上传、重命名、剧集核对等页面，并集成原生路径选择、文件定位、系统通知和退出保护。
@@ -23,8 +23,11 @@
 main.go          Wails 桌面入口
 desktop_app.go   原生桌面能力桥接
 build/           三平台应用图标与打包元数据
-.github/workflows/desktop-build.yml
-                 Windows、macOS、Linux 原生构建 CI
+.github/workflows/
+  ci.yml         三平台测试与桌面构建 CI
+  release.yml    tag 驱动的安装包与 GitHub Release 发布
+scripts/          版本同步和 Wails 发布构建脚本
+VERSION           当前稳定版本的唯一来源
 cmd/
   nyammd/        兼容的 CLI/Web 服务入口
   bifunpack/     BIF 图片解包 CLI
@@ -60,6 +63,16 @@ docs/
 
 外部工具路径可以在桌面端“设置”中通过原生文件选择器配置，也可以直接编辑 `config.yaml`。应用启动后可在设置页执行工具可用性检查。
 
+## 安装
+
+Windows、macOS 和 Linux 安装包发布在 [GitHub Releases](https://github.com/stevennight/NyaMediaMetadataTool/releases/latest)，每个版本附带 `SHA256SUMS`：
+
+- Windows：`windows-amd64-installer.exe`，当前用户范围的 NSIS 安装包。
+- macOS：`macos-universal.dmg`，同时支持 Intel 和 Apple Silicon。
+- Linux：`linux-amd64.deb` 或免安装的 `linux-amd64.AppImage`。
+
+当前产物未配置商业代码签名。Windows 首次安装可能显示 SmartScreen 提示，macOS 正式对外分发前还应配置 Developer ID 签名和公证。Windows 安装版可在“设置 > 关于”中检查更新；下载的安装器会先按 Release 中的 `SHA256SUMS` 校验，开发版、便携版和非 Windows 平台不会执行应用内自动安装。
+
 ## 桌面开发
 
 安装与项目版本一致的 Wails CLI，并检查本机依赖：
@@ -80,37 +93,68 @@ wails dev
 
 `wails dev` 会启动 Vite 热更新和 Wails 窗口。桌面端首次启动会在系统应用数据目录创建默认配置、SQLite 数据库和日志目录。
 
+## 版本管理
+
+仓库根目录的 `VERSION` 是源码版本的唯一来源，稳定版本使用 `MAJOR.MINOR.PATCH`。以下命令会同步更新 `VERSION`、`wails.json`、`web/package.json` 和 `web/package-lock.json`：
+
+```powershell
+node scripts/version.mjs set 0.2.0
+```
+
+CI 和 Release 都会执行一致性校验；也可在本地单独运行：
+
+```powershell
+node scripts/version.mjs check
+```
+
+正式构建通过链接参数注入版本、Git 提交、UTC 构建时间和更新仓库。设置页“关于”会显示这些信息。普通本地构建显示 `${VERSION}-dev`，因此不会被识别为可自动更新的正式版本。
+
 ## 正式打包
 
-Wails 2 不支持在一个主机上完整交叉打包三种桌面平台。发布构建应分别在 Windows、macOS 和 Linux 原生环境执行；产物写入 `build/bin/`。
+Wails 2 需要在 Windows、macOS 和 Linux 原生环境分别打包。`scripts/wails-build.mjs` 统一处理版本与构建元数据，产物写入 `build/bin/`。
 
-Windows x64 可执行文件：
-
-```powershell
-wails build -clean -platform windows/amd64 -ldflags "-X main.version=0.1.0"
-```
-
-安装 NSIS 后可同时生成当前用户范围的安装包：
+Windows x64 NSIS 安装包（需要先安装 NSIS，并确保 `makensis` 在 `PATH` 中）：
 
 ```powershell
-wails build -clean -platform windows/amd64 -nsis -installscope user -ldflags "-X main.version=0.1.0"
+$env:NYAMEDIA_VERSION = (Get-Content VERSION -Raw).Trim()
+$env:NYAMEDIA_COMMIT = (git rev-parse HEAD)
+$env:NYAMEDIA_BUILD_DATE = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+node scripts/wails-build.mjs -clean -platform windows/amd64 -nsis -installscope user
 ```
 
-macOS 通用应用包，需要在 macOS 主机执行：
+macOS 通用应用包需要在 macOS 主机执行：
 
 ```bash
-wails build -clean -platform darwin/universal -ldflags "-X main.version=0.1.0"
+NYAMEDIA_VERSION="$(cat VERSION)" \
+NYAMEDIA_COMMIT="$(git rev-parse HEAD)" \
+NYAMEDIA_BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+node scripts/wails-build.mjs -clean -platform darwin/universal
 ```
 
-Linux x64 二进制，需要在安装了 GTK/WebKitGTK 开发依赖的 Linux 主机执行：
+Linux x64 二进制需要在安装了 GTK/WebKitGTK 4.1 开发依赖的 Linux 主机执行：
 
 ```bash
-wails build -clean -platform linux/amd64 -tags webkit2_41 -ldflags "-X main.version=0.1.0"
+NYAMEDIA_VERSION="$(cat VERSION)" \
+NYAMEDIA_COMMIT="$(git rev-parse HEAD)" \
+NYAMEDIA_BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+node scripts/wails-build.mjs -clean -platform linux/amd64 -tags webkit2_41
 ```
 
-上述 Linux 示例面向提供 WebKitGTK 4.1 的新发行版；仍提供 WebKitGTK 4.0 的系统可以去掉 `-tags webkit2_41` 并安装对应开发包。`build/linux/nya-media-metadata-tool.desktop` 是发行包使用的桌面入口元数据，打包时将 `build/appicon.png` 安装为主题图标 `nya-media-metadata-tool`。
+## CI 与发布
 
-`.github/workflows/desktop-build.yml` 会在三种原生 GitHub Runner 上执行 Go 测试、前端构建和 Wails 打包，并上传 14 天保留的未签名产物。正式对外分发前还需要在受保护的发布流水线中配置代码签名；macOS 发行版还需要公证。版本发布时同步修改 workflow、`wails.json` 中的 `info.productVersion` 和上述 `main.version` 注入值。
+`.github/workflows/ci.yml` 在推送到 `master`、Pull Request 和手动触发时运行版本校验、前端生产构建、Go 测试，并在 Windows、macOS 和 Linux 原生 Runner 上验证 Wails 桌面构建。
+
+发布新版本时，先更新并提交源码版本，再创建完全一致的 tag：
+
+```powershell
+node scripts/version.mjs set 0.2.0
+git add VERSION wails.json web/package.json web/package-lock.json
+git commit -m "chore: release 0.2.0"
+git tag v0.2.0
+git push origin master v0.2.0
+```
+
+`vMAJOR.MINOR.PATCH` 标签触发 `.github/workflows/release.yml`。流水线验证 tag 与源码版本、执行测试、构建 Windows NSIS、macOS DMG、Linux DEB/AppImage，汇总 SHA-256 后创建 GitHub Release。版本号还受 Windows 资源版本范围限制：major/minor 不超过 255，patch 不超过 65535。
 
 ## 桌面数据目录
 

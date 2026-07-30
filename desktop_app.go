@@ -17,6 +17,7 @@ import (
 
 	"NyaMediaMetadataTool/internal/appcore"
 	"NyaMediaMetadataTool/internal/appdata"
+	"NyaMediaMetadataTool/internal/appupdate"
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/executil"
 	"NyaMediaMetadataTool/internal/renamer"
@@ -26,9 +27,15 @@ import (
 )
 
 type DesktopApp struct {
-	paths   appdata.Paths
-	version string
-	logger  *slog.Logger
+	paths            appdata.Paths
+	version          string
+	commit           string
+	buildDate        string
+	updateRepository string
+	logger           *slog.Logger
+	updateClient     appupdate.Client
+	installed        func() bool
+	launchInstaller  func(string) error
 
 	runtimeMu             sync.RWMutex
 	ctx                   context.Context
@@ -69,13 +76,16 @@ var errDesktopServiceClosed = errors.New("desktop service is shutting down")
 const defaultDesktopShutdownTimeout = 10 * time.Second
 
 type DesktopRuntimeInfo struct {
-	Desktop    bool   `json:"desktop"`
-	Platform   string `json:"platform"`
-	Arch       string `json:"arch"`
-	Version    string `json:"version"`
-	DataDir    string `json:"dataDir"`
-	ConfigPath string `json:"configPath"`
-	Database   string `json:"database"`
+	Desktop          bool   `json:"desktop"`
+	Platform         string `json:"platform"`
+	Arch             string `json:"arch"`
+	Version          string `json:"version"`
+	Commit           string `json:"commit"`
+	BuildDate        string `json:"buildDate"`
+	UpdateRepository string `json:"updateRepository"`
+	DataDir          string `json:"dataDir"`
+	ConfigPath       string `json:"configPath"`
+	Database         string `json:"database"`
 }
 
 type DesktopPreferences struct {
@@ -95,9 +105,17 @@ type DesktopRenamePreviewEvent struct {
 func NewDesktopApp(paths appdata.Paths, version string, logger *slog.Logger) *DesktopApp {
 	initCtx, cancelInit := context.WithCancel(context.Background())
 	app := &DesktopApp{
-		paths:           paths,
-		version:         version,
-		logger:          logger,
+		paths:            paths,
+		version:          version,
+		commit:           commit,
+		buildDate:        buildDate,
+		updateRepository: updateRepository,
+		logger:           logger,
+		updateClient: appupdate.Client{
+			Repository: updateRepository,
+		},
+		installed:       desktopInstalled,
+		launchInstaller: launchDesktopInstaller,
 		focusWindow:     focusDesktopWindow,
 		trayFactory:     newDesktopTray,
 		autostartStatus: desktopAutostartEnabled,
@@ -407,14 +425,50 @@ func (a *DesktopApp) GetRuntimeInfo() (DesktopRuntimeInfo, error) {
 		return DesktopRuntimeInfo{}, err
 	}
 	return DesktopRuntimeInfo{
-		Desktop:    true,
-		Platform:   runtime.GOOS,
-		Arch:       runtime.GOARCH,
-		Version:    a.version,
-		DataDir:    a.paths.Root,
-		ConfigPath: a.paths.Config,
-		Database:   service.Config.Database.Path,
+		Desktop:          true,
+		Platform:         runtime.GOOS,
+		Arch:             runtime.GOARCH,
+		Version:          a.version,
+		Commit:           a.commit,
+		BuildDate:        a.buildDate,
+		UpdateRepository: a.updateRepository,
+		DataDir:          a.paths.Root,
+		ConfigPath:       a.paths.Config,
+		Database:         service.Config.Database.Path,
 	}, nil
+}
+
+func (a *DesktopApp) CheckForUpdates() (appupdate.CheckResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return a.updateClient.Check(ctx, a.version, a.installed())
+}
+
+func (a *DesktopApp) DownloadAndInstallUpdate(requestedVersion string) error {
+	requestedVersion = strings.TrimSpace(requestedVersion)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	installer, err := a.updateClient.Download(
+		ctx,
+		a.version,
+		requestedVersion,
+		filepath.Join(a.paths.Root, "updates", requestedVersion),
+		a.installed(),
+	)
+	if err != nil {
+		return err
+	}
+	if err := a.launchInstaller(installer); err != nil {
+		return fmt.Errorf("launch update installer: %w", err)
+	}
+	if ctx := a.runtimeContext(); ctx != nil {
+		wailsRuntime.Quit(ctx)
+	}
+	return nil
+}
+
+func launchDesktopInstaller(path string) error {
+	return exec.Command(path).Start()
 }
 
 func (a *DesktopApp) GetDesktopPreferences() (DesktopPreferences, error) {

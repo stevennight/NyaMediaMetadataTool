@@ -10,6 +10,7 @@ import {
   CircleGauge,
   CloudUpload,
   Database,
+  Download,
   Eye,
   FileCheck2,
   Film,
@@ -40,8 +41,8 @@ import {
   X
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { getDesktopPreferences, getRuntimeInfo, notifyDesktop, pickDesktopDirectory, pickDesktopFile, previewDesktopRename, revealDesktopPath, setDesktopAutostart } from './desktop';
-import type { DesktopPreferences, DesktopRuntimeInfo } from './desktop';
+import { checkDesktopUpdates, downloadAndInstallDesktopUpdate, getDesktopPreferences, getRuntimeInfo, notifyDesktop, pickDesktopDirectory, pickDesktopFile, previewDesktopRename, revealDesktopPath, setDesktopAutostart } from './desktop';
+import type { DesktopPreferences, DesktopRuntimeInfo, DesktopUpdateCheckResult } from './desktop';
 import { applyThemeMode, readThemeMode } from './theme';
 import type { ThemeMode } from './theme';
 
@@ -494,7 +495,7 @@ type LanguageOption = { code: string; name: string };
 type RegionOption = { code: string; name: string };
 type SelectOption = { code: string; name: string };
 type PageKey = 'dashboard' | 'settings' | 'watchDirs' | 'tasks' | 'uploads' | 'rename' | 'audit';
-type SettingsTab = 'basic' | 'processing' | 'scraping' | 'sources';
+type SettingsTab = 'basic' | 'processing' | 'scraping' | 'sources' | 'about';
 
 function defaultOutputProcessing(): OutputProcessingConfig {
   return {
@@ -565,7 +566,8 @@ const settingsTabOptions: Array<{ value: SettingsTab; label: string }> = [
   { value: 'basic', label: '基础' },
   { value: 'processing', label: '处理' },
   { value: 'scraping', label: '刮削' },
-  { value: 'sources', label: '数据源' }
+  { value: 'sources', label: '数据源' },
+  { value: 'about', label: '关于' }
 ];
 
 const themeOptions: Array<{ value: ThemeMode; label: string; icon: LucideIcon }> = [
@@ -935,6 +937,21 @@ function healthStatusLabel(status?: string) {
     case '': return '连接中';
     default: return status;
   }
+}
+
+function updateSupportMessage(reason?: DesktopUpdateCheckResult['reason']) {
+  switch (reason) {
+    case 'developmentBuild': return '开发构建不提供自动更新';
+    case 'notInstalled': return '便携版不提供自动更新，请使用安装版';
+    case 'unsupportedPlatform': return '当前平台暂不提供应用内自动更新';
+    default: return '当前构建不提供自动更新';
+  }
+}
+
+function formatBuildDate(value?: string) {
+  if (!value || value === 'unknown') return '未知';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
 function uploadStatusPillClass(status: string) {
@@ -1307,6 +1324,9 @@ export function App() {
   const [checkingTools, setCheckingTools] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [savingDesktopPreferences, setSavingDesktopPreferences] = useState(false);
+  const [updateCheck, setUpdateCheck] = useState<DesktopUpdateCheckResult | null>(null);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
   const [cancelingTasks, setCancelingTasks] = useState(false);
   const [retryingTasks, setRetryingTasks] = useState(false);
   const [ignoringTasks, setIgnoringTasks] = useState(false);
@@ -3634,6 +3654,41 @@ export function App() {
     }
   }
 
+  async function checkForApplicationUpdates() {
+    setCheckingUpdates(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await checkDesktopUpdates();
+      setUpdateCheck(result);
+      if (result.status === 'upToDate') setNotice(`当前已是最新版本 ${result.currentVersion}。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '检查更新失败');
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }
+
+  function requestUpdateInstallation() {
+    if (updateCheck?.status !== 'available' || !updateCheck.version) return;
+    const targetVersion = updateCheck.version;
+    requestConfirmation({
+      title: `安装 NyaMediaMetadataTool ${targetVersion}？`,
+      message: '安装器下载并通过 SHA-256 校验后会启动，当前应用随后退出。',
+      confirmLabel: '下载并安装',
+      onConfirm: async () => {
+        setInstallingUpdate(true);
+        setError('');
+        try {
+          await downloadAndInstallDesktopUpdate(targetVersion);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : '无法安装更新');
+          setInstallingUpdate(false);
+        }
+      }
+    });
+  }
+
   function updateConfig(mutator: (draft: AppConfig) => void) {
     setConfig((current) => {
       if (!current) return current;
@@ -3822,7 +3877,7 @@ export function App() {
                 onClick={() => setSettingsTab(option.value)}
                 onKeyDown={(event) => handleSettingsTabKeyDown(event, option.value)}
               >{option.label}</button>)}
-            </div>} action={<div className="inline-actions"><button className="secondary icon-text-button" type="button" onClick={confirmDiscardConfigChanges} disabled={!configDirty || savingConfig}><RefreshCw size={16} />放弃修改</button><button className="icon-text-button" onClick={saveConfig} disabled={savingConfig || !configDirty || !config}><Save size={16} />{savingConfig ? '保存中' : '保存配置'}</button></div>}>
+            </div>} action={settingsTab === 'about' ? undefined : <div className="inline-actions"><button className="secondary icon-text-button" type="button" onClick={confirmDiscardConfigChanges} disabled={!configDirty || savingConfig}><RefreshCw size={16} />放弃修改</button><button className="icon-text-button" onClick={saveConfig} disabled={savingConfig || !configDirty || !config}><Save size={16} />{savingConfig ? '保存中' : '保存配置'}</button></div>}>
             {config ? (
               <div className="settings-scroll-region">
               <div className="config-form settings-form">
@@ -3889,6 +3944,34 @@ export function App() {
                   </SettingsGroup>
                   <SettingsGroup title="网络">
                     <label>代理<input value={config.scraping.proxy} onChange={(event) => updateConfig((draft) => { draft.scraping.proxy = event.target.value; })} placeholder="http://127.0.0.1:7890" /></label>
+                  </SettingsGroup>
+                </section>
+                <section id="settings-panel-about" className={`settings-section settings-section-wide ${settingsTab === 'about' ? 'active' : ''}`} role="tabpanel" aria-labelledby="settings-tab-about" hidden={settingsTab !== 'about'}>
+                  <SettingsGroup title="版本信息">
+                    <dl className="build-info-list">
+                      <div><dt>版本</dt><dd>{runtimeInfo?.version || '未知'}</dd></div>
+                      <div><dt>提交</dt><dd title={runtimeInfo?.commit}>{runtimeInfo?.commit && runtimeInfo.commit !== 'unknown' ? runtimeInfo.commit.slice(0, 12) : '未知'}</dd></div>
+                      <div><dt>构建时间</dt><dd>{formatBuildDate(runtimeInfo?.buildDate)}</dd></div>
+                      <div><dt>发布仓库</dt><dd>{runtimeInfo?.updateRepository || '未配置'}</dd></div>
+                      <div><dt>平台</dt><dd>{runtimeInfo?.desktop ? `${runtimeInfo.platform} / ${runtimeInfo.arch}` : 'Web 管理模式'}</dd></div>
+                    </dl>
+                  </SettingsGroup>
+                  <SettingsGroup title="应用更新">
+                    <div className="application-update-panel">
+                      {!updateCheck && <p className="settings-note">尚未检查更新。</p>}
+                      {updateCheck?.status === 'unsupported' && <p className="settings-note">{updateSupportMessage(updateCheck.reason)}</p>}
+                      {updateCheck?.status === 'upToDate' && <div className="update-status-line"><CheckCircle2 size={18} /><span>当前已是最新版本 {updateCheck.currentVersion}</span></div>}
+                      {updateCheck?.status === 'available' && <div className="update-release">
+                        <div className="update-status-line"><Download size={18} /><span>发现新版本 {updateCheck.version}</span></div>
+                        {updateCheck.releaseName && <strong>{updateCheck.releaseName}</strong>}
+                        {updateCheck.publishedAt && <small>{formatBuildDate(updateCheck.publishedAt)}</small>}
+                        {updateCheck.releaseNotes && <p className="update-release-notes">{updateCheck.releaseNotes}</p>}
+                      </div>}
+                      <div className="inline-actions">
+                        <button className="secondary icon-text-button" type="button" onClick={() => void checkForApplicationUpdates()} disabled={!runtimeInfo?.desktop || checkingUpdates || installingUpdate}><RefreshCw size={16} />{checkingUpdates ? '检查中' : '检查更新'}</button>
+                        {updateCheck?.status === 'available' && <button className="icon-text-button" type="button" onClick={requestUpdateInstallation} disabled={installingUpdate}><Download size={16} />{installingUpdate ? '正在准备安装' : '下载并安装'}</button>}
+                      </div>
+                    </div>
                   </SettingsGroup>
                 </section>
               </div>

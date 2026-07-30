@@ -20,7 +20,12 @@ import (
 
 const desktopProductName = "NyaMediaMetadataTool"
 
-var version = "dev"
+var (
+	version          = "dev"
+	commit           = "unknown"
+	buildDate        = "unknown"
+	updateRepository = "stevennight/NyaMediaMetadataTool"
+)
 
 func main() {
 	if err := runDesktop(); err != nil {

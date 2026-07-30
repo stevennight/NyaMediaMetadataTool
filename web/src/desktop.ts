@@ -3,6 +3,9 @@ export type DesktopRuntimeInfo = {
   platform: string;
   arch: string;
   version: string;
+  commit: string;
+  buildDate: string;
+  updateRepository: string;
   dataDir: string;
   configPath: string;
   database: string;
@@ -13,10 +16,22 @@ export type DesktopPreferences = {
   autostartSupported: boolean;
 };
 
+export type DesktopUpdateCheckResult = {
+  status: 'unsupported' | 'upToDate' | 'available';
+  currentVersion: string;
+  reason?: 'developmentBuild' | 'notInstalled' | 'unsupportedPlatform';
+  version?: string;
+  releaseName?: string;
+  releaseNotes?: string;
+  publishedAt?: string;
+};
+
 type DesktopBridge = {
   GetRuntimeInfo: () => Promise<DesktopRuntimeInfo>;
   GetDesktopPreferences: () => Promise<DesktopPreferences>;
   SetAutostartEnabled: (enabled: boolean) => Promise<DesktopPreferences>;
+  CheckForUpdates: () => Promise<DesktopUpdateCheckResult>;
+  DownloadAndInstallUpdate: (version: string) => Promise<void>;
   PickDirectory: (title: string, initialPath: string, allowedRoot: string) => Promise<string>;
   PickFile: (title: string, initialPath: string, displayName: string, pattern: string) => Promise<string>;
   RevealPath: (path: string) => Promise<void>;
@@ -87,6 +102,9 @@ export async function getRuntimeInfo(): Promise<DesktopRuntimeInfo> {
       platform: 'web',
       arch: '',
       version: 'web',
+      commit: '',
+      buildDate: '',
+      updateRepository: '',
       dataDir: '',
       configPath: '',
       database: ''
@@ -105,6 +123,18 @@ export async function setDesktopAutostart(enabled: boolean): Promise<DesktopPref
   const desktop = bridge();
   if (!desktop) throw new Error('开机自启仅在桌面应用中可用');
   return desktop.SetAutostartEnabled(enabled);
+}
+
+export async function checkDesktopUpdates(): Promise<DesktopUpdateCheckResult> {
+  const desktop = bridge();
+  if (!desktop) return { status: 'unsupported', currentVersion: 'web', reason: 'developmentBuild' };
+  return desktop.CheckForUpdates();
+}
+
+export async function downloadAndInstallDesktopUpdate(version: string): Promise<void> {
+  const desktop = bridge();
+  if (!desktop) throw new Error('自动更新仅在桌面应用中可用');
+  await desktop.DownloadAndInstallUpdate(version);
 }
 
 export async function pickDesktopDirectory(options: { title: string; initialPath: string; allowedRoot?: string }): Promise<{ handled: boolean; path: string }> {

@@ -3319,6 +3319,74 @@ h3 {
   line-height: 1.5;
 }
 
+.build-info-list {
+  display: grid;
+  margin: 0;
+  border-top: 1px solid var(--border);
+}
+
+.build-info-list > div {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.3fr) minmax(0, 1fr);
+  gap: 18px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.build-info-list dt {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.build-info-list dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.application-update-panel,
+.update-release {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.update-status-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.update-status-line svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.update-release small {
+  color: var(--text-muted);
+}
+
+.update-release-notes {
+  max-height: 220px;
+  margin: 0;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
 .config-form label {
   display: grid;
   gap: 6px;

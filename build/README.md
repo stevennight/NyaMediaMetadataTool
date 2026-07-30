@@ -8,7 +8,9 @@ container during a native package build.
 - `windows/`: executable metadata and application manifest. `icon.ico` is
   generated from `appicon.png` by `wails build` when it is absent.
 - `linux/`: desktop-entry metadata for distribution packages. Wails itself
-  emits a Linux binary but does not create a `.deb`, `.rpm`, or AppImage.
+  emits a Linux binary; the release workflow packages it as DEB and AppImage.
 
-Keep the product version in `wails.json` aligned with release tags and the
-version injected into `main.version` by the release build command.
+The root `VERSION` file is the version source of truth. Use
+`node scripts/version.mjs set MAJOR.MINOR.PATCH` to update all tracked version
+fields, and use `scripts/wails-build.mjs` so release metadata is injected into
+the native binary consistently.

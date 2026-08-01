@@ -3195,20 +3195,11 @@ h3 {
   align-content: start;
 }
 
-.settings-form label {
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.settings-form label input,
-.settings-form label select,
-.settings-form label textarea {
+.settings-form label:not(.theme-option) input,
+.settings-form label:not(.theme-option) select,
+.settings-form label:not(.theme-option) textarea {
   font-size: 14px;
   font-weight: 500;
-}
-
-.settings-form .toggle-row {
-  font-size: 13px;
 }
 
 .settings-form .language-picker {
@@ -3387,7 +3378,7 @@ h3 {
   white-space: pre-wrap;
 }
 
-.config-form label {
+.config-form label:not(.theme-option):not(.toggle-row) {
   display: grid;
   gap: 6px;
   color: var(--text);
@@ -3411,6 +3402,22 @@ h3 {
   font-size: 16px;
   font-weight: 650;
   line-height: 1.35;
+}
+
+.settings-form .toggle-row {
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.settings-form label:not(.toggle-row):not(.theme-option),
+.settings-form .theme-preference legend,
+.settings-form .language-picker > span:first-child,
+.settings-form .image-source-picker > span:first-child {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.4;
 }
 
 .toggle-row.disabled {
@@ -4779,6 +4786,7 @@ label small {
   color: var(--text);
   font-size: 13px;
   font-weight: 700;
+  line-height: 1.4;
   padding: 0;
 }
 
@@ -4862,6 +4870,10 @@ label small {
 .theme-option span {
   min-width: 0;
   pointer-events: none;
+}
+
+.theme-option svg {
+  flex: 0 0 auto;
 }
 
 .theme-option span {

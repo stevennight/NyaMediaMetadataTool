@@ -57,7 +57,6 @@ type AppConfig = {
   tools: {
     ffmpeg: string;
     ffprobe: string;
-    mkvextract: string;
     mediainfo: string;
   };
   processing: {
@@ -3898,7 +3897,6 @@ export function App() {
                     </datalist>
                     <PathField label="ffmpeg" value={config.tools.ffmpeg} onChange={(value) => updateConfig((draft) => { draft.tools.ffmpeg = value; })} onBrowse={() => void browseFile({ title: '选择 ffmpeg', value: config.tools.ffmpeg, onSelect: (value) => updateConfig((draft) => { draft.tools.ffmpeg = value; }) })} />
                     <PathField label="ffprobe" value={config.tools.ffprobe} onChange={(value) => updateConfig((draft) => { draft.tools.ffprobe = value; })} onBrowse={() => void browseFile({ title: '选择 ffprobe', value: config.tools.ffprobe, onSelect: (value) => updateConfig((draft) => { draft.tools.ffprobe = value; }) })} />
-                    <PathField label="mkvextract" value={config.tools.mkvextract} onChange={(value) => updateConfig((draft) => { draft.tools.mkvextract = value; })} onBrowse={() => void browseFile({ title: '选择 mkvextract', value: config.tools.mkvextract, onSelect: (value) => updateConfig((draft) => { draft.tools.mkvextract = value; }) })} />
                     <PathField label="mediainfo" value={config.tools.mediainfo} onChange={(value) => updateConfig((draft) => { draft.tools.mediainfo = value; })} onBrowse={() => void browseFile({ title: '选择 mediainfo', value: config.tools.mediainfo, onSelect: (value) => updateConfig((draft) => { draft.tools.mediainfo = value; }) })} />
                   </SettingsGroup>
                 </section>

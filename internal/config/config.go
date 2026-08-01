@@ -46,10 +46,9 @@ type DatabaseConfig struct {
 }
 
 type ToolsConfig struct {
-	FFmpeg     string `json:"ffmpeg" yaml:"ffmpeg"`
-	FFprobe    string `json:"ffprobe" yaml:"ffprobe"`
-	MKVExtract string `json:"mkvextract" yaml:"mkvextract"`
-	MediaInfo  string `json:"mediainfo" yaml:"mediainfo"`
+	FFmpeg    string `json:"ffmpeg" yaml:"ffmpeg"`
+	FFprobe   string `json:"ffprobe" yaml:"ffprobe"`
+	MediaInfo string `json:"mediainfo" yaml:"mediainfo"`
 }
 
 type ProcessingConfig struct {

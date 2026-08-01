@@ -59,7 +59,7 @@ docs/
 - Node.js 与 npm，用于桌面开发和正式打包
 - Wails CLI 2.13.x；建议与 `go.mod` 中的 Wails 版本一致
 - 对应平台的 Wails 原生依赖；使用 `wails doctor` 检查
-- 外部媒体工具：`ffmpeg`、`ffprobe`、`mkvextract`、`mediainfo`
+- 外部媒体工具：`ffmpeg`、`ffprobe`、`mediainfo`
 
 外部工具路径可以在桌面端“设置”中通过原生文件选择器配置，也可以直接编辑 `config.yaml`。应用启动后可在设置页执行工具可用性检查。
 
@@ -172,7 +172,7 @@ SQLite 数据库包含任务、媒体目录、目录上传配置、Provider 账�
 
 ## 外部工具策略
 
-桌面安装包不捆绑 `ffmpeg`、`ffprobe`、MKVToolNix 的 `mkvextract` 或 MediaInfo。这样可以避免显著增大安装包，也允许用户选择符合自身许可证、编解码器和硬件加速需求的构建。建议通过系统包管理器安装，或在设置页为每个工具选择明确的可执行文件路径。
+桌面安装包不捆绑 `ffmpeg`、`ffprobe` 或 MediaInfo。这样可以避免显著增大安装包，也允许用户选择符合自身许可证、编解码器和硬件加速需求的构建。建议通过系统包管理器安装，或在设置页为每个工具选择明确的可执行文件路径。
 
 应用首次创建配置时会尝试从 `PATH` 自动识别这些工具。缺失的工具不会影响工作台启动，但依赖它的字幕、媒体探测、BIF 或 NFO 处理会不可用或失败；开始扫描前应在设置页完成工具检查。
 
@@ -217,7 +217,7 @@ wails build -clean -platform windows/amd64
 
 - `server`：CLI/Web 服务监听地址和时区，默认 `127.0.0.1:18880`、`Asia/Shanghai`；桌面生产模式不开放该监听端口。
 - `database`：SQLite 数据库路径。CLI 示例默认为 `data/nyamedia.db`；桌面端生成指向系统应用数据目录的绝对路径。
-- `tools`：`ffmpeg`、`ffprobe`、`mkvextract`、`mediainfo` 路径。
+- `tools`：`ffmpeg`、`ffprobe`、`mediainfo` 路径。
 - `processing`：视频扩展名、并发数、文件稳定检测、BIF 参数、处理策略和产物开关。
 - `renaming`：重命名预览并发数。
 - `scraping`：TMDB、fanart.tv、语言、地区、备用语言、代理等刮削配置。

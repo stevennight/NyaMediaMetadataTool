@@ -27,7 +27,6 @@ func CheckAll(ctx context.Context, cfg config.ToolsConfig) []Status {
 	}{
 		{name: "ffmpeg", path: cfg.FFmpeg, args: []string{"-version"}},
 		{name: "ffprobe", path: cfg.FFprobe, args: []string{"-version"}},
-		{name: "mkvextract", path: cfg.MKVExtract, args: []string{"--version"}},
 		{name: "mediainfo", path: cfg.MediaInfo, args: []string{"--Version"}},
 	}
 

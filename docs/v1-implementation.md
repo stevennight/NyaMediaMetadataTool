@@ -270,7 +270,6 @@ V1 中的处理方式：
 
 - `ffmpeg`
 - `ffprobe`
-- `mkvextract`
 - `mediainfo`
 
 V1 要求：
@@ -398,7 +397,7 @@ V1 页面列表：
 
 ### 10.3 工具配置
 
-- 配置 `ffmpeg`、`ffprobe`、`mkvextract`、`mediainfo`
+- 配置 `ffmpeg`、`ffprobe`、`mediainfo`
 - 一键检测工具是否可用
 
 ### 10.4 刮削配置

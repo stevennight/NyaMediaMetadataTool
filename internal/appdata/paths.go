@@ -108,7 +108,6 @@ func rootFor(goos string, getenv func(string) string, home string) (string, erro
 func autoDetectTools(tools *config.ToolsConfig) {
 	tools.FFmpeg = findTool("ffmpeg")
 	tools.FFprobe = findTool("ffprobe")
-	tools.MKVExtract = findTool("mkvextract")
 	tools.MediaInfo = findTool("mediainfo")
 }
 

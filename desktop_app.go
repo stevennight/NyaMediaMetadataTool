@@ -141,9 +141,60 @@ func (a *DesktopApp) startup(ctx context.Context) {
 }
 
 func (a *DesktopApp) domReady(ctx context.Context) {
+	a.fitWindowToScreen(ctx)
 	if !a.startHidden {
 		wailsRuntime.WindowShow(ctx)
 	}
+}
+
+func (a *DesktopApp) fitWindowToScreen(ctx context.Context) {
+	screens, err := wailsRuntime.ScreenGetAll(ctx)
+	if err != nil || len(screens) == 0 {
+		if err != nil && a.logger != nil {
+			a.logger.Debug("get screens for initial window size", "error", err)
+		}
+		return
+	}
+	selected := &screens[0]
+	for index := range screens {
+		if screens[index].IsCurrent {
+			selected = &screens[index]
+			break
+		}
+		if screens[index].IsPrimary {
+			selected = &screens[index]
+		}
+	}
+	screenWidth, screenHeight := selected.Size.Width, selected.Size.Height
+	if screenWidth <= 0 {
+		screenWidth = selected.Width
+	}
+	if screenHeight <= 0 {
+		screenHeight = selected.Height
+	}
+	width, height, adjusted := fitDesktopWindowSize(screenWidth, screenHeight)
+	if !adjusted {
+		return
+	}
+	wailsRuntime.WindowSetSize(ctx, width, height)
+	wailsRuntime.WindowCenter(ctx)
+}
+
+func fitDesktopWindowSize(screenWidth, screenHeight int) (int, int, bool) {
+	width, height := desktopDefaultWidth, desktopDefaultHeight
+	if availableWidth := screenWidth - desktopScreenWidthMargin; availableWidth > 0 && availableWidth < width {
+		width = availableWidth
+	}
+	if availableHeight := screenHeight - desktopScreenHeightMargin; availableHeight > 0 && availableHeight < height {
+		height = availableHeight
+	}
+	if width < desktopMinWidth {
+		width = desktopMinWidth
+	}
+	if height < desktopMinHeight {
+		height = desktopMinHeight
+	}
+	return width, height, width != desktopDefaultWidth || height != desktopDefaultHeight
 }
 
 func (a *DesktopApp) secondInstance(_ options.SecondInstanceData) {

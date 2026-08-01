@@ -44,6 +44,29 @@ func TestPathWithinRoot(t *testing.T) {
 	}
 }
 
+func TestFitDesktopWindowSize(t *testing.T) {
+	tests := []struct {
+		name         string
+		screenWidth  int
+		screenHeight int
+		wantWidth    int
+		wantHeight   int
+		wantAdjusted bool
+	}{
+		{name: "regular desktop", screenWidth: 1920, screenHeight: 1080, wantWidth: 1180, wantHeight: 720},
+		{name: "Surface Go high scaling", screenWidth: 960, screenHeight: 640, wantWidth: 912, wantHeight: 560, wantAdjusted: true},
+		{name: "minimum usable window", screenWidth: 780, screenHeight: 540, wantWidth: 760, wantHeight: 480, wantAdjusted: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			width, height, adjusted := fitDesktopWindowSize(test.screenWidth, test.screenHeight)
+			if width != test.wantWidth || height != test.wantHeight || adjusted != test.wantAdjusted {
+				t.Fatalf("fitDesktopWindowSize(%d, %d) = (%d, %d, %t), want (%d, %d, %t)", test.screenWidth, test.screenHeight, width, height, adjusted, test.wantWidth, test.wantHeight, test.wantAdjusted)
+			}
+		})
+	}
+}
+
 func TestLaunchedInBackground(t *testing.T) {
 	if !launchedInBackground([]string{"--background"}) {
 		t.Fatal("--background did not enable background launch")

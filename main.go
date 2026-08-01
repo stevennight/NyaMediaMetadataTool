@@ -18,7 +18,15 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
-const desktopProductName = "NyaMediaMetadataTool"
+const (
+	desktopProductName        = "NyaMediaMetadataTool"
+	desktopDefaultWidth       = 1180
+	desktopDefaultHeight      = 720
+	desktopMinWidth           = 760
+	desktopMinHeight          = 480
+	desktopScreenWidthMargin  = 48
+	desktopScreenHeightMargin = 80
+)
 
 var (
 	version          = "dev"
@@ -51,10 +59,10 @@ func runDesktop() error {
 
 	err = wails.Run(&options.App{
 		Title:             desktopProductName,
-		Width:             1440,
-		Height:            900,
-		MinWidth:          900,
-		MinHeight:         640,
+		Width:             desktopDefaultWidth,
+		Height:            desktopDefaultHeight,
+		MinWidth:          desktopMinWidth,
+		MinHeight:         desktopMinHeight,
 		BackgroundColour:  options.NewRGB(246, 247, 249),
 		StartHidden:       true,
 		HideWindowOnClose: desktopTraySupported(),

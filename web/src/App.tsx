@@ -4659,11 +4659,21 @@ function notificationTemplateVariables(...templates: string[]) {
 
 function variablesForNotificationTemplate(template: UploadNotificationTemplate | undefined, current: Record<string, string> = {}) {
   if (!template) return {};
-  const variables = { ...current };
-  for (const name of notificationTemplateVariables(template.headersTemplate, template.payloadTemplate)) {
-    if (!(name in variables)) variables[name] = '';
-  }
-  return variables;
+  const requiredNames = notificationTemplateVariables(template.headersTemplate, template.payloadTemplate);
+  const required = new Set(requiredNames);
+  return Object.fromEntries([
+    ...requiredNames.map((name) => [name, current[name] ?? '']),
+    ...Object.entries(current).filter(([name]) => !required.has(name))
+  ]);
+}
+
+function orderedNotificationVariableEntries(template: UploadNotificationTemplate | undefined, current: Record<string, string>) {
+  const requiredNames = template ? notificationTemplateVariables(template.headersTemplate, template.payloadTemplate) : [];
+  const required = new Set(requiredNames);
+  return [
+    ...requiredNames.filter((name) => Object.prototype.hasOwnProperty.call(current, name)).map((name) => ({ name, value: current[name], required: true })),
+    ...Object.entries(current).filter(([name]) => !required.has(name)).map(([name, value]) => ({ name, value, required: false }))
+  ];
 }
 
 function uploadNotificationConfigError(route: UploadProviderRoute, templates: UploadNotificationTemplate[]) {
@@ -4749,6 +4759,7 @@ function UploadRouteProfile(props: { route: UploadProviderRoute; provider?: Uplo
   const browseDisabled = !props.provider || needsAuthorization;
   const notificationTemplate = props.notificationTemplates.find((item) => item.id === props.route.notificationTemplateId);
   const notificationVariables = props.route.notificationVariables ?? {};
+  const notificationVariableEntries = orderedNotificationVariableEntries(notificationTemplate, notificationVariables);
   const notificationError = uploadNotificationConfigError(props.route, props.notificationTemplates);
 
   function selectNotificationTemplate(value: string) {
@@ -4761,8 +4772,8 @@ function UploadRouteProfile(props: { route: UploadProviderRoute; provider?: Uplo
   }
 
   function updateNotificationVariable(previousName: string, name: string, value: string) {
-    const entries = Object.entries(notificationVariables).filter(([key]) => key !== previousName);
-    props.onChange({ notificationVariables: Object.fromEntries([...entries, [name, value]]) });
+    const entries = Object.entries(notificationVariables).map(([key, currentValue]) => key === previousName ? [name, value] : [key, currentValue]);
+    props.onChange({ notificationVariables: Object.fromEntries(entries) });
   }
 
   function addNotificationVariable() {
@@ -4799,11 +4810,11 @@ function UploadRouteProfile(props: { route: UploadProviderRoute; provider?: Uplo
                 <input aria-label="内置变量说明" value="远端番剧目录（系统自动填入）" readOnly />
                 <span className="pill ok">内置</span>
               </div>
-              {Object.entries(notificationVariables).map(([name, value]) => (
-                <div className="notification-variable-row" key={name}>
-                  <input aria-label="变量名" value={name} onChange={(event) => updateNotificationVariable(name, event.target.value, value)} placeholder="provider_id" />
+              {notificationVariableEntries.map(({ name, value, required }, index) => (
+                <div className={required ? 'notification-variable-row builtin' : 'notification-variable-row'} key={required ? `template:${name}` : `custom:${index}`}>
+                  <input aria-label="变量名" value={name} readOnly={required} onChange={(event) => updateNotificationVariable(name, event.target.value, value)} placeholder="provider_id" />
                   <input aria-label={`${name || '自定义'} 变量值`} value={value} onChange={(event) => updateNotificationVariable(name, name, event.target.value)} placeholder="此上传配置使用的值" />
-                  <button className="icon-button" type="button" title={`删除变量 ${name}`} aria-label={`删除变量 ${name}`} onClick={() => props.onChange({ notificationVariables: Object.fromEntries(Object.entries(notificationVariables).filter(([key]) => key !== name)) })}><Trash2 size={15} /></button>
+                  {required ? <span className="pill ok">模板</span> : <button className="icon-button" type="button" title={`删除变量 ${name}`} aria-label={`删除变量 ${name}`} onClick={() => props.onChange({ notificationVariables: Object.fromEntries(Object.entries(notificationVariables).filter(([key]) => key !== name)) })}><Trash2 size={15} /></button>}
                 </div>
               ))}
             </div>

@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -91,12 +93,13 @@ func (f *fakeOpen115API) UploadGetToken(context.Context) (*sdk115.UploadGetToken
 
 func newFakeOpen115Provider(client open115API) *open115Provider {
 	return &open115Provider{
-		client:             client,
-		requestGuard:       newCookie115RequestGuard(),
-		requestInterval:    0,
-		directoryIDs:       map[string]string{"/": "0"},
-		pathInfoRetryDelay: 0,
-		uploadRetryDelay:   func(int) time.Duration { return 0 },
+		client:               client,
+		requestGuard:         newCookie115RequestGuard(),
+		requestInterval:      0,
+		directoryIDs:         map[string]string{"/": "0"},
+		pathInfoRetryDelay:   0,
+		uploadRetryDelay:     func(int) time.Duration { return 0 },
+		visibilityRetryDelay: func(int) time.Duration { return 0 },
 	}
 }
 
@@ -370,5 +373,76 @@ func TestOpen115SessionRequestsPathInfoByFullPath(t *testing.T) {
 	}
 	if info.FileID != "season-1" || info.FileCategory != "0" {
 		t.Fatalf("path info=%+v", info)
+	}
+}
+
+func TestOpen115SessionAcceptsArrayPathInfo(t *testing.T) {
+	session := newOpen115Session("access", "refresh", "", "", nil)
+	client := session.client.(*sdk115.Client)
+	client.SetHttpClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"state":true,"code":0,
+				"data":[{"file_id":"poster-1","file_name":"poster.jpg","file_category":"1","size":"123"}]
+			}`)),
+			Request: request,
+		}, nil
+	})})
+
+	info, err := session.GetInfoByPath(context.Background(), "/Anime/poster.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.FileID != "poster-1" || info.FileName != "poster.jpg" || info.Size != "123" {
+		t.Fatalf("path info=%+v", info)
+	}
+}
+
+func TestDecodeOpen115PathInfoFallsBackForAmbiguousArray(t *testing.T) {
+	_, err := decodeOpen115PathInfo("/Anime/poster.jpg", json.RawMessage(`[
+		{"file_id":"poster-1","file_name":"poster.jpg"},
+		{"file_id":"poster-2","file_name":"poster.jpg"}
+	]`))
+	if !isOpen115PathNotFound(err) {
+		t.Fatalf("error=%v, want path-not-found fallback", err)
+	}
+}
+
+func TestOpen115WaitForFileRetriesUntilVisible(t *testing.T) {
+	provider := newFakeOpen115Provider(newFakeOpen115API())
+	lookupCalls := 0
+	provider.lookupChild = func(context.Context, string, string) (sdk115.GetFilesResp_File, bool, error) {
+		lookupCalls++
+		if lookupCalls < 3 {
+			return sdk115.GetFilesResp_File{}, false, nil
+		}
+		return sdk115.GetFilesResp_File{Fid: "visible-file", Fn: "poster.jpg", Fc: "1", FS: 123}, true, nil
+	}
+
+	remote, err := provider.waitForFile(context.Background(), "anime", "poster.jpg", 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lookupCalls != 3 || remote.ID != "visible-file" || remote.Size != 123 {
+		t.Fatalf("lookup calls=%d remote=%+v", lookupCalls, remote)
+	}
+}
+
+func TestOpen115WaitForFileFailsAfterVisibilityRetries(t *testing.T) {
+	provider := newFakeOpen115Provider(newFakeOpen115API())
+	lookupCalls := 0
+	provider.lookupChild = func(context.Context, string, string) (sdk115.GetFilesResp_File, bool, error) {
+		lookupCalls++
+		return sdk115.GetFilesResp_File{}, false, nil
+	}
+
+	_, err := provider.waitForFile(context.Background(), "anime", "poster.jpg", 123)
+	if !errors.Is(err, err115RemoteFileNotVisible) {
+		t.Fatalf("error=%v, want remote-file-not-visible", err)
+	}
+	if lookupCalls != open115VisibilityAttempts {
+		t.Fatalf("lookup calls=%d, want %d", lookupCalls, open115VisibilityAttempts)
 	}
 }

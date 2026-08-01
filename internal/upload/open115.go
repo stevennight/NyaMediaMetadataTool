@@ -1,6 +1,7 @@
 package upload
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,12 +20,15 @@ import (
 )
 
 const (
-	open115ListPageSize       = int64(200)
-	open115RequestInterval    = 500 * time.Millisecond
-	open115PathInfoRetryDelay = 250 * time.Millisecond
-	open115ChildrenCacheTTL   = 10 * time.Minute
-	open115PathNotFoundCode   = int64(20018)
-	maxOpen115UploadAttempts  = 3
+	open115ListPageSize        = int64(200)
+	open115RequestInterval     = 500 * time.Millisecond
+	open115PathInfoRetryDelay  = 250 * time.Millisecond
+	open115ChildrenCacheTTL    = 10 * time.Minute
+	open115PathNotFoundCode    = int64(20018)
+	open115VisibilityAttempts  = 8
+	open115VisibilityBaseDelay = 500 * time.Millisecond
+	open115VisibilityMaxDelay  = 4 * time.Second
+	maxOpen115UploadAttempts   = 3
 )
 
 type open115PathInfo struct {
@@ -116,14 +120,50 @@ func newOpen115Session(accessToken, refreshToken, expiresAt, userAgent string, o
 	session.client = client
 	session.refresh = client.RefreshToken
 	session.pathInfo = func(ctx context.Context, providerPath string) (*open115PathInfo, error) {
-		var info open115PathInfo
-		_, err := client.AuthRequest(ctx, sdk115.ApiFsGetFolderInfo, http.MethodPost, &info, sdk115.ReqWithForm(sdk115.Form{"path": providerPath}))
+		var payload json.RawMessage
+		_, err := client.AuthRequest(ctx, sdk115.ApiFsGetFolderInfo, http.MethodPost, &payload, sdk115.ReqWithForm(sdk115.Form{"path": providerPath}))
 		if err != nil {
 			return nil, err
 		}
-		return &info, nil
+		return decodeOpen115PathInfo(providerPath, payload)
 	}
 	return session
+}
+
+func decodeOpen115PathInfo(providerPath string, payload json.RawMessage) (*open115PathInfo, error) {
+	raw := bytes.TrimSpace(payload)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, open115PathNotFoundError(providerPath)
+	}
+
+	var info open115PathInfo
+	switch raw[0] {
+	case '{':
+		if err := json.Unmarshal(raw, &info); err != nil {
+			return nil, fmt.Errorf("decode 115 Open path info: %w", err)
+		}
+	case '[':
+		var items []open115PathInfo
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil, fmt.Errorf("decode 115 Open path info array: %w", err)
+		}
+		// Multiple results can represent duplicate names. Let the caller use
+		// the parent listing, which can select by name and preferred size.
+		if len(items) != 1 {
+			return nil, open115PathNotFoundError(providerPath)
+		}
+		info = items[0]
+	default:
+		return nil, fmt.Errorf("decode 115 Open path info: unexpected JSON value")
+	}
+	if strings.TrimSpace(info.FileID) == "" {
+		return nil, open115PathNotFoundError(providerPath)
+	}
+	return &info, nil
+}
+
+func open115PathNotFoundError(providerPath string) error {
+	return &sdk115.Error{Code: open115PathNotFoundCode, Message: "path not found: " + normalize115Path(providerPath)}
 }
 
 func (s *open115Session) handleSDKRefresh(accessToken, refreshToken string) {
@@ -305,9 +345,10 @@ type open115Provider struct {
 
 	pathInfoRetryDelay time.Duration
 
-	uploadContent    func(context.Context, string, string, int64, *os.File, *open115Digest) error
-	lookupChild      func(context.Context, string, string) (sdk115.GetFilesResp_File, bool, error)
-	uploadRetryDelay func(int) time.Duration
+	uploadContent        func(context.Context, string, string, int64, *os.File, *open115Digest) error
+	lookupChild          func(context.Context, string, string) (sdk115.GetFilesResp_File, bool, error)
+	uploadRetryDelay     func(int) time.Duration
+	visibilityRetryDelay func(int) time.Duration
 
 	ossHTTPClient     *http.Client
 	ossTokenMu        sync.Mutex
@@ -504,7 +545,7 @@ func (p *open115Provider) uploadAndVerify(ctx context.Context, remotePath, paren
 		}
 		uploadErr := upload(ctx, parentID, name, size, file, digest)
 		if uploadErr == nil {
-			remote, verifyErr := p.waitForFile(ctx, remotePath, parentID, name, size)
+			remote, verifyErr := p.waitForFile(ctx, parentID, name, size)
 			if verifyErr == nil && strings.TrimSpace(remote.SHA1) != "" && !strings.EqualFold(remote.SHA1, digest.SHA1) {
 				verifyErr = errors.New("verified 115 Open file has different content")
 			}
@@ -519,7 +560,7 @@ func (p *open115Provider) uploadAndVerify(ctx context.Context, remotePath, paren
 		lastErr = uploadErr
 		var uncertain *uncertain115CommitError
 		if errors.As(uploadErr, &uncertain) {
-			remote, verifyErr := p.waitForFile(ctx, remotePath, parentID, name, size)
+			remote, verifyErr := p.waitForFile(ctx, parentID, name, size)
 			if verifyErr == nil && (strings.TrimSpace(remote.SHA1) == "" || strings.EqualFold(remote.SHA1, digest.SHA1)) {
 				return remote, nil
 			}
@@ -789,17 +830,46 @@ func (p *open115Provider) listPage(ctx context.Context, parentID string, offset 
 	return result.Data, result.Count, nil
 }
 
-func (p *open115Provider) waitForFile(ctx context.Context, remotePath, parentID, name string, size int64) (RemoteFile, error) {
-	for attempt := 0; attempt < 4; attempt++ {
-		file, found, err := p.findPathEntry(ctx, remotePath, parentID, name, size)
+func (p *open115Provider) waitForFile(ctx context.Context, parentID, name string, size int64) (RemoteFile, error) {
+	for attempt := 1; attempt <= open115VisibilityAttempts; attempt++ {
+		file, found, err := p.findChildMatchingSize(ctx, parentID, name, size)
 		if err != nil {
 			return RemoteFile{}, err
 		}
 		if found && file.Fc != "0" && file.FS == size {
 			return RemoteFile{ID: file.Fid, Size: file.FS, SHA1: file.Sha1}, nil
 		}
+		if attempt < open115VisibilityAttempts {
+			if err := p.waitVisibilityRetry(ctx, attempt); err != nil {
+				return RemoteFile{}, err
+			}
+		}
 	}
 	return RemoteFile{}, fmt.Errorf("%w: %s", err115RemoteFileNotVisible, name)
+}
+
+func (p *open115Provider) waitVisibilityRetry(ctx context.Context, attempt int) error {
+	delay := open115VisibilityBaseDelay
+	for step := 1; step < attempt && delay < open115VisibilityMaxDelay; step++ {
+		delay *= 2
+		if delay > open115VisibilityMaxDelay {
+			delay = open115VisibilityMaxDelay
+		}
+	}
+	if p.visibilityRetryDelay != nil {
+		delay = p.visibilityRetryDelay(attempt)
+	}
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (p *open115Provider) cachedDirectoryID(remotePath string) (string, bool) {

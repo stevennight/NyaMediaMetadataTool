@@ -846,6 +846,10 @@ func (s *Server) handleCreateWatchDir(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.store.CreateWatchDir(r.Context(), input)
 	if err != nil {
+		if errors.Is(err, store.ErrWatchDirExists) {
+			writeError(w, http.StatusConflict, fmt.Errorf("媒体目录已存在：%s", input.Path))
+			return
+		}
 		if errors.Is(err, store.ErrUploadProviderNotFound) || errors.Is(err, store.ErrInvalidUploadConfig) || errors.Is(err, store.ErrUploadNotificationTemplateNotFound) {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -853,10 +857,7 @@ func (s *Server) handleCreateWatchDir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.reloadWatchDirs(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	s.reloadWatchDirsBestEffort(r.Context(), "create", input.Path)
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -898,13 +899,14 @@ func (s *Server) handleUpdateWatchDir(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+		if errors.Is(err, store.ErrWatchDirExists) {
+			writeError(w, http.StatusConflict, fmt.Errorf("媒体目录已存在：%s", input.Path))
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.reloadWatchDirs(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	s.reloadWatchDirsBestEffort(r.Context(), "update", input.Path)
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -992,10 +994,7 @@ func (s *Server) handleDeleteWatchDir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.reloadWatchDirs(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	s.reloadWatchDirsBestEffort(r.Context(), "delete", strconv.FormatInt(id, 10))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1182,6 +1181,12 @@ func (s *Server) reloadWatchDirs(ctx context.Context) error {
 		return nil
 	}
 	return s.watcher.ReloadWatchDirs(ctx)
+}
+
+func (s *Server) reloadWatchDirsBestEffort(ctx context.Context, operation string, target string) {
+	if err := s.reloadWatchDirs(ctx); err != nil && s.logger != nil {
+		s.logger.Warn("reload watch directories after persisted change", "operation", operation, "target", target, "error", err)
+	}
 }
 
 func (s *Server) snapshotConfig() config.Config {

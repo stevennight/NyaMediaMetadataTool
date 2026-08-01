@@ -2,11 +2,33 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"NyaMediaMetadataTool/internal/config"
 )
+
+func TestWatchDirDuplicatePathReturnsExists(t *testing.T) {
+	t.Parallel()
+
+	st, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := WatchDir{Path: filepath.Join(t.TempDir(), "media"), Recursive: true, WatchEnabled: true}
+	if _, err := st.CreateWatchDir(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateWatchDir(context.Background(), dir); !errors.Is(err, ErrWatchDirExists) {
+		t.Fatalf("duplicate CreateWatchDir error = %v, want ErrWatchDirExists", err)
+	}
+}
 
 func TestWatchDirProcessingRoundTripAndLongestPathMatch(t *testing.T) {
 	t.Parallel()

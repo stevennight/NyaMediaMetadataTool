@@ -13,7 +13,10 @@ import (
 	"NyaMediaMetadataTool/internal/config"
 )
 
-var ErrWatchDirNotFound = errors.New("watch dir not found")
+var (
+	ErrWatchDirNotFound = errors.New("watch dir not found")
+	ErrWatchDirExists   = errors.New("watch dir already exists")
+)
 
 type WatchDir struct {
 	ID                  int64                         `json:"id"`
@@ -87,6 +90,14 @@ func (s *Store) CreateWatchDir(ctx context.Context, dir WatchDir) (WatchDir, err
 		return WatchDir{}, err
 	}
 	defer tx.Rollback()
+	var existingID int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM watch_dirs WHERE path = ?`, dir.Path).Scan(&existingID)
+	if err == nil {
+		return WatchDir{}, ErrWatchDirExists
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return WatchDir{}, err
+	}
 	result, err := tx.ExecContext(ctx, `
 INSERT INTO watch_dirs (path, recursive, enabled, watch_enabled, scan_on_start, use_global_processing, processing_config, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -120,6 +131,14 @@ func (s *Store) UpdateWatchDir(ctx context.Context, dir WatchDir) (WatchDir, err
 		return WatchDir{}, err
 	}
 	defer tx.Rollback()
+	var existingID int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM watch_dirs WHERE path = ? AND id != ?`, dir.Path, dir.ID).Scan(&existingID)
+	if err == nil {
+		return WatchDir{}, ErrWatchDirExists
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return WatchDir{}, err
+	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE watch_dirs
 SET path = ?, recursive = ?, enabled = ?, watch_enabled = ?, scan_on_start = ?, use_global_processing = ?, processing_config = ?, updated_at = CURRENT_TIMESTAMP

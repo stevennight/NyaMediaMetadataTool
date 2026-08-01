@@ -3144,7 +3144,19 @@ export function App() {
         body: JSON.stringify({ path: newWatchDir.trim(), recursive: true, watchEnabled: newWatchDirWatchEnabled, scanOnStart: false, useGlobalProcessing: newWatchDirUseGlobalProcessing, processing: newWatchDirProcessing, uploadConfigs: newWatchDirUploadConfigs })
       });
       if (!response.ok) {
-        setError(await readErrorMessage(response));
+        const message = await readErrorMessage(response);
+        if (response.status === 409) {
+          try {
+            await loadWatchDirs();
+            setNewWatchDir('');
+            setAddWatchDirOpen(false);
+            setNotice(`${message}。目录列表已刷新。`);
+            return;
+          } catch {
+            // Preserve the actionable conflict message when refreshing also fails.
+          }
+        }
+        setError(message);
         return;
       }
       const created = await response.json();

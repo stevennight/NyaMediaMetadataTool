@@ -111,6 +111,27 @@ func TestBaiduOpenOfficialAuthStartUsesSingleCallbackURL(t *testing.T) {
 	}
 }
 
+func TestBaiduOpenAuthConfigUsesForwardedHost(t *testing.T) {
+	server, _, provider := newBaiduOpenAuthTestServer(t)
+	request := httptest.NewRequest(http.MethodGet, "/api/upload/providers/"+jsonNumber(provider.ID)+"/auth/baiduopen", nil)
+	request.Host = "wails.localhost"
+	request.Header.Set("X-Forwarded-Proto", "http")
+	request.Header.Set("X-Forwarded-Host", "127.0.0.1:18880")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("config status=%d body=%s", response.Code, response.Body.String())
+	}
+	var authConfig baiduOpenAuthConfigResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &authConfig); err != nil {
+		t.Fatal(err)
+	}
+	wantCallback := "http://127.0.0.1:18880/api/upload/providers/" + jsonNumber(provider.ID) + "/auth/baiduopen/callback"
+	if authConfig.CallbackURL != wantCallback {
+		t.Fatalf("callback URL=%q, want %q", authConfig.CallbackURL, wantCallback)
+	}
+}
+
 func TestBaiduOpenBrokerRelayAndTokenExchange(t *testing.T) {
 	server, database, provider := newBaiduOpenAuthTestServer(t)
 	ctx := context.Background()

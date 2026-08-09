@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -122,6 +123,9 @@ func TestDesktopHandlerStartsServiceOnlyForAPI(t *testing.T) {
 	}
 	if app.currentService() == nil {
 		t.Fatal("API request did not start the service")
+	}
+	if callbackHost := app.desktopCallbackForwardHost(); !strings.HasPrefix(callbackHost, "127.0.0.1:") {
+		t.Fatalf("desktop callback host=%q, want a loopback address", callbackHost)
 	}
 }
 

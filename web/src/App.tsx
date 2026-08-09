@@ -5197,40 +5197,46 @@ function BaiduOpenAuthorizationModal(props: { provider: UploadProvider; credenti
     : (props.authConfig?.brokerCallbackUrl || 'Enter Broker base URL to calculate this address');
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="modal-card upload-cookie-modal" role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="upload-baiduopen-title" onClick={(event) => event.stopPropagation()}>
+      <section className="modal-card upload-cookie-modal baiduopen-auth-modal" role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="upload-baiduopen-title" onClick={(event) => event.stopPropagation()}>
         <div className="card-header"><div><h2 id="upload-baiduopen-title">Baidu Open authorization</h2><small>{props.provider.name}</small></div><IconCloseButton onClick={props.onClose} disabled={props.saving} /></div>
-        <div className="upload-auth-grid">
-          <section className="upload-auth-panel">
+        <div className="upload-auth-grid baiduopen-auth-grid">
+          <section className="upload-auth-panel baiduopen-mode-panel">
             <h3>Authorization mode</h3>
             <label>Mode<select value={props.mode} onChange={(event) => props.onModeChange(event.target.value)} disabled={props.saving || authActive}><option value="official">Official direct</option><option value="broker_relay">OAuth Broker relay</option><option value="broker_token_exchange">OAuth Broker token exchange</option></select></label>
             <p className="settings-note">{props.mode === 'official' ? 'Register the direct callback address shown below in Baidu.' : props.mode === 'broker_relay' ? 'Register the Broker callback in Baidu and the local callback as the Broker return_uri allowlist.' : 'This mode completes inside the Broker and does not require a callback whitelist.'}</p>
           </section>
-          <section className="upload-auth-panel">
+          <section className="upload-auth-panel baiduopen-callback-panel">
             <h3>Callback addresses</h3>
-            {props.mode === 'official' ? <>
-              <p className="settings-note">Baidu official redirect URI</p>
-              <code>{localCallbackURL}</code>
-            </> : props.mode === 'broker_relay' ? <>
-              <p className="settings-note">Baidu app callback whitelist</p>
-              <code>{brokerCallbackURL}</code>
-              <p className="settings-note">Broker return_uri allowlist</p>
-              <code>{localCallbackURL}</code>
-            </> : <p className="settings-note">No callback address is required for Broker token exchange.</p>}
+            <div className="baiduopen-callback-list">
+              {props.mode === 'official' ? <div className="baiduopen-callback-item">
+                <span>Baidu official redirect URI</span>
+                <code>{localCallbackURL}</code>
+              </div> : props.mode === 'broker_relay' ? <>
+                <div className="baiduopen-callback-item">
+                  <span>Baidu app callback whitelist</span>
+                  <code>{brokerCallbackURL}</code>
+                </div>
+                <div className="baiduopen-callback-item">
+                  <span>Broker return_uri allowlist</span>
+                  <code>{localCallbackURL}</code>
+                </div>
+              </> : <div className="baiduopen-callback-empty">No callback address is required for Broker token exchange.</div>}
+            </div>
           </section>
-          <section className="upload-auth-panel">
+          <section className="upload-auth-panel baiduopen-application-panel">
             <h3>Baidu application</h3>
             <label>Client ID<input autoFocus value={values.clientID} onChange={(event) => update({ clientID: event.target.value })} autoComplete="off" disabled={props.saving || authActive} /></label>
             <label>Client Secret<input type={props.showTokens ? 'text' : 'password'} value={values.clientSecret} onChange={(event) => update({ clientSecret: event.target.value })} autoComplete="off" disabled={props.saving || authActive} placeholder={props.authConfig?.clientSecretConfigured ? 'Saved; leave blank to keep it' : ''} /></label>
             <button type="button" onClick={props.onSaveApplication} disabled={props.saving || authActive || !canSaveApplication}>{props.saving ? 'Saving...' : 'Save application credentials'}</button>
           </section>
-          {props.mode !== 'official' && <section className="upload-auth-panel">
+          {props.mode !== 'official' && <section className="upload-auth-panel baiduopen-broker-panel">
             <h3>OAuth Broker</h3>
             <label>Broker base URL<input type="url" value={values.brokerBaseURL} onChange={(event) => update({ brokerBaseURL: event.target.value })} disabled={props.saving || authActive} placeholder="https://broker.example" /></label>
             <label>Broker client ID<input value={values.brokerClientID} onChange={(event) => update({ brokerClientID: event.target.value })} autoComplete="off" disabled={props.saving || authActive} /></label>
             <label>Broker token<input type={props.showTokens ? 'text' : 'password'} value={values.brokerToken} onChange={(event) => update({ brokerToken: event.target.value })} autoComplete="off" disabled={props.saving || authActive} placeholder={props.authConfig?.brokerTokenConfigured ? 'Saved; leave blank to keep it' : ''} /></label>
             <button type="button" onClick={props.onSaveSettings} disabled={props.saving || authActive || !canStart}>{props.saving ? 'Saving...' : 'Save mode and Broker'}</button>
           </section>}
-          <section className="upload-auth-panel">
+          <section className="upload-auth-panel baiduopen-authorization-panel">
             <h3>Authorization</h3>
             {props.auth && <p className="settings-note" aria-live="polite">{props.auth.message || props.auth.state}</p>}
             {props.auth?.callbackUrl && <p className="settings-note">Return URI: <code>{props.auth.callbackUrl}</code></p>}
@@ -5239,7 +5245,7 @@ function BaiduOpenAuthorizationModal(props: { provider: UploadProvider; credenti
             <button type="button" onClick={props.onStartAuthorization} disabled={props.saving || authActive || !canStart}>{authTerminal ? 'Restart authorization' : 'Start authorization'}</button>
             {authActive && <span className="pill running" role="status">Authorization in progress</span>}
           </section>
-          <section className="upload-auth-panel upload-auth-import-panel">
+          <section className="upload-auth-panel upload-auth-import-panel baiduopen-import-panel">
             <h3>Import tokens</h3>
             <p className="settings-note">Required for Broker token exchange. The server validates both tokens and refreshes once before saving.</p>
             <label>Access Token<input type={props.showTokens ? 'text' : 'password'} value={values.accessToken} onChange={(event) => update({ accessToken: event.target.value })} autoComplete="off" disabled={props.saving || authActive} /></label>

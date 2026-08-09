@@ -930,6 +930,100 @@ h1 {
   gap: 18px;
 }
 
+.modal-card.baiduopen-auth-modal {
+  width: min(980px, 100%);
+}
+
+.baiduopen-auth-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.baiduopen-auth-modal .upload-auth-panel {
+  min-width: 0;
+  border: 1px solid var(--border);
+  padding: 16px;
+  box-shadow: none;
+}
+
+.baiduopen-mode-panel,
+.baiduopen-callback-panel {
+  grid-column: 1 / -1;
+}
+
+.baiduopen-mode-panel {
+  grid-template-columns: minmax(180px, 0.42fr) minmax(220px, 0.58fr);
+  align-items: center;
+  gap: 8px 18px;
+}
+
+.baiduopen-mode-panel h3 {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.baiduopen-mode-panel label {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.baiduopen-mode-panel > .settings-note {
+  grid-column: 1 / -1;
+}
+
+.baiduopen-callback-panel {
+  gap: 10px;
+}
+
+.baiduopen-callback-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.baiduopen-callback-item {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.baiduopen-callback-item > span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.baiduopen-callback-item code {
+  display: block;
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  padding: 9px 10px;
+}
+
+.baiduopen-callback-empty {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+
+.baiduopen-authorization-panel,
+.baiduopen-import-panel {
+  min-height: 100%;
+}
+
 .upload-auth-panel {
   display: grid;
   gap: 12px;
@@ -3631,6 +3725,21 @@ h3 {
   .upload-auth-grid,
   .upload-detail-summary,
   .upload-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .baiduopen-mode-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .baiduopen-mode-panel h3,
+  .baiduopen-mode-panel label,
+  .baiduopen-mode-panel > .settings-note {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .baiduopen-callback-list {
     grid-template-columns: 1fr;
   }
 

@@ -112,7 +112,7 @@ func (p *fakeProvider) Verify(_ context.Context, remotePath string, size int64, 
 func TestSetTransferProgressAllowsMultipartRetryRollback(t *testing.T) {
 	manager := NewWithFactory(Options{}, nil, slog.Default(), nil)
 	const transferID int64 = 42
-	manager.setTransferRuntime(transferID, "uploading", "正在上传到 115", time.Time{})
+	manager.setTransferRuntime(transferID, "uploading", "正在上传", time.Time{})
 
 	manager.setTransferProgress(transferID, 16*1024*1024)
 	manager.setTransferProgress(transferID, 0)

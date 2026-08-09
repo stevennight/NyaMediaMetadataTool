@@ -34,9 +34,11 @@ const (
 	baiduOpenRequestTimeout   = 5 * time.Minute
 	baiduOpenMaxAttempts      = 3
 	baiduOpenRetryDelay       = 500 * time.Millisecond
-	baiduOpenVerifyAttempts   = 4
-	baiduOpenVerifyRetryDelay = 250 * time.Millisecond
+	baiduOpenVerifyAttempts   = 8
+	baiduOpenVerifyRetryDelay = 1 * time.Second
 )
+
+var errBaiduOpenRemoteFileNotVisible = errors.New("Baidu Open remote file is not visible yet")
 
 type baiduOpenTokenState struct {
 	mu           sync.Mutex
@@ -279,6 +281,7 @@ func (p *baiduOpenProvider) Upload(ctx context.Context, localPath, remotePath st
 	if err != nil {
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open precreate %s: %w", remotePath, err)}
 	}
+	remoteID := strings.TrimSpace(string(precreated.FSID))
 	if precreated.ReturnType != 1 {
 		if strings.TrimSpace(precreated.UploadID) == "" {
 			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: errors.New("Baidu Open precreate returned no uploadid")}
@@ -298,9 +301,22 @@ func (p *baiduOpenProvider) Upload(ctx context.Context, localPath, remotePath st
 				return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open upload block %d for %s: %w", part, remotePath, err)}
 			}
 		}
-		if _, err := p.createFile(ctx, remotePath, size, precreated.UploadID, resolved.ChunkMD5s, "overwrite"); err != nil {
+		created, err := p.createFile(ctx, remotePath, size, precreated.UploadID, resolved.ChunkMD5s, "overwrite")
+		if err != nil {
 			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open create %s: %w", remotePath, err)}
 		}
+		if created != nil {
+			remoteID = strings.TrimSpace(string(created.FSID))
+		}
+	}
+	if remoteID != "" {
+		return RemoteFile{
+			ID:        remoteID,
+			Size:      size,
+			SHA1:      localSHA1,
+			LocalSHA1: localSHA1,
+			Outcome:   intendedOutcome,
+		}, nil
 	}
 
 	remote, err := p.waitForRemoteFile(ctx, parentPath, name, size, resolved.MD5)
@@ -569,7 +585,7 @@ func (p *baiduOpenProvider) waitForRemoteFile(ctx context.Context, directoryPath
 			}
 		}
 	}
-	return RemoteFile{}, fmt.Errorf("remote file is not visible yet: %s", pathpkg.Join(directoryPath, name))
+	return RemoteFile{}, fmt.Errorf("%w: %s", errBaiduOpenRemoteFileNotVisible, pathpkg.Join(directoryPath, name))
 }
 
 func (p *baiduOpenProvider) doJSONRequest(ctx context.Context, method, endpoint string, query url.Values, body []byte, contentType string, headers http.Header, out any) error {

@@ -700,7 +700,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 
 	for _, transfer := range transfers {
 		if transfer.Status != store.UploadTransferCompleted {
-			setActiveTransfer(transfer.ID, transfer.BytesTotal, "checking", "正在检查 115 上传服务")
+			setActiveTransfer(transfer.ID, transfer.BytesTotal, "checking", "正在检查上传服务")
 			break
 		}
 	}
@@ -766,7 +766,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			continue
 		}
 		if transfer.Status == store.UploadTransferFailed && strings.Contains(transfer.ErrorSummary, uncertain115CommitMarker) {
-			setActiveTransfer(transfer.ID, transfer.BytesTotal, "verifying", "正在确认 115 远端文件")
+			setActiveTransfer(transfer.ID, transfer.BytesTotal, "verifying", "正在确认远端文件")
 			verificationErr := fmt.Errorf("%s: remote file is still not confirmed", uncertain115CommitMarker)
 			if verifier, ok := client.(ProviderVerifier); ok {
 				remote, found, err := verifier.Verify(ctx, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1)
@@ -808,9 +808,9 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 		}
 		activeMu.Lock()
 		activePhase = "uploading"
-		activeMessage = "正在上传到 115"
+		activeMessage = "正在上传"
 		activeMu.Unlock()
-		m.setTransferRuntime(transfer.ID, "uploading", "正在上传到 115", time.Time{})
+		m.setTransferRuntime(transfer.ID, "uploading", "正在上传", time.Time{})
 		remote, err := client.Upload(ctx, transfer.LocalPath, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1, target.CollisionPolicy)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {

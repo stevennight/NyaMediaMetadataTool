@@ -109,7 +109,7 @@ func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
 	if remote.ID != "20" || remote.Size != int64(len(content)) || remote.Outcome != "created" || remote.LocalSHA1 == "" {
 		t.Fatalf("remote = %#v", remote)
 	}
-	if len(requests) != 7 {
+	if len(requests) != 6 {
 		t.Fatalf("requests = %d (%v)", len(requests), requests)
 	}
 }

@@ -35,6 +35,7 @@ const (
 	max115ListRetries           = 3
 	max115UploadAttempts        = 3
 	list115PageSize             = 1150
+	max115VisibilityChecks      = 6
 )
 
 var err115RemoteFileNotVisible = errors.New("115 uploaded file is not visible yet")
@@ -874,7 +875,7 @@ func (p *cookie115Provider) listPage(ctx context.Context, parentID string, provi
 }
 
 func (p *cookie115Provider) waitForFile(ctx context.Context, parentID string, name string, size int64) (RemoteFile, error) {
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 0; attempt < max115VisibilityChecks; attempt++ {
 		file, found, err := p.findChildMatchingSize(ctx, parentID, name, size)
 		if err != nil {
 			return RemoteFile{}, err
@@ -882,8 +883,10 @@ func (p *cookie115Provider) waitForFile(ctx context.Context, parentID string, na
 		if found && !file.IsDirectory && file.Size == size {
 			return RemoteFile{ID: file.FileID, Size: file.Size, SHA1: file.Sha1}, nil
 		}
-		if attempt == 3 {
-			break
+		if attempt+1 < max115VisibilityChecks {
+			if err := p.waitUploadRetry(ctx, attempt+1); err != nil {
+				return RemoteFile{}, err
+			}
 		}
 	}
 	return RemoteFile{}, fmt.Errorf("%w: %s", err115RemoteFileNotVisible, name)

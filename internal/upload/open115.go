@@ -19,12 +19,13 @@ import (
 )
 
 const (
-	open115ListPageSize       = int64(200)
-	open115RequestInterval    = 500 * time.Millisecond
-	open115PathInfoRetryDelay = 250 * time.Millisecond
-	open115ChildrenCacheTTL   = 10 * time.Minute
-	open115PathNotFoundCode   = int64(20018)
-	maxOpen115UploadAttempts  = 3
+	open115ListPageSize        = int64(200)
+	open115RequestInterval     = 500 * time.Millisecond
+	open115PathInfoRetryDelay  = 250 * time.Millisecond
+	open115ChildrenCacheTTL    = 10 * time.Minute
+	open115PathNotFoundCode    = int64(20018)
+	maxOpen115UploadAttempts   = 3
+	maxOpen115VisibilityChecks = 6
 )
 
 type open115PathInfo struct {
@@ -790,13 +791,18 @@ func (p *open115Provider) listPage(ctx context.Context, parentID string, offset 
 }
 
 func (p *open115Provider) waitForFile(ctx context.Context, remotePath, parentID, name string, size int64) (RemoteFile, error) {
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 0; attempt < maxOpen115VisibilityChecks; attempt++ {
 		file, found, err := p.findPathEntry(ctx, remotePath, parentID, name, size)
 		if err != nil {
 			return RemoteFile{}, err
 		}
 		if found && file.Fc != "0" && file.FS == size {
 			return RemoteFile{ID: file.Fid, Size: file.FS, SHA1: file.Sha1}, nil
+		}
+		if attempt+1 < maxOpen115VisibilityChecks {
+			if err := p.waitUploadRetry(ctx, attempt+1); err != nil {
+				return RemoteFile{}, err
+			}
 		}
 	}
 	return RemoteFile{}, fmt.Errorf("%w: %s", err115RemoteFileNotVisible, name)

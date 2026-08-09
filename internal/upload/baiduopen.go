@@ -309,24 +309,16 @@ func (p *baiduOpenProvider) Upload(ctx context.Context, localPath, remotePath st
 			remoteID = strings.TrimSpace(string(created.FSID))
 		}
 	}
-	if remoteID != "" {
-		return RemoteFile{
-			ID:        remoteID,
-			Size:      size,
-			SHA1:      localSHA1,
-			LocalSHA1: localSHA1,
-			Outcome:   intendedOutcome,
-		}, nil
-	}
-
-	remote, err := p.waitForRemoteFile(ctx, parentPath, name, size, resolved.MD5)
-	if err != nil {
-		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("verify Baidu Open upload %s: %w", remotePath, err)}
-	}
-	remote.LocalSHA1 = localSHA1
-	remote.SHA1 = localSHA1
-	remote.Outcome = intendedOutcome
-	return remote, nil
+	// A successful precreate (rapid upload) or create response is the commit
+	// confirmation. Baidu's list endpoint is eventually consistent and may not
+	// expose the file, or even its fs_id, immediately after that response.
+	return RemoteFile{
+		ID:        remoteID,
+		Size:      size,
+		SHA1:      localSHA1,
+		LocalSHA1: localSHA1,
+		Outcome:   intendedOutcome,
+	}, nil
 }
 
 func calculateBaiduOpenDigest(ctx context.Context, file *os.File) (*baiduOpenDigest, error) {

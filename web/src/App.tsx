@@ -238,6 +238,14 @@ type UploadProviderDescriptor = {
 
 type UploadAuthDevice = { code: string; name: string };
 
+type BaiduOpenCredentials = {
+  clientID: string;
+  clientSecret: string;
+  accessToken: string;
+  refreshToken: string;
+  accessTokenExpiresAt: string;
+};
+
 type UploadSummary = {
   collecting: number;
   pending: number;
@@ -881,7 +889,7 @@ function isOpen115AuthorizationActive(auth: Open115AuthStatus | null) {
 }
 
 function uploadProviderNeedsAuthorization(provider: UploadProvider | undefined) {
-  return Boolean(provider && ((provider.type === '115cookie' && !provider.hasCookie) || (provider.type === '115open' && !provider.hasCredentials)));
+  return Boolean(provider && ((provider.type === '115cookie' && !provider.hasCookie) || (['115open', 'baidupan'].includes(provider.type) && !provider.hasCredentials)));
 }
 
 function watchDirDraftSignature(path: string, watchEnabled: boolean, useGlobalProcessing: boolean, processing: OutputProcessingConfig, uploadConfigs: UploadProviderRoute[]) {
@@ -1204,6 +1212,9 @@ export function App() {
   const [open115Auth, setOpen115Auth] = useState<Open115AuthStatus | null>(null);
   const [open115Tokens, setOpen115Tokens] = useState({ accessToken: '', refreshToken: '' });
   const [showOpen115Tokens, setShowOpen115Tokens] = useState(false);
+  const [uploadBaiduOpenProvider, setUploadBaiduOpenProvider] = useState<UploadProvider | null>(null);
+  const [baiduOpenCredentials, setBaiduOpenCredentials] = useState<BaiduOpenCredentials>({ clientID: '', clientSecret: '', accessToken: '', refreshToken: '', accessTokenExpiresAt: '' });
+  const [showBaiduOpenTokens, setShowBaiduOpenTokens] = useState(false);
   const [savingUploadProvider, setSavingUploadProvider] = useState(false);
   const [checkingUploadProviderID, setCheckingUploadProviderID] = useState<number | null>(null);
   const [uploadTargetActionID, setUploadTargetActionID] = useState<number | null>(null);
@@ -1379,7 +1390,7 @@ export function App() {
   const modalStackKey = [
     remoteDirectoryPicker && 'remote-directory', directoryPicker && 'directory', targetPathEditor && 'target-path', selectedHistoryBatch && 'history-detail', renameHistoryOpen && 'history',
     renameTemplateEditorOpen && 'template', tmdbEpisodeDetail && 'episode-detail', addEmbyKeyOpen && 'emby-key', auditTmdbMatchOpen && 'audit-tmdb', tmdbMatchOpen && 'tmdb',
-    uploadOpen115Provider && 'upload-open115',
+    uploadOpen115Provider && 'upload-open115', uploadBaiduOpenProvider && 'upload-baiduopen',
     batchEpisodeOpen && 'batch', uploadCookieProvider && 'upload-cookie', uploadProviderUsage && 'upload-provider-usage', (newUploadProviderOpen || uploadProviderModal) && 'upload-provider',
     (newUploadNotificationTemplateOpen || uploadNotificationTemplateModal) && 'upload-notification-template',
     editingWatchDir && 'edit-dir', addWatchDirOpen && 'add-dir', rescanOpen && 'rescan', selectedUploadBatch && 'upload-detail', selectedTask && 'task-detail',
@@ -1625,6 +1636,7 @@ export function App() {
       else if (batchEpisodeOpen && !modalBusyRef.current.applyingBatchEpisode) setBatchEpisodeOpen(false);
       else if (uploadCookieProvider && !modalBusyRef.current.savingUploadProvider) requestUploadCookieCloseRef.current();
       else if (uploadOpen115Provider && !modalBusyRef.current.savingUploadProvider) requestUploadOpen115CloseRef.current();
+      else if (uploadBaiduOpenProvider && !modalBusyRef.current.savingUploadProvider) setUploadBaiduOpenProvider(null);
       else if (uploadProviderUsage) setUploadProviderUsage(null);
       else if ((newUploadProviderOpen || uploadProviderModal) && !modalBusyRef.current.savingUploadProvider) { setNewUploadProviderOpen(false); setUploadProviderModal(null); }
       else if ((newUploadNotificationTemplateOpen || uploadNotificationTemplateModal) && !modalBusyRef.current.savingUploadNotificationTemplate) { setNewUploadNotificationTemplateOpen(false); setUploadNotificationTemplateModal(null); }
@@ -2159,6 +2171,9 @@ export function App() {
         setOpen115ClientID('');
         setOpen115Auth(null);
       }
+      if (isNew && saved.type === 'baidupan' && !saved.hasCredentials) {
+        openBaiduOpenCredentials(saved);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存 Provider 失败');
     } finally {
@@ -2171,7 +2186,49 @@ export function App() {
       openUploadOpen115Authorization(provider);
       return;
     }
+    if (provider.type === 'baidupan') {
+      openBaiduOpenCredentials(provider);
+      return;
+    }
     openUploadCookieAuthorization(provider);
+  }
+
+  function openBaiduOpenCredentials(provider: UploadProvider) {
+    setUploadBaiduOpenProvider(provider);
+    setBaiduOpenCredentials({ clientID: '', clientSecret: '', accessToken: '', refreshToken: '', accessTokenExpiresAt: '' });
+    setShowBaiduOpenTokens(false);
+  }
+
+  async function saveBaiduOpenCredentials() {
+    if (!uploadBaiduOpenProvider) return;
+    const values: Array<[string, string]> = [
+      ['client_id', baiduOpenCredentials.clientID],
+      ['client_secret', baiduOpenCredentials.clientSecret],
+      ['access_token', baiduOpenCredentials.accessToken],
+      ['refresh_token', baiduOpenCredentials.refreshToken],
+      ['access_token_expires_at', baiduOpenCredentials.accessTokenExpiresAt]
+    ].filter(([, value]) => Boolean(value.trim())) as Array<[string, string]>;
+    if (!values.length) return;
+    setSavingUploadProvider(true);
+    setError('');
+    try {
+      for (const [key, value] of values) {
+        const response = await fetch(`/api/upload/providers/${uploadBaiduOpenProvider.id}/secrets/${key}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: value.trim() })
+        });
+        if (!response.ok) throw new Error(await readErrorMessage(response));
+      }
+      clearRemoteDirectoryCache(uploadBaiduOpenProvider.id);
+      setUploadBaiduOpenProvider(null);
+      setNotice('百度网盘 Open 凭据已保存。');
+      await loadUploadProviders();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存百度网盘 Open 凭据失败');
+    } finally {
+      setSavingUploadProvider(false);
+    }
   }
 
   function openUploadCookieAuthorization(provider: UploadProvider) {
@@ -4374,11 +4431,11 @@ export function App() {
                       <tr key={provider.id}>
                         <td><strong>{provider.name}</strong></td>
                         <td>{uploadProviderTypes.find((item) => item.type === provider.type)?.name ?? provider.type}</td>
-                        <td>{['115cookie', '115open'].includes(provider.type) ? <span className={needsAuthorization ? 'pill warn' : 'pill ok'}>{needsAuthorization ? '未授权' : '已授权'}</span> : <span className="pill ignored">按类型配置</span>}</td>
+                        <td>{['115cookie', '115open', 'baidupan'].includes(provider.type) ? <span className={needsAuthorization ? 'pill warn' : 'pill ok'}>{needsAuthorization ? '未授权' : '已授权'}</span> : <span className="pill ignored">按类型配置</span>}</td>
                         <td>{provider.type === '115cookie' && provider.hasCookie ? uploadAuthDeviceName(provider.authDevice, provider.type, uploadProviderTypes) : '-'}</td>
                         <td>{directoryCount ? <button className="secondary upload-provider-directory-button" type="button" onClick={() => setUploadProviderUsage(provider)}>{directoryCount} 个目录</button> : <span className="pill ignored">未使用</span>}</td>
                         <td><span className={provider.enabled ? 'pill ok' : 'pill ignored'}>{provider.enabled ? '可用' : '停用'}</span></td>
-                        <td><div className="table-actions upload-provider-actions"><ActionIconButton label={`编辑 Provider ${provider.name}`} icon={Pencil} onClick={() => setUploadProviderModal(provider)} />{['115cookie', '115open'].includes(provider.type) && <ActionIconButton label={`${needsAuthorization ? '授权' : '重新授权'} ${provider.name}`} icon={KeyRound} onClick={() => openUploadAuthorization(provider)} />}<ActionIconButton label={`检查连接 ${provider.name}`} icon={CircleGauge} loading={checkingUploadProviderID === provider.id} disabled={checkingUploadProviderID === provider.id || needsAuthorization} onClick={() => void checkUploadProvider(provider)} /><ActionIconButton label={`删除 Provider ${provider.name}`} icon={Trash2} tone="danger" onClick={() => void deleteUploadProvider(provider)} /></div></td>
+                        <td><div className="table-actions upload-provider-actions"><ActionIconButton label={`编辑 Provider ${provider.name}`} icon={Pencil} onClick={() => setUploadProviderModal(provider)} />{['115cookie', '115open', 'baidupan'].includes(provider.type) && <ActionIconButton label={`${needsAuthorization ? '授权' : '重新授权'} ${provider.name}`} icon={KeyRound} onClick={() => openUploadAuthorization(provider)} />}<ActionIconButton label={`检查连接 ${provider.name}`} icon={CircleGauge} loading={checkingUploadProviderID === provider.id} disabled={checkingUploadProviderID === provider.id || needsAuthorization} onClick={() => void checkUploadProvider(provider)} /><ActionIconButton label={`删除 Provider ${provider.name}`} icon={Trash2} tone="danger" onClick={() => void deleteUploadProvider(provider)} /></div></td>
                       </tr>
                     );
                   }) : <tr><td colSpan={7} className="empty-cell">尚未添加 Provider。先添加并授权账号，再到媒体目录中配置上传步骤。</td></tr>}
@@ -4491,6 +4548,7 @@ export function App() {
       {(newUploadProviderOpen || uploadProviderModal) && <UploadProviderModal provider={uploadProviderModal ?? undefined} providerTypes={uploadProviderTypes} saving={savingUploadProvider} onClose={(dirty) => requestDiscardChanges(dirty, () => { setNewUploadProviderOpen(false); setUploadProviderModal(null); })} onSubmit={(provider) => void saveUploadProvider(provider)} />}
       {(newUploadNotificationTemplateOpen || uploadNotificationTemplateModal) && <UploadNotificationTemplateModal template={uploadNotificationTemplateModal ?? undefined} saving={savingUploadNotificationTemplate} onClose={(dirty) => requestDiscardChanges(dirty, () => { setNewUploadNotificationTemplateOpen(false); setUploadNotificationTemplateModal(null); })} onSubmit={(template) => void saveUploadNotificationTemplate(template)} />}
       {uploadOpen115Provider && <UploadOpen115Modal provider={uploadOpen115Provider} clientID={open115ClientID} auth={open115Auth} tokens={open115Tokens} showTokens={showOpen115Tokens} saving={savingUploadProvider} onClientIDChange={setOpen115ClientID} onTokensChange={setOpen115Tokens} onToggleTokenVisibility={() => setShowOpen115Tokens((value) => !value)} onClose={requestCloseUploadOpen115Modal} onStartAuth={() => void startOpen115Auth()} onImport={() => void importOpen115Tokens()} />}
+      {uploadBaiduOpenProvider && <BaiduOpenCredentialsModal provider={uploadBaiduOpenProvider} credentials={baiduOpenCredentials} showTokens={showBaiduOpenTokens} saving={savingUploadProvider} onChange={setBaiduOpenCredentials} onToggleTokenVisibility={() => setShowBaiduOpenTokens((value) => !value)} onClose={() => setUploadBaiduOpenProvider(null)} onSave={() => void saveBaiduOpenCredentials()} />}
       {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} devices={uploadAuthDevices(uploadCookieProvider.type, uploadProviderTypes)} device={uploadCookieDevice} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onDeviceChange={setUploadCookieDevice} onCookieChange={setUploadCookieValue} onClose={requestCloseUploadCookieModal} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
@@ -4811,7 +4869,7 @@ function UploadProviderModal(props: { provider?: UploadProvider; providerTypes: 
           <label>自定义 User-Agent（可选）<input value={draft.userAgent} onChange={(event) => setDraft({ ...draft, userAgent: event.target.value })} placeholder="Mozilla/5.0" /></label>
           {draft.type === '115open' && <label>上传 API 请求间隔（毫秒）<input type="number" min={250} max={10000} required value={draft.requestIntervalMs} onChange={(event) => setDraft({ ...draft, requestIntervalMs: Number(event.target.value) })} /><small>限制 250–10000 毫秒；默认 500 毫秒。</small></label>}
           <Toggle label="启用此 Provider" checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} />
-          <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={() => props.onClose(dirty)} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : (!editing && ['115cookie', '115open'].includes(draft.type) ? '保存并授权' : '保存 Provider')}</button></div>
+          <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={() => props.onClose(dirty)} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : (!editing && ['115cookie', '115open', 'baidupan'].includes(draft.type) ? '保存并授权' : '保存 Provider')}</button></div>
         </form>
       </section>
     </div>
@@ -4929,6 +4987,41 @@ function UploadOpen115Modal(props: { provider: UploadProvider; clientID: string;
           </section>
         </div>
         <div className="inline-actions modal-actions"><button type="button" className={authActive ? 'danger' : 'secondary'} onClick={props.onClose} disabled={props.saving}>{authActive ? '结束授权并关闭' : '关闭'}</button></div>
+      </section>
+    </div>
+  );
+}
+
+function BaiduOpenCredentialsModal(props: { provider: UploadProvider; credentials: BaiduOpenCredentials; showTokens: boolean; saving: boolean; onChange: (value: BaiduOpenCredentials) => void; onToggleTokenVisibility: () => void; onClose: () => void; onSave: () => void }) {
+  const values = props.credentials;
+  const canSave = Boolean(values.clientID.trim() || values.clientSecret.trim() || values.accessToken.trim() || values.refreshToken.trim() || values.accessTokenExpiresAt.trim());
+  const update = (patch: Partial<BaiduOpenCredentials>) => props.onChange({ ...values, ...patch });
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-card upload-cookie-modal" role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="upload-baiduopen-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header">
+          <div><h2 id="upload-baiduopen-title">百度网盘 Open 凭据</h2><small>{props.provider.name}</small></div>
+          <IconCloseButton onClick={props.onClose} disabled={props.saving} />
+        </div>
+        <div className="upload-auth-grid">
+          <section className="upload-auth-panel">
+            <h3>开放平台应用</h3>
+            <label>Client ID<input autoFocus value={values.clientID} onChange={(event) => update({ clientID: event.target.value })} autoComplete="off" disabled={props.saving} /></label>
+            <label>Client Secret<input type={props.showTokens ? 'text' : 'password'} value={values.clientSecret} onChange={(event) => update({ clientSecret: event.target.value })} autoComplete="off" disabled={props.saving} /></label>
+            <p className="settings-note">Client ID 和 Client Secret 用于 access token 过期后的自动刷新。已有凭据留空即可保持不变。</p>
+          </section>
+          <section className="upload-auth-panel upload-auth-import-panel">
+            <h3>Token</h3>
+            <label>Access Token<input type={props.showTokens ? 'text' : 'password'} value={values.accessToken} onChange={(event) => update({ accessToken: event.target.value })} autoComplete="off" disabled={props.saving} /></label>
+            <label>Refresh Token<input type={props.showTokens ? 'text' : 'password'} value={values.refreshToken} onChange={(event) => update({ refreshToken: event.target.value })} autoComplete="off" disabled={props.saving} /></label>
+            <label>Access Token 过期时间（可选）<input value={values.accessTokenExpiresAt} onChange={(event) => update({ accessTokenExpiresAt: event.target.value })} placeholder="例如：2027-01-01T00:00:00Z" autoComplete="off" disabled={props.saving} /></label>
+            <div className="inline-actions">
+              <button type="button" onClick={props.onSave} disabled={props.saving || !canSave}>{props.saving ? '保存中' : '保存凭据'}</button>
+              <button type="button" className="secondary" onClick={props.onToggleTokenVisibility} disabled={props.saving}>{props.showTokens ? '隐藏凭据' : '显示凭据'}</button>
+            </div>
+          </section>
+        </div>
+        <div className="inline-actions modal-actions"><button type="button" className="secondary" onClick={props.onClose} disabled={props.saving}>关闭</button></div>
       </section>
     </div>
   );

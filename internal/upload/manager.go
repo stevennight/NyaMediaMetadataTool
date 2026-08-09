@@ -276,6 +276,55 @@ func (m *Manager) registerBuiltInProviders() {
 		provider.requestInterval = time.Duration(store.NormalizeUploadRequestIntervalMS(target.RequestIntervalMS)) * time.Millisecond
 		return provider, nil
 	})
+	m.RegisterProviderDescriptor(ProviderDescriptor{
+		Type:       store.UploadProviderTypeBaiduPan,
+		Name:       "百度网盘 Open",
+		SecretKeys: []string{"client_id", "client_secret", "access_token", "refresh_token", "access_token_expires_at"},
+	}, func(ctx context.Context, target store.UploadBatchTarget, lookup SecretLookup) (Provider, error) {
+		clientID, err := lookup(ctx, "client_id")
+		if err != nil {
+			return nil, err
+		}
+		clientSecret, err := lookup(ctx, "client_secret")
+		if err != nil {
+			return nil, err
+		}
+		accessToken, err := lookup(ctx, "access_token")
+		if err != nil {
+			return nil, err
+		}
+		refreshToken, err := lookup(ctx, "refresh_token")
+		if err != nil {
+			return nil, err
+		}
+		expiresAt, err := lookup(ctx, "access_token_expires_at")
+		if err != nil {
+			return nil, err
+		}
+		provider, err := newBaiduOpenProvider(
+			clientID,
+			clientSecret,
+			accessToken,
+			refreshToken,
+			expiresAt,
+			target.UserAgent,
+			time.Duration(store.NormalizeUploadRequestIntervalMS(target.RequestIntervalMS))*time.Millisecond,
+			func(updatedAccessToken, updatedRefreshToken, updatedExpiresAt string) {
+				if m.store == nil {
+					return
+				}
+				persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := m.store.SetUploadProviderBaiduPanRefreshedTokens(persistCtx, target.ProviderID, updatedAccessToken, updatedRefreshToken, updatedExpiresAt); err != nil && m.logger != nil {
+					m.logger.Error("persist refreshed Baidu Open tokens", "provider_id", target.ProviderID, "error", err)
+				}
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		return provider, nil
+	})
 }
 
 func (m *Manager) open115Session(providerID int64, accessToken, refreshToken, expiresAt, userAgent string) *open115Session {

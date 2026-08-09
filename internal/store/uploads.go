@@ -651,6 +651,45 @@ func (s *Store) SetUploadProvider115OpenRefreshedTokens(ctx context.Context, pro
 	return tx.Commit()
 }
 
+func (s *Store) SetUploadProviderBaiduPanRefreshedTokens(ctx context.Context, providerID int64, accessToken, refreshToken, expiresAt string) error {
+	accessToken = strings.TrimSpace(accessToken)
+	refreshToken = strings.TrimSpace(refreshToken)
+	expiresAt = strings.TrimSpace(expiresAt)
+	if providerID <= 0 || accessToken == "" {
+		return errors.New("provider id and refreshed Baidu Open access token are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireUploadProviderTypeTx(ctx, tx, providerID, UploadProviderTypeBaiduPan); err != nil {
+		return err
+	}
+	if err := setUploadProviderSecretTx(ctx, tx, providerID, "access_token", accessToken); err != nil {
+		return err
+	}
+	if refreshToken != "" {
+		if err := setUploadProviderSecretTx(ctx, tx, providerID, "refresh_token", refreshToken); err != nil {
+			return err
+		}
+	}
+	if expiresAt == "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_secrets WHERE provider_id = ? AND secret_key = 'access_token_expires_at'`, providerID); err != nil {
+			return err
+		}
+	} else if err := setUploadProviderSecretTx(ctx, tx, providerID, "access_token_expires_at", expiresAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
+		return err
+	}
+	if err := deleteUploadProviderCacheTx(ctx, tx, providerID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func require115OpenProviderTx(ctx context.Context, tx *sql.Tx, providerID int64) error {
 	var providerType string
 	if err := tx.QueryRowContext(ctx, `SELECT type FROM upload_providers WHERE id = ?`, providerID).Scan(&providerType); errors.Is(err, sql.ErrNoRows) {
@@ -660,6 +699,19 @@ func require115OpenProviderTx(ctx context.Context, tx *sql.Tx, providerID int64)
 	}
 	if providerType != UploadProviderType115Open {
 		return errors.New("provider does not use 115 Open authentication")
+	}
+	return nil
+}
+
+func requireUploadProviderTypeTx(ctx context.Context, tx *sql.Tx, providerID int64, expectedType string) error {
+	var providerType string
+	if err := tx.QueryRowContext(ctx, `SELECT type FROM upload_providers WHERE id = ?`, providerID).Scan(&providerType); errors.Is(err, sql.ErrNoRows) {
+		return ErrUploadProviderNotFound
+	} else if err != nil {
+		return err
+	}
+	if providerType != expectedType {
+		return fmt.Errorf("provider does not use %s authentication", expectedType)
 	}
 	return nil
 }

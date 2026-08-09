@@ -5239,8 +5239,6 @@ function BaiduOpenAuthorizationModal(props: { provider: UploadProvider; credenti
           <section className="upload-auth-panel baiduopen-authorization-panel">
             <h3>Authorization</h3>
             {props.auth && <p className="settings-note" aria-live="polite">{props.auth.message || props.auth.state}</p>}
-            {props.auth?.callbackUrl && <p className="settings-note">Return URI: <code>{props.auth.callbackUrl}</code></p>}
-            {props.auth?.redirectUri && props.mode === 'broker_relay' && <p className="settings-note">Baidu redirect URI: <code>{props.auth.redirectUri}</code></p>}
             {props.auth?.authorizationUrl && props.mode === 'broker_token_exchange' && <button type="button" onClick={() => window.open(props.auth?.authorizationUrl, '_blank', 'noopener,noreferrer')} disabled={props.saving || authActive}>Open Broker</button>}
             <button type="button" onClick={props.onStartAuthorization} disabled={props.saving || authActive || !canStart}>{authTerminal ? 'Restart authorization' : 'Start authorization'}</button>
             {authActive && <span className="pill running" role="status">Authorization in progress</span>}

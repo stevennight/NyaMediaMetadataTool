@@ -51,7 +51,7 @@ type Health = {
 };
 
 type AppConfig = {
-  server: { addr: string; timezone: string };
+  server: { addr: string; timezone: string; publicBaseURL?: string };
   database: { path: string };
   tools: {
     ffmpeg: string;
@@ -244,6 +244,9 @@ type BaiduOpenCredentials = {
   accessToken: string;
   refreshToken: string;
   accessTokenExpiresAt: string;
+  brokerBaseURL: string;
+  brokerClientID: string;
+  brokerToken: string;
 };
 
 type UploadSummary = {
@@ -354,6 +357,34 @@ type Open115AuthStatus = {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+};
+
+type BaiduOpenAuthStatus = {
+  sessionId: string;
+  providerId: number;
+  mode: string;
+  authorizationUrl?: string;
+  redirectUri?: string;
+  callbackUrl?: string;
+  expiresAt?: string;
+  state: string;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+};
+
+type BaiduOpenAuthConfig = {
+  providerId: number;
+  clientId?: string;
+  clientSecretConfigured: boolean;
+  accessTokenConfigured: boolean;
+  refreshTokenConfigured: boolean;
+  authMode: string;
+  brokerBaseUrl?: string;
+  brokerClientId?: string;
+  brokerTokenConfigured: boolean;
+  brokerConfigured: boolean;
 };
 
 type RenamePreviewItem = {
@@ -888,6 +919,10 @@ function isOpen115AuthorizationActive(auth: Open115AuthStatus | null) {
   return Boolean(auth && !['authorized', 'expired', 'cancelled', 'error'].includes(auth.state));
 }
 
+function isBaiduOpenAuthorizationActive(auth: BaiduOpenAuthStatus | null) {
+  return Boolean(auth && !['authorized', 'completed', 'expired', 'cancelled', 'error', 'failed'].includes(auth.state));
+}
+
 function uploadProviderNeedsAuthorization(provider: UploadProvider | undefined) {
   return Boolean(provider && ((provider.type === '115cookie' && !provider.hasCookie) || (['115open', 'baidupan'].includes(provider.type) && !provider.hasCredentials)));
 }
@@ -1213,7 +1248,10 @@ export function App() {
   const [open115Tokens, setOpen115Tokens] = useState({ accessToken: '', refreshToken: '' });
   const [showOpen115Tokens, setShowOpen115Tokens] = useState(false);
   const [uploadBaiduOpenProvider, setUploadBaiduOpenProvider] = useState<UploadProvider | null>(null);
-  const [baiduOpenCredentials, setBaiduOpenCredentials] = useState<BaiduOpenCredentials>({ clientID: '', clientSecret: '', accessToken: '', refreshToken: '', accessTokenExpiresAt: '' });
+  const [baiduOpenCredentials, setBaiduOpenCredentials] = useState<BaiduOpenCredentials>({ clientID: '', clientSecret: '', accessToken: '', refreshToken: '', accessTokenExpiresAt: '', brokerBaseURL: '', brokerClientID: '', brokerToken: '' });
+  const [baiduOpenMode, setBaiduOpenMode] = useState('official');
+  const [baiduOpenAuth, setBaiduOpenAuth] = useState<BaiduOpenAuthStatus | null>(null);
+  const [baiduOpenAuthConfig, setBaiduOpenAuthConfig] = useState<BaiduOpenAuthConfig | null>(null);
   const [showBaiduOpenTokens, setShowBaiduOpenTokens] = useState(false);
   const [savingUploadProvider, setSavingUploadProvider] = useState(false);
   const [checkingUploadProviderID, setCheckingUploadProviderID] = useState<number | null>(null);
@@ -2195,11 +2233,28 @@ export function App() {
 
   function openBaiduOpenCredentials(provider: UploadProvider) {
     setUploadBaiduOpenProvider(provider);
-    setBaiduOpenCredentials({ clientID: '', clientSecret: '', accessToken: '', refreshToken: '', accessTokenExpiresAt: '' });
+    setBaiduOpenCredentials({ clientID: '', clientSecret: '', accessToken: '', refreshToken: '', accessTokenExpiresAt: '', brokerBaseURL: '', brokerClientID: '', brokerToken: '' });
+    setBaiduOpenMode('official');
+    setBaiduOpenAuth(null);
+    setBaiduOpenAuthConfig(null);
     setShowBaiduOpenTokens(false);
+    void loadBaiduOpenAuthConfig(provider);
   }
 
-  async function saveBaiduOpenCredentials() {
+  async function loadBaiduOpenAuthConfig(provider: UploadProvider) {
+    try {
+      const response = await fetch(`/api/upload/providers/${provider.id}/auth/baiduopen`);
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      const config = await response.json() as BaiduOpenAuthConfig;
+      setBaiduOpenAuthConfig(config);
+      setBaiduOpenMode(config.authMode || 'official');
+      setBaiduOpenCredentials((current) => ({ ...current, clientID: config.clientId || '', brokerBaseURL: config.brokerBaseUrl || '', brokerClientID: config.brokerClientId || '' }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load Baidu Open authorization settings');
+    }
+  }
+
+  async function saveBaiduOpenCredentialsLegacy() {
     if (!uploadBaiduOpenProvider) return;
     const values: Array<[string, string]> = [
       ['client_id', baiduOpenCredentials.clientID],
@@ -2226,6 +2281,102 @@ export function App() {
       await loadUploadProviders();
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存百度网盘 Open 凭据失败');
+    } finally {
+      setSavingUploadProvider(false);
+    }
+  }
+
+  async function saveBaiduOpenApplication() {
+    if (!uploadBaiduOpenProvider || !baiduOpenCredentials.clientID.trim() || !baiduOpenCredentials.clientSecret.trim()) return;
+    setSavingUploadProvider(true);
+    setError('');
+    try {
+      const response = await fetch(`/api/upload/providers/${uploadBaiduOpenProvider.id}/auth/baiduopen`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId: baiduOpenCredentials.clientID.trim(), clientSecret: baiduOpenCredentials.clientSecret.trim() })
+      });
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      setBaiduOpenAuthConfig(await response.json() as BaiduOpenAuthConfig);
+      clearRemoteDirectoryCache(uploadBaiduOpenProvider.id);
+      await loadUploadProviders();
+      setNotice('Baidu Open application credentials saved');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save Baidu Open application credentials');
+    } finally {
+      setSavingUploadProvider(false);
+    }
+  }
+
+  async function saveBaiduOpenAuthorizationSettings() {
+    if (!uploadBaiduOpenProvider) return;
+    setSavingUploadProvider(true);
+    setError('');
+    try {
+      const modeResponse = await fetch(`/api/upload/providers/${uploadBaiduOpenProvider.id}/auth/baiduopen/mode`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: baiduOpenMode })
+      });
+      if (!modeResponse.ok) throw new Error(await readErrorMessage(modeResponse));
+      if (baiduOpenMode !== 'official' || baiduOpenCredentials.brokerBaseURL.trim() || baiduOpenCredentials.brokerClientID.trim() || baiduOpenCredentials.brokerToken.trim()) {
+        const brokerResponse = await fetch(`/api/upload/providers/${uploadBaiduOpenProvider.id}/auth/baiduopen/broker`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseUrl: baiduOpenCredentials.brokerBaseURL.trim(), clientId: baiduOpenCredentials.brokerClientID.trim(), token: baiduOpenCredentials.brokerToken.trim() })
+        });
+        if (!brokerResponse.ok) throw new Error(await readErrorMessage(brokerResponse));
+      }
+      await loadBaiduOpenAuthConfig(uploadBaiduOpenProvider);
+      setNotice('Baidu Open authorization settings saved');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save Baidu Open authorization settings');
+    } finally {
+      setSavingUploadProvider(false);
+    }
+  }
+
+  async function startBaiduOpenAuthorization() {
+    if (!uploadBaiduOpenProvider) return;
+    setSavingUploadProvider(true);
+    setError('');
+    try {
+      if (baiduOpenMode !== 'broker_token_exchange' && baiduOpenCredentials.clientID.trim() && baiduOpenCredentials.clientSecret.trim()) {
+        const credentialsResponse = await fetch(`/api/upload/providers/${uploadBaiduOpenProvider.id}/auth/baiduopen`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientId: baiduOpenCredentials.clientID.trim(), clientSecret: baiduOpenCredentials.clientSecret.trim() })
+        });
+        if (!credentialsResponse.ok) throw new Error(await readErrorMessage(credentialsResponse));
+      }
+      await saveBaiduOpenAuthorizationSettings();
+      const response = await fetch(`/api/upload/providers/${uploadBaiduOpenProvider.id}/auth/baiduopen`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: baiduOpenMode })
+      });
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      const auth = await response.json() as BaiduOpenAuthStatus;
+      setBaiduOpenAuth(auth);
+      if (auth.authorizationUrl) window.open(auth.authorizationUrl, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start Baidu Open authorization');
+    } finally {
+      setSavingUploadProvider(false);
+    }
+  }
+
+  async function importBaiduOpenTokens() {
+    if (!uploadBaiduOpenProvider || !baiduOpenCredentials.accessToken.trim() || !baiduOpenCredentials.refreshToken.trim()) return;
+    setSavingUploadProvider(true);
+    setError('');
+    try {
+      const response = await fetch(`/api/upload/providers/${uploadBaiduOpenProvider.id}/auth/baiduopen/tokens`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessToken: baiduOpenCredentials.accessToken.trim(), refreshToken: baiduOpenCredentials.refreshToken.trim() })
+      });
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      setBaiduOpenAuthConfig(await response.json() as BaiduOpenAuthConfig);
+      setBaiduOpenCredentials((current) => ({ ...current, accessToken: '', refreshToken: '', accessTokenExpiresAt: '' }));
+      setBaiduOpenAuth(null);
+      clearRemoteDirectoryCache(uploadBaiduOpenProvider.id);
+      await loadUploadProviders();
+      setNotice('Baidu Open tokens imported');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to import Baidu Open tokens');
     } finally {
       setSavingUploadProvider(false);
     }
@@ -2607,6 +2758,42 @@ export function App() {
       if (timer != null) window.clearTimeout(timer);
     };
   }, [open115Auth?.sessionId, open115Auth?.state, uploadOpen115Provider?.id]);
+
+  useEffect(() => {
+    if (!baiduOpenAuth || !uploadBaiduOpenProvider || !isBaiduOpenAuthorizationActive(baiduOpenAuth)) return;
+    let active = true;
+    const providerID = uploadBaiduOpenProvider.id;
+    const sessionID = baiduOpenAuth.sessionId;
+    let timer: number | undefined;
+    async function pollBaiduOpenAuthorization() {
+      let terminal = false;
+      try {
+        const response = await fetch(`/api/upload/providers/${providerID}/auth/baiduopen?sessionId=${encodeURIComponent(sessionID)}`);
+        if (!response.ok) throw new Error(await readErrorMessage(response));
+        const next = await response.json() as BaiduOpenAuthStatus;
+        terminal = !isBaiduOpenAuthorizationActive(next);
+        if (!active) return;
+        setBaiduOpenAuth((current) => ({ ...next, authorizationUrl: next.authorizationUrl || current?.authorizationUrl }));
+        if (next.state === 'authorized') {
+          clearRemoteDirectoryCache(providerID);
+          setUploadBaiduOpenProvider((current) => current && current.id === providerID ? { ...current, hasCredentials: true } : current);
+          setNotice('Baidu Open authorization succeeded');
+          await loadUploadProviders();
+        } else if (next.state === 'completed') {
+          setNotice('Broker authorization completed; import the displayed tokens');
+        }
+      } catch (err) {
+        if (active) setError(err instanceof Error ? err.message : 'Failed to poll Baidu Open authorization');
+      } finally {
+        if (active && !terminal) timer = window.setTimeout(() => void pollBaiduOpenAuthorization(), 2000);
+      }
+    }
+    timer = window.setTimeout(() => void pollBaiduOpenAuthorization(), 2000);
+    return () => {
+      active = false;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, [baiduOpenAuth?.sessionId, baiduOpenAuth?.state, uploadBaiduOpenProvider?.id]);
 
   useEffect(() => {
     if (!selectedTask) return;
@@ -4548,7 +4735,7 @@ export function App() {
       {(newUploadProviderOpen || uploadProviderModal) && <UploadProviderModal provider={uploadProviderModal ?? undefined} providerTypes={uploadProviderTypes} saving={savingUploadProvider} onClose={(dirty) => requestDiscardChanges(dirty, () => { setNewUploadProviderOpen(false); setUploadProviderModal(null); })} onSubmit={(provider) => void saveUploadProvider(provider)} />}
       {(newUploadNotificationTemplateOpen || uploadNotificationTemplateModal) && <UploadNotificationTemplateModal template={uploadNotificationTemplateModal ?? undefined} saving={savingUploadNotificationTemplate} onClose={(dirty) => requestDiscardChanges(dirty, () => { setNewUploadNotificationTemplateOpen(false); setUploadNotificationTemplateModal(null); })} onSubmit={(template) => void saveUploadNotificationTemplate(template)} />}
       {uploadOpen115Provider && <UploadOpen115Modal provider={uploadOpen115Provider} clientID={open115ClientID} auth={open115Auth} tokens={open115Tokens} showTokens={showOpen115Tokens} saving={savingUploadProvider} onClientIDChange={setOpen115ClientID} onTokensChange={setOpen115Tokens} onToggleTokenVisibility={() => setShowOpen115Tokens((value) => !value)} onClose={requestCloseUploadOpen115Modal} onStartAuth={() => void startOpen115Auth()} onImport={() => void importOpen115Tokens()} />}
-      {uploadBaiduOpenProvider && <BaiduOpenCredentialsModal provider={uploadBaiduOpenProvider} credentials={baiduOpenCredentials} showTokens={showBaiduOpenTokens} saving={savingUploadProvider} onChange={setBaiduOpenCredentials} onToggleTokenVisibility={() => setShowBaiduOpenTokens((value) => !value)} onClose={() => setUploadBaiduOpenProvider(null)} onSave={() => void saveBaiduOpenCredentials()} />}
+      {uploadBaiduOpenProvider && <BaiduOpenAuthorizationModal provider={uploadBaiduOpenProvider} credentials={baiduOpenCredentials} mode={baiduOpenMode} auth={baiduOpenAuth} authConfig={baiduOpenAuthConfig} showTokens={showBaiduOpenTokens} saving={savingUploadProvider} onChange={setBaiduOpenCredentials} onModeChange={setBaiduOpenMode} onToggleTokenVisibility={() => setShowBaiduOpenTokens((value) => !value)} onClose={() => setUploadBaiduOpenProvider(null)} onSaveApplication={() => void saveBaiduOpenApplication()} onSaveSettings={() => void saveBaiduOpenAuthorizationSettings()} onStartAuthorization={() => void startBaiduOpenAuthorization()} onImportTokens={() => void importBaiduOpenTokens()} />}
       {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} devices={uploadAuthDevices(uploadCookieProvider.type, uploadProviderTypes)} device={uploadCookieDevice} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onDeviceChange={setUploadCookieDevice} onCookieChange={setUploadCookieValue} onClose={requestCloseUploadCookieModal} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
@@ -4987,6 +5174,62 @@ function UploadOpen115Modal(props: { provider: UploadProvider; clientID: string;
           </section>
         </div>
         <div className="inline-actions modal-actions"><button type="button" className={authActive ? 'danger' : 'secondary'} onClick={props.onClose} disabled={props.saving}>{authActive ? '结束授权并关闭' : '关闭'}</button></div>
+      </section>
+    </div>
+  );
+}
+
+function BaiduOpenAuthorizationModal(props: { provider: UploadProvider; credentials: BaiduOpenCredentials; mode: string; auth: BaiduOpenAuthStatus | null; authConfig: BaiduOpenAuthConfig | null; showTokens: boolean; saving: boolean; onChange: (value: BaiduOpenCredentials) => void; onModeChange: (value: string) => void; onToggleTokenVisibility: () => void; onClose: () => void; onSaveApplication: () => void; onSaveSettings: () => void; onStartAuthorization: () => void; onImportTokens: () => void }) {
+  const values = props.credentials;
+  const update = (patch: Partial<BaiduOpenCredentials>) => props.onChange({ ...values, ...patch });
+  const authActive = isBaiduOpenAuthorizationActive(props.auth);
+  const authTerminal = Boolean(props.auth && !authActive);
+  const canSaveApplication = Boolean(values.clientID.trim() && values.clientSecret.trim());
+  const canStart = props.mode === 'broker_token_exchange'
+    ? Boolean(values.brokerBaseURL.trim() && values.brokerClientID.trim() && (values.brokerToken.trim() || props.authConfig?.brokerTokenConfigured))
+    : Boolean(values.clientID.trim() && (values.clientSecret.trim() || props.authConfig?.clientSecretConfigured));
+  const canImport = Boolean(values.accessToken.trim() && values.refreshToken.trim());
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-card upload-cookie-modal" role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="upload-baiduopen-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header"><div><h2 id="upload-baiduopen-title">Baidu Open authorization</h2><small>{props.provider.name}</small></div><IconCloseButton onClick={props.onClose} disabled={props.saving} /></div>
+        <div className="upload-auth-grid">
+          <section className="upload-auth-panel">
+            <h3>Authorization mode</h3>
+            <label>Mode<select value={props.mode} onChange={(event) => props.onModeChange(event.target.value)} disabled={props.saving || authActive}><option value="official">Official direct</option><option value="broker_relay">OAuth Broker relay</option><option value="broker_token_exchange">OAuth Broker token exchange</option></select></label>
+            <p className="settings-note">Register one Baidu callback address. Broker relay uses the Broker's fixed Baidu callback; the local callback is only the return address.</p>
+          </section>
+          <section className="upload-auth-panel">
+            <h3>Baidu application</h3>
+            <label>Client ID<input autoFocus value={values.clientID} onChange={(event) => update({ clientID: event.target.value })} autoComplete="off" disabled={props.saving || authActive} /></label>
+            <label>Client Secret<input type={props.showTokens ? 'text' : 'password'} value={values.clientSecret} onChange={(event) => update({ clientSecret: event.target.value })} autoComplete="off" disabled={props.saving || authActive} placeholder={props.authConfig?.clientSecretConfigured ? 'Saved; leave blank to keep it' : ''} /></label>
+            <button type="button" onClick={props.onSaveApplication} disabled={props.saving || authActive || !canSaveApplication}>{props.saving ? 'Saving...' : 'Save application credentials'}</button>
+          </section>
+          {props.mode !== 'official' && <section className="upload-auth-panel">
+            <h3>OAuth Broker</h3>
+            <label>Broker base URL<input type="url" value={values.brokerBaseURL} onChange={(event) => update({ brokerBaseURL: event.target.value })} disabled={props.saving || authActive} placeholder="https://broker.example" /></label>
+            <label>Broker client ID<input value={values.brokerClientID} onChange={(event) => update({ brokerClientID: event.target.value })} autoComplete="off" disabled={props.saving || authActive} /></label>
+            <label>Broker token<input type={props.showTokens ? 'text' : 'password'} value={values.brokerToken} onChange={(event) => update({ brokerToken: event.target.value })} autoComplete="off" disabled={props.saving || authActive} placeholder={props.authConfig?.brokerTokenConfigured ? 'Saved; leave blank to keep it' : ''} /></label>
+            <button type="button" onClick={props.onSaveSettings} disabled={props.saving || authActive || !canStart}>{props.saving ? 'Saving...' : 'Save mode and Broker'}</button>
+          </section>}
+          <section className="upload-auth-panel">
+            <h3>Authorization</h3>
+            {props.auth && <p className="settings-note" aria-live="polite">{props.auth.message || props.auth.state}</p>}
+            {props.auth?.callbackUrl && <p className="settings-note">Return URI: <code>{props.auth.callbackUrl}</code></p>}
+            {props.auth?.redirectUri && props.mode === 'broker_relay' && <p className="settings-note">Baidu redirect URI: <code>{props.auth.redirectUri}</code></p>}
+            {props.auth?.authorizationUrl && props.mode === 'broker_token_exchange' && <button type="button" onClick={() => window.open(props.auth?.authorizationUrl, '_blank', 'noopener,noreferrer')} disabled={props.saving || authActive}>Open Broker</button>}
+            <button type="button" onClick={props.onStartAuthorization} disabled={props.saving || authActive || !canStart}>{authTerminal ? 'Restart authorization' : 'Start authorization'}</button>
+            {authActive && <span className="pill running" role="status">Authorization in progress</span>}
+          </section>
+          <section className="upload-auth-panel upload-auth-import-panel">
+            <h3>Import tokens</h3>
+            <p className="settings-note">Required for Broker token exchange. The server validates both tokens and refreshes once before saving.</p>
+            <label>Access Token<input type={props.showTokens ? 'text' : 'password'} value={values.accessToken} onChange={(event) => update({ accessToken: event.target.value })} autoComplete="off" disabled={props.saving || authActive} /></label>
+            <label>Refresh Token<input type={props.showTokens ? 'text' : 'password'} value={values.refreshToken} onChange={(event) => update({ refreshToken: event.target.value })} autoComplete="off" disabled={props.saving || authActive} /></label>
+            <div className="inline-actions"><button type="button" onClick={props.onImportTokens} disabled={props.saving || authActive || !canImport}>{props.saving ? 'Checking...' : 'Validate and import'}</button><button type="button" className="secondary" onClick={props.onToggleTokenVisibility} disabled={props.saving || authActive}>{props.showTokens ? 'Hide secrets' : 'Show secrets'}</button></div>
+          </section>
+        </div>
+        <div className="inline-actions modal-actions"><button type="button" className="secondary" onClick={props.onClose} disabled={props.saving}>Close</button></div>
       </section>
     </div>
   );

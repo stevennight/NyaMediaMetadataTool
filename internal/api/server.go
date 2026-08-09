@@ -27,25 +27,29 @@ import (
 )
 
 type Server struct {
-	cfgMu        sync.RWMutex
-	cfg          config.Config
-	configPath   string
-	store        *store.Store
-	tasks        TaskCanceller
-	watcher      WatchDirReloader
-	uploads      *upload.Manager
-	logger       *slog.Logger
-	mux          *http.ServeMux
-	serviceCtx   context.Context
-	lifecycleMu  sync.Mutex
-	requestWG    sync.WaitGroup
-	backgroundWG sync.WaitGroup
-	drainOnce    sync.Once
-	drained      chan struct{}
-	inFlight     int
-	mutations    int
-	background   int
-	closing      bool
+	cfgMu                 sync.RWMutex
+	cfg                   config.Config
+	configPath            string
+	store                 *store.Store
+	tasks                 TaskCanceller
+	watcher               WatchDirReloader
+	uploads               *upload.Manager
+	logger                *slog.Logger
+	mux                   *http.ServeMux
+	serviceCtx            context.Context
+	lifecycleMu           sync.Mutex
+	requestWG             sync.WaitGroup
+	backgroundWG          sync.WaitGroup
+	drainOnce             sync.Once
+	drained               chan struct{}
+	baiduAuthMu           sync.Mutex
+	baiduAuthFlows        map[string]*baiduOpenAuthFlow
+	baiduOAuthHTTPClient  *http.Client
+	oauthBrokerHTTPClient *http.Client
+	inFlight              int
+	mutations             int
+	background            int
+	closing               bool
 }
 
 type Activity struct {
@@ -80,16 +84,19 @@ func newServer(serviceCtx context.Context, cfg config.Config, configPath string,
 		uploads = uploadManagers[0]
 	}
 	server := &Server{
-		cfg:        cfg,
-		configPath: configPath,
-		store:      store,
-		tasks:      tasks,
-		watcher:    watcher,
-		uploads:    uploads,
-		logger:     logger,
-		mux:        http.NewServeMux(),
-		serviceCtx: serviceCtx,
-		drained:    make(chan struct{}),
+		cfg:                   cfg,
+		configPath:            configPath,
+		store:                 store,
+		tasks:                 tasks,
+		watcher:               watcher,
+		uploads:               uploads,
+		logger:                logger,
+		mux:                   http.NewServeMux(),
+		serviceCtx:            serviceCtx,
+		drained:               make(chan struct{}),
+		baiduAuthFlows:        make(map[string]*baiduOpenAuthFlow),
+		baiduOAuthHTTPClient:  &http.Client{Timeout: 30 * time.Second},
+		oauthBrokerHTTPClient: newOAuthBrokerHTTPClient(),
 	}
 	server.routes()
 	return server

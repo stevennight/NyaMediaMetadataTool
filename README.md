@@ -200,6 +200,8 @@ wails build -clean -platform windows/amd64
 
 `upload.Manager.RegisterProviderDescriptor` 是新增网盘实现的注册入口：它同时注册上传 Builder、显示名称和所需凭据键。`GET /api/upload/provider-types` 始终反映运行时已安装的 Provider，因此前端会自动启用新类型，而不是维护一份独立的硬编码列表。
 
+`baidupan` authorization supports the same three modes as NyaMedia: `official`, `broker_relay`, and `broker_token_exchange`. The UI stores Broker settings per Provider. The relay mode uses the Broker's fixed Baidu callback address, while the local callback is used only as the browser return URI. Set `server.publicBaseUrl` when the service is behind a reverse proxy; otherwise the callback origin is derived from the request host.
+
 未安装的预留 Provider（当前为 `115open`、`123pan`）可以被识别但不能启用，不会进入上传重试队列。`baidupan` 已实现百度网盘 Open API 上传，凭据键为 `client_id`、`client_secret`、`access_token`、`refresh_token` 和可选的 `access_token_expires_at`，支持 token 过期自动刷新。通用凭据接口为 `PUT/DELETE /api/upload/providers/{id}/secrets/{key}`；只允许 Provider descriptor 声明的键，且不提供读取接口。`115cookie` 仍保留专用 Cookie 与二维码授权流程，支持选择网页端、Android、iOS、电视端、支付宝小程序、微信小程序或 115 组织 Android。授权设备会和 Cookie 一起保存并显示在 Provider 中；旧 Cookie 无法追溯设备时显示为“未记录”。
 
 ## 生成产物
@@ -299,6 +301,8 @@ go run ./cmd/bifunpack -o "D:\Temp\bif-frames" -- "D:\Media\TV\Example\Example-3
 - `PUT/DELETE /api/upload/providers/{id}/cookie`、`POST /api/upload/providers/{id}/check`
 - `PUT/DELETE /api/upload/providers/{id}/secrets/{key}`
 - `POST/GET /api/upload/providers/{id}/auth/115cookie`
+- `GET/PUT/POST /api/upload/providers/{id}/auth/baiduopen`
+- `GET/PUT /api/upload/providers/{id}/auth/baiduopen/broker`銆乣PUT /api/upload/providers/{id}/auth/baiduopen/mode`銆乣PUT /api/upload/providers/{id}/auth/baiduopen/tokens`銆乣GET /api/upload/providers/{id}/auth/baiduopen/callback`
 - `GET /api/upload/provider-types`
 - `GET /api/upload/events`、`POST /api/upload/events/claim`
 - `POST /api/upload/events/{id}/ack`、`POST /api/upload/events/{id}/fail`

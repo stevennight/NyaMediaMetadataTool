@@ -727,7 +727,86 @@ type baiduOpenOAuthResponse struct {
 	ErrorDescription string `json:"error_description"`
 }
 
+// BaiduOpenOAuthToken is the token response returned by Baidu's OAuth API.
+type BaiduOpenOAuthToken = baiduOpenOAuthToken
+
+// BaiduOpenAuthorizationURL builds the authorization URL for a Baidu Open app.
+func BaiduOpenAuthorizationURL(clientID, redirectURI, state string) string {
+	values := url.Values{}
+	values.Set("response_type", "code")
+	values.Set("client_id", strings.TrimSpace(clientID))
+	values.Set("redirect_uri", strings.TrimSpace(redirectURI))
+	values.Set("scope", "basic,netdisk")
+	values.Set("state", strings.TrimSpace(state))
+	return "https://openapi.baidu.com/oauth/2.0/authorize?" + values.Encode()
+}
+
+// ExchangeBaiduOpenAuthorizationCode exchanges an OAuth authorization code.
+func ExchangeBaiduOpenAuthorizationCode(ctx context.Context, client *http.Client, clientID, clientSecret, code, redirectURI string) (*BaiduOpenOAuthToken, error) {
+	values := url.Values{}
+	values.Set("grant_type", "authorization_code")
+	values.Set("code", strings.TrimSpace(code))
+	values.Set("client_id", strings.TrimSpace(clientID))
+	values.Set("client_secret", strings.TrimSpace(clientSecret))
+	values.Set("redirect_uri", strings.TrimSpace(redirectURI))
+	return requestBaiduOpenOAuthTokenWithClient(ctx, client, values)
+}
+
+// RefreshBaiduOpenOAuthToken refreshes a Baidu Open access token.
+func RefreshBaiduOpenOAuthToken(ctx context.Context, client *http.Client, clientID, clientSecret, refreshToken string) (*BaiduOpenOAuthToken, error) {
+	values := url.Values{}
+	values.Set("grant_type", "refresh_token")
+	values.Set("refresh_token", strings.TrimSpace(refreshToken))
+	values.Set("client_id", strings.TrimSpace(clientID))
+	values.Set("client_secret", strings.TrimSpace(clientSecret))
+	return requestBaiduOpenOAuthTokenWithClient(ctx, client, values)
+}
+
+// ValidateBaiduOpenAccessToken checks the token against Baidu's user endpoint.
+func ValidateBaiduOpenAccessToken(ctx context.Context, client *http.Client, accessToken string) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	endpoint, err := url.Parse("https://pan.baidu.com/rest/2.0/xpan/nas")
+	if err != nil {
+		return err
+	}
+	query := endpoint.Query()
+	query.Set("method", "uinfo")
+	query.Set("access_token", strings.TrimSpace(accessToken))
+	endpoint.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", baiduOpenDefaultUserAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("Baidu Open access token validation failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read Baidu Open access token validation response: %w", err)
+	}
+	var response baiduOpenAPIResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("decode Baidu Open access token validation response: %w", err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("Baidu Open access token validation returned HTTP %d", resp.StatusCode)
+	}
+	if code := response.code(); code != 0 {
+		return &baiduOpenAPIError{StatusCode: resp.StatusCode, Code: code, Message: response.message()}
+	}
+	return nil
+}
+
 func requestBaiduOpenOAuthToken(ctx context.Context, client *http.Client, values url.Values) (*baiduOpenOAuthToken, error) {
+	return requestBaiduOpenOAuthTokenWithClient(ctx, client, values)
+}
+
+func requestBaiduOpenOAuthTokenWithClient(ctx context.Context, client *http.Client, values url.Values) (*BaiduOpenOAuthToken, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}

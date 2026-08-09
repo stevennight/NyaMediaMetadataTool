@@ -37,8 +37,9 @@ type LegacyUploadConfig struct {
 }
 
 type ServerConfig struct {
-	Addr     string `json:"addr" yaml:"addr"`
-	Timezone string `json:"timezone" yaml:"timezone"`
+	Addr          string `json:"addr" yaml:"addr"`
+	Timezone      string `json:"timezone" yaml:"timezone"`
+	PublicBaseURL string `json:"publicBaseURL,omitempty" yaml:"publicBaseUrl,omitempty"`
 }
 
 type DatabaseConfig struct {

@@ -530,6 +530,51 @@ ON CONFLICT(provider_id, secret_key) DO UPDATE SET secret_value = excluded.secre
 	return tx.Commit()
 }
 
+// SetUploadProviderBaiduOpenApplicationCredentials replaces the Baidu
+// application credentials and invalidates tokens when the application changes.
+func (s *Store) SetUploadProviderBaiduOpenApplicationCredentials(ctx context.Context, providerID int64, clientID, clientSecret string) error {
+	clientID = strings.TrimSpace(clientID)
+	clientSecret = strings.TrimSpace(clientSecret)
+	if providerID <= 0 || clientID == "" || clientSecret == "" {
+		return errors.New("provider id and complete Baidu Open application credentials are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireUploadProviderTypeTx(ctx, tx, providerID, UploadProviderTypeBaiduPan); err != nil {
+		return err
+	}
+	var previousClientID, previousClientSecret string
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(CASE WHEN secret_key = 'client_id' THEN secret_value END), ''),
+       COALESCE(MAX(CASE WHEN secret_key = 'client_secret' THEN secret_value END), '')
+FROM upload_provider_secrets
+WHERE provider_id = ? AND secret_key IN ('client_id', 'client_secret')
+`, providerID).Scan(&previousClientID, &previousClientSecret); err != nil {
+		return err
+	}
+	if err := setUploadProviderSecretTx(ctx, tx, providerID, "client_id", clientID); err != nil {
+		return err
+	}
+	if err := setUploadProviderSecretTx(ctx, tx, providerID, "client_secret", clientSecret); err != nil {
+		return err
+	}
+	if strings.TrimSpace(previousClientID) != clientID || strings.TrimSpace(previousClientSecret) != clientSecret {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_secrets WHERE provider_id = ? AND secret_key IN ('access_token', 'refresh_token', 'access_token_expires_at')`, providerID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
+		return err
+	}
+	if err := deleteUploadProviderCacheTx(ctx, tx, providerID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) SetUploadProvider115OpenCredentials(ctx context.Context, providerID int64, clientID, accessToken, refreshToken string) error {
 	return s.SetUploadProvider115OpenCredentialsWithExpiry(ctx, providerID, clientID, accessToken, refreshToken, "")
 }

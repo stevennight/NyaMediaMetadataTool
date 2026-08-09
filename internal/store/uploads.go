@@ -1155,6 +1155,18 @@ func (s *Store) ListUploadTransfersByTarget(ctx context.Context, targetID int64)
 	return items, rows.Err()
 }
 
+func (s *Store) IsUploadTargetCanceled(ctx context.Context, targetID int64) (bool, error) {
+	var status string
+	err := s.db.QueryRowContext(ctx, `SELECT status FROM upload_batch_targets WHERE id = ?`, targetID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrUploadTargetNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	return status == UploadTargetCanceled, nil
+}
+
 func (s *Store) StartUploadTransfer(ctx context.Context, transferID int64) error {
 	_, err := s.db.ExecContext(ctx, `
 UPDATE upload_transfers
@@ -1422,18 +1434,26 @@ func (s *Store) CancelUploadTarget(ctx context.Context, targetID int64) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 UPDATE upload_batch_targets
 SET status = ?, error_summary = '已取消', finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-WHERE id = ? AND status IN (?, ?)
-`, UploadTargetCanceled, targetID, UploadTargetWaiting, UploadTargetPending); err != nil {
+	WHERE id = ? AND status IN (?, ?, ?)
+`, UploadTargetCanceled, targetID, UploadTargetWaiting, UploadTargetPending, UploadTargetRunning)
+	if err != nil {
 		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrUploadTargetNotRetryable
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE upload_transfers
 SET status = ?, error_summary = '已取消', finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-WHERE batch_target_id = ? AND status IN (?, ?)
-`, UploadTransferCanceled, targetID, UploadTransferPending, UploadTransferFailed); err != nil {
+WHERE batch_target_id = ? AND status IN (?, ?, ?)
+`, UploadTransferCanceled, targetID, UploadTransferPending, UploadTransferFailed, UploadTransferRunning); err != nil {
 		return err
 	}
 	if err := refreshUploadBatchStatusTx(ctx, tx, batchID); err != nil {

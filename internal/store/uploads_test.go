@@ -309,6 +309,58 @@ func TestUploadTargetCompletionCreatesOneEventPerDestination(t *testing.T) {
 	}
 }
 
+func TestCancelRunningUploadTarget(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	defer st.Close()
+	provider, err := st.CreateUploadProvider(ctx, UploadProvider{Name: "115 Cancel", Type: UploadProviderType115Cookie, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	dir := createUploadTestWatchDir(t, st, ctx, root, []UploadProviderRoute{{
+		ProviderID: provider.ID, Enabled: true, RemoteRoot: "/Cancel", CollisionPolicy: "fail", IncludeTypes: []string{"video"},
+	}})
+	seriesPath := filepath.Join(root, "Show")
+	batches, _, err := st.CollectUploadBatches(ctx, UploadCollectionInput{
+		WatchDirID:  &dir.ID,
+		SeriesKey:   "cancel-show",
+		SeriesPath:  seriesPath,
+		QuietPeriod: time.Millisecond,
+		Files: []UploadCandidate{{
+			LocalPath: filepath.Join(seriesPath, "episode.mkv"), RelativePath: "episode.mkv", FileType: "video", Size: 100,
+			ModifiedAt: time.Now().Add(-time.Minute),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SealDueUploadBatches(ctx, time.Now(), time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	target, err := st.ClaimNextUploadTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfers, err := st.ListUploadTransfersByTarget(ctx, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.StartUploadTransfer(ctx, transfers[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CancelUploadTarget(ctx, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := st.GetUploadBatchDetail(ctx, batches[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Batch.Status != UploadBatchCanceled || detail.Targets[0].Status != UploadTargetCanceled || detail.Transfers[0].Status != UploadTransferCanceled {
+		t.Fatalf("running target was not canceled: batch=%#v target=%#v transfer=%#v", detail.Batch, detail.Targets[0], detail.Transfers[0])
+	}
+}
+
 func TestRetryUploadTargetResetsAutomaticRetryBudget(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

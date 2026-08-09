@@ -119,6 +119,9 @@ func (s *Server) handleUploadTargetAction(w http.ResponseWriter, r *http.Request
 	case "retry":
 		err = s.store.RetryUploadTarget(r.Context(), id)
 	case "cancel":
+		if s.uploads != nil {
+			s.uploads.CancelTarget(id)
+		}
 		err = s.store.CancelUploadTarget(r.Context(), id)
 	default:
 		writeError(w, http.StatusNotFound, errors.New("upload target action not found"))

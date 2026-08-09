@@ -541,6 +541,17 @@ func (m *Manager) CancelRunningTargets() int {
 	return len(m.active)
 }
 
+func (m *Manager) CancelTarget(targetID int64) bool {
+	m.mu.Lock()
+	cancel, ok := m.active[targetID]
+	m.mu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel()
+	return true
+}
+
 func (m *Manager) CheckProvider(ctx context.Context, providerID int64) error {
 	provider, err := m.store.GetUploadProvider(ctx, providerID)
 	if err != nil {
@@ -608,6 +619,13 @@ func (m *Manager) worker(ctx context.Context) {
 
 		targetCtx, cancel := context.WithCancel(ctx)
 		m.trackTarget(target.ID, cancel)
+		if canceled, checkErr := m.store.IsUploadTargetCanceled(ctx, target.ID); checkErr != nil {
+			m.logger.Warn("check upload target cancellation failed", "targetID", target.ID, "error", checkErr)
+		} else if canceled {
+			cancel()
+			m.untrackTarget(target.ID)
+			continue
+		}
 		err = m.processTarget(targetCtx, target)
 		wasCanceled := errors.Is(targetCtx.Err(), context.Canceled)
 		cancel()

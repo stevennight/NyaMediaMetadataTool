@@ -57,6 +57,21 @@ func TestBaiduOpenOfficialAuthStartUsesSingleCallbackURL(t *testing.T) {
 	if err := database.SetUploadProviderBaiduOpenApplicationCredentials(ctx, provider.ID, "client-id", "client-secret"); err != nil {
 		t.Fatal(err)
 	}
+	configRequest := httptest.NewRequest(http.MethodGet, "/api/upload/providers/"+jsonNumber(provider.ID)+"/auth/baiduopen", nil)
+	configRequest.Host = "127.0.0.1:18880"
+	configResponse := httptest.NewRecorder()
+	server.ServeHTTP(configResponse, configRequest)
+	if configResponse.Code != http.StatusOK {
+		t.Fatalf("config status=%d body=%s", configResponse.Code, configResponse.Body.String())
+	}
+	var authConfig baiduOpenAuthConfigResponse
+	if err := json.Unmarshal(configResponse.Body.Bytes(), &authConfig); err != nil {
+		t.Fatal(err)
+	}
+	wantCallback := "http://127.0.0.1:18880/api/upload/providers/" + jsonNumber(provider.ID) + "/auth/baiduopen/callback"
+	if authConfig.CallbackURL != wantCallback {
+		t.Fatalf("callback URL=%q, want %q", authConfig.CallbackURL, wantCallback)
+	}
 	request := httptest.NewRequest(http.MethodPost, "/api/upload/providers/"+jsonNumber(provider.ID)+"/auth/baiduopen", bytes.NewBufferString(`{"mode":"official"}`))
 	request.Host = "127.0.0.1:18880"
 	response := httptest.NewRecorder()
@@ -110,6 +125,17 @@ func TestBaiduOpenBrokerRelayAndTokenExchange(t *testing.T) {
 		if err := database.SetUploadProviderSecret(ctx, provider.ID, key, value); err != nil {
 			t.Fatal(err)
 		}
+	}
+	configRequest := httptest.NewRequest(http.MethodGet, "/api/upload/providers/"+jsonNumber(provider.ID)+"/auth/baiduopen", nil)
+	configRequest.Host = "127.0.0.1:18880"
+	configResponse := httptest.NewRecorder()
+	server.ServeHTTP(configResponse, configRequest)
+	var authConfig baiduOpenAuthConfigResponse
+	if err := json.Unmarshal(configResponse.Body.Bytes(), &authConfig); err != nil {
+		t.Fatal(err)
+	}
+	if authConfig.BrokerCallbackURL != "https://broker.example/v1/callbacks/baidu" {
+		t.Fatalf("broker callback URL=%q", authConfig.BrokerCallbackURL)
 	}
 	var calls []string
 	server.oauthBrokerHTTPClient = &http.Client{Transport: baiduOpenRoundTripFunc(func(request *http.Request) (*http.Response, error) {

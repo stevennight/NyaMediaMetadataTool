@@ -66,6 +66,8 @@ type baiduOpenAuthConfigResponse struct {
 	BrokerClientID         string `json:"brokerClientId,omitempty"`
 	BrokerTokenConfigured  bool   `json:"brokerTokenConfigured"`
 	BrokerConfigured       bool   `json:"brokerConfigured"`
+	CallbackURL            string `json:"callbackUrl,omitempty"`
+	BrokerCallbackURL      string `json:"brokerCallbackUrl,omitempty"`
 }
 
 type baiduOpenCredentialsPayload struct {
@@ -116,7 +118,12 @@ func (s *Server) handleUploadProviderBaiduOpenAuth(w http.ResponseWriter, r *htt
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, http.StatusOK, toBaiduOpenAuthConfigResponse(*provider, secrets))
+		config := toBaiduOpenAuthConfigResponse(*provider, secrets)
+		if callbackURL, callbackErr := s.baiduOpenCallbackURL(r, providerID); callbackErr == nil {
+			config.CallbackURL = callbackURL
+		}
+		config.BrokerCallbackURL = baiduOpenBrokerCallbackURL(secrets["oauth_broker_base_url"])
+		writeJSON(w, http.StatusOK, config)
 	case http.MethodPut:
 		s.handleUploadProviderBaiduOpenCredentials(w, r, *provider)
 	case http.MethodPost:
@@ -150,7 +157,12 @@ func (s *Server) handleUploadProviderBaiduOpenCredentials(w http.ResponseWriter,
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, toBaiduOpenAuthConfigResponse(provider, secrets))
+	config := toBaiduOpenAuthConfigResponse(provider, secrets)
+	if callbackURL, callbackErr := s.baiduOpenCallbackURL(r, provider.ID); callbackErr == nil {
+		config.CallbackURL = callbackURL
+	}
+	config.BrokerCallbackURL = baiduOpenBrokerCallbackURL(secrets["oauth_broker_base_url"])
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (s *Server) handleUploadProviderBaiduOpenBroker(w http.ResponseWriter, r *http.Request, providerID int64) {
@@ -300,7 +312,12 @@ func (s *Server) handleUploadProviderBaiduOpenTokens(w http.ResponseWriter, r *h
 	secrets["refresh_token"] = refreshed.RefreshToken
 	secrets["access_token_expires_at"] = expiresAt
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, toBaiduOpenAuthConfigResponse(*provider, secrets))
+	config := toBaiduOpenAuthConfigResponse(*provider, secrets)
+	if callbackURL, callbackErr := s.baiduOpenCallbackURL(r, providerID); callbackErr == nil {
+		config.CallbackURL = callbackURL
+	}
+	config.BrokerCallbackURL = baiduOpenBrokerCallbackURL(secrets["oauth_broker_base_url"])
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (s *Server) handleUploadProviderBaiduOpenAuthStart(w http.ResponseWriter, r *http.Request, provider store.UploadProvider) {
@@ -556,6 +573,14 @@ func toBaiduOpenAuthConfigResponse(provider store.UploadProvider, secrets map[st
 		BrokerTokenConfigured:  brokerTokenConfigured,
 		BrokerConfigured:       baseURL != "" && brokerClientID != "" && brokerTokenConfigured,
 	}
+}
+
+func baiduOpenBrokerCallbackURL(baseURL string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return ""
+	}
+	return baseURL + "/v1/callbacks/baidu"
 }
 
 func toBaiduOpenAuthResponse(flow *baiduOpenAuthFlow) baiduOpenAuthResponse {

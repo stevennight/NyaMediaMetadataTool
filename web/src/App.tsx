@@ -385,6 +385,8 @@ type BaiduOpenAuthConfig = {
   brokerClientId?: string;
   brokerTokenConfigured: boolean;
   brokerConfigured: boolean;
+  callbackUrl?: string;
+  brokerCallbackUrl?: string;
 };
 
 type RenamePreviewItem = {
@@ -5189,6 +5191,10 @@ function BaiduOpenAuthorizationModal(props: { provider: UploadProvider; credenti
     ? Boolean(values.brokerBaseURL.trim() && values.brokerClientID.trim() && (values.brokerToken.trim() || props.authConfig?.brokerTokenConfigured))
     : Boolean(values.clientID.trim() && (values.clientSecret.trim() || props.authConfig?.clientSecretConfigured));
   const canImport = Boolean(values.accessToken.trim() && values.refreshToken.trim());
+  const localCallbackURL = props.authConfig?.callbackUrl || 'Loading callback URL...';
+  const brokerCallbackURL = values.brokerBaseURL.trim()
+    ? `${values.brokerBaseURL.trim().replace(/\/+$/, '')}/v1/callbacks/baidu`
+    : (props.authConfig?.brokerCallbackUrl || 'Enter Broker base URL to calculate this address');
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="modal-card upload-cookie-modal" role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="upload-baiduopen-title" onClick={(event) => event.stopPropagation()}>
@@ -5198,6 +5204,18 @@ function BaiduOpenAuthorizationModal(props: { provider: UploadProvider; credenti
             <h3>Authorization mode</h3>
             <label>Mode<select value={props.mode} onChange={(event) => props.onModeChange(event.target.value)} disabled={props.saving || authActive}><option value="official">Official direct</option><option value="broker_relay">OAuth Broker relay</option><option value="broker_token_exchange">OAuth Broker token exchange</option></select></label>
             <p className="settings-note">Register one Baidu callback address. Broker relay uses the Broker's fixed Baidu callback; the local callback is only the return address.</p>
+          </section>
+          <section className="upload-auth-panel">
+            <h3>Callback addresses</h3>
+            {props.mode === 'official' ? <>
+              <p className="settings-note">Baidu official redirect URI</p>
+              <code>{localCallbackURL}</code>
+            </> : <>
+              <p className="settings-note">Baidu app callback whitelist</p>
+              <code>{brokerCallbackURL}</code>
+              <p className="settings-note">Broker return_uri allowlist</p>
+              <code>{localCallbackURL}</code>
+            </>}
           </section>
           <section className="upload-auth-panel">
             <h3>Baidu application</h3>

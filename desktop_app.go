@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -60,6 +61,10 @@ type DesktopApp struct {
 	serviceCancel  context.CancelFunc
 	serviceStarter func() (*appcore.Service, error)
 	serviceCloser  func(context.Context, *appcore.Service) error
+
+	callbackMu          sync.RWMutex
+	callbackServer      *http.Server
+	callbackForwardHost string
 
 	forceClose      atomic.Bool
 	closeOnce       sync.Once
@@ -343,11 +348,17 @@ func (a *DesktopApp) finishServiceClose() {
 		service := a.service
 		a.service = nil
 		a.serviceMu.Unlock()
+		callbackErr := a.closeDesktopCallbackServer(ctx)
 		if service == nil {
-			result <- nil
+			result <- callbackErr
 			return
 		}
-		result <- a.serviceCloser(ctx, service)
+		serviceErr := a.serviceCloser(ctx, service)
+		if callbackErr != nil {
+			result <- callbackErr
+			return
+		}
+		result <- serviceErr
 	}()
 
 	var closeErr error
@@ -419,7 +430,73 @@ func (a *DesktopApp) startDesktopService() (*appcore.Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("start desktop service: %w", err)
 	}
+	if err := a.startDesktopCallbackServer(service); err != nil {
+		_ = service.Close(context.Background())
+		return nil, err
+	}
 	return service, nil
+}
+
+func (a *DesktopApp) startDesktopCallbackServer(service *appcore.Service) error {
+	if service == nil || service.API == nil {
+		return errors.New("desktop service API is unavailable")
+	}
+	listenAddress := desktopCallbackListenAddress(service.Config.Server.Addr)
+	listener, err := net.Listen("tcp", listenAddress)
+	if err != nil && listenAddress != "127.0.0.1:0" {
+		a.logger.Warn("desktop callback port is unavailable; using a temporary port", "addr", listenAddress, "error", err)
+		listenAddress = "127.0.0.1:0"
+		listener, err = net.Listen("tcp", listenAddress)
+	}
+	if err != nil {
+		return fmt.Errorf("start desktop callback listener: %w", err)
+	}
+	callbackHost := listener.Addr().String()
+	callbackServer := &http.Server{
+		Handler:           service.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	a.callbackMu.Lock()
+	a.callbackServer = callbackServer
+	a.callbackForwardHost = callbackHost
+	a.callbackMu.Unlock()
+	go func() {
+		if serveErr := callbackServer.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			a.logger.Warn("desktop callback server stopped", "error", serveErr)
+		}
+	}()
+	return nil
+}
+
+func desktopCallbackListenAddress(addr string) string {
+	_, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || port == "" {
+		return "127.0.0.1:0"
+	}
+	return net.JoinHostPort("127.0.0.1", port)
+}
+
+func (a *DesktopApp) closeDesktopCallbackServer(ctx context.Context) error {
+	a.callbackMu.Lock()
+	callbackServer := a.callbackServer
+	a.callbackServer = nil
+	a.callbackForwardHost = ""
+	a.callbackMu.Unlock()
+	if callbackServer == nil {
+		return nil
+	}
+	return callbackServer.Shutdown(ctx)
+}
+
+func (a *DesktopApp) desktopCallbackForwardHost() string {
+	a.callbackMu.RLock()
+	defer a.callbackMu.RUnlock()
+	return a.callbackForwardHost
+}
+
+func isWailsLocalHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "wails.localhost" || strings.HasSuffix(host, ".wails.localhost")
 }
 
 func (a *DesktopApp) currentService() *appcore.Service {
@@ -465,6 +542,11 @@ func (a *DesktopApp) Handler(static http.Handler) http.Handler {
 			a.logger.Error("desktop service unavailable", "error", err)
 			http.Error(w, "desktop service unavailable", http.StatusServiceUnavailable)
 			return
+		}
+		if callbackHost := a.desktopCallbackForwardHost(); callbackHost != "" && isWailsLocalHost(r.Host) {
+			r = r.Clone(r.Context())
+			r.Header.Set("X-Forwarded-Proto", "http")
+			r.Header.Set("X-Forwarded-Host", callbackHost)
 		}
 		service.Handler().ServeHTTP(w, r)
 	})

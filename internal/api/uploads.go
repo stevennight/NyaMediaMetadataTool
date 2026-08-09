@@ -119,6 +119,9 @@ func (s *Server) handleUploadTargetAction(w http.ResponseWriter, r *http.Request
 	case "retry":
 		err = s.store.RetryUploadTarget(r.Context(), id)
 	case "cancel":
+		if s.uploads != nil {
+			s.uploads.CancelTarget(id)
+		}
 		err = s.store.CancelUploadTarget(r.Context(), id)
 	default:
 		writeError(w, http.StatusNotFound, errors.New("upload target action not found"))
@@ -274,6 +277,26 @@ func (s *Server) handleUploadProviderRoute(w http.ResponseWriter, r *http.Reques
 	}
 	if len(parts) == 3 && parts[1] == "auth" && parts[2] == "115open" {
 		s.handleUploadProviderOpen115Auth(w, r, providerID)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "auth" && parts[2] == "baiduopen" {
+		s.handleUploadProviderBaiduOpenAuth(w, r, providerID)
+		return
+	}
+	if len(parts) == 4 && parts[1] == "auth" && parts[2] == "baiduopen" && parts[3] == "callback" {
+		s.handleUploadProviderBaiduOpenCallback(w, r, providerID)
+		return
+	}
+	if len(parts) == 4 && parts[1] == "auth" && parts[2] == "baiduopen" && parts[3] == "broker" {
+		s.handleUploadProviderBaiduOpenBroker(w, r, providerID)
+		return
+	}
+	if len(parts) == 4 && parts[1] == "auth" && parts[2] == "baiduopen" && parts[3] == "mode" {
+		s.handleUploadProviderBaiduOpenMode(w, r, providerID)
+		return
+	}
+	if len(parts) == 4 && parts[1] == "auth" && parts[2] == "baiduopen" && parts[3] == "tokens" {
+		s.handleUploadProviderBaiduOpenTokens(w, r, providerID)
 		return
 	}
 	if len(parts) == 5 && parts[1] == "auth" && parts[2] == "115open" && parts[4] == "qrcode" && r.Method == http.MethodGet {

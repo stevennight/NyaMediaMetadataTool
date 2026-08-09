@@ -56,9 +56,9 @@ var defaultProviderDescriptors = map[string]ProviderDescriptor{
 	},
 	store.UploadProviderTypeBaiduPan: {
 		Type:        store.UploadProviderTypeBaiduPan,
-		Name:        "百度网盘",
-		Implemented: false,
-		SecretKeys:  []string{"access_token", "refresh_token"},
+		Name:        "百度网盘 Open",
+		Implemented: true,
+		SecretKeys:  []string{"client_id", "client_secret", "access_token", "refresh_token", "access_token_expires_at", "auth_mode", "oauth_broker_base_url", "oauth_broker_client_id", "oauth_broker_token"},
 	},
 }
 

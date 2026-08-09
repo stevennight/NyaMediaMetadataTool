@@ -1,6 +1,8 @@
 server:
   addr: 127.0.0.1:18880
   timezone: Asia/Shanghai
+  # Optional stable origin used for OAuth callbacks behind a reverse proxy.
+  # publicBaseUrl: https://metadata.example.com
 
 database:
   path: data/nyamedia.db

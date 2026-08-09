@@ -530,6 +530,51 @@ ON CONFLICT(provider_id, secret_key) DO UPDATE SET secret_value = excluded.secre
 	return tx.Commit()
 }
 
+// SetUploadProviderBaiduOpenApplicationCredentials replaces the Baidu
+// application credentials and invalidates tokens when the application changes.
+func (s *Store) SetUploadProviderBaiduOpenApplicationCredentials(ctx context.Context, providerID int64, clientID, clientSecret string) error {
+	clientID = strings.TrimSpace(clientID)
+	clientSecret = strings.TrimSpace(clientSecret)
+	if providerID <= 0 || clientID == "" || clientSecret == "" {
+		return errors.New("provider id and complete Baidu Open application credentials are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireUploadProviderTypeTx(ctx, tx, providerID, UploadProviderTypeBaiduPan); err != nil {
+		return err
+	}
+	var previousClientID, previousClientSecret string
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(CASE WHEN secret_key = 'client_id' THEN secret_value END), ''),
+       COALESCE(MAX(CASE WHEN secret_key = 'client_secret' THEN secret_value END), '')
+FROM upload_provider_secrets
+WHERE provider_id = ? AND secret_key IN ('client_id', 'client_secret')
+`, providerID).Scan(&previousClientID, &previousClientSecret); err != nil {
+		return err
+	}
+	if err := setUploadProviderSecretTx(ctx, tx, providerID, "client_id", clientID); err != nil {
+		return err
+	}
+	if err := setUploadProviderSecretTx(ctx, tx, providerID, "client_secret", clientSecret); err != nil {
+		return err
+	}
+	if strings.TrimSpace(previousClientID) != clientID || strings.TrimSpace(previousClientSecret) != clientSecret {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_secrets WHERE provider_id = ? AND secret_key IN ('access_token', 'refresh_token', 'access_token_expires_at')`, providerID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
+		return err
+	}
+	if err := deleteUploadProviderCacheTx(ctx, tx, providerID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) SetUploadProvider115OpenCredentials(ctx context.Context, providerID int64, clientID, accessToken, refreshToken string) error {
 	return s.SetUploadProvider115OpenCredentialsWithExpiry(ctx, providerID, clientID, accessToken, refreshToken, "")
 }
@@ -651,6 +696,45 @@ func (s *Store) SetUploadProvider115OpenRefreshedTokens(ctx context.Context, pro
 	return tx.Commit()
 }
 
+func (s *Store) SetUploadProviderBaiduPanRefreshedTokens(ctx context.Context, providerID int64, accessToken, refreshToken, expiresAt string) error {
+	accessToken = strings.TrimSpace(accessToken)
+	refreshToken = strings.TrimSpace(refreshToken)
+	expiresAt = strings.TrimSpace(expiresAt)
+	if providerID <= 0 || accessToken == "" {
+		return errors.New("provider id and refreshed Baidu Open access token are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireUploadProviderTypeTx(ctx, tx, providerID, UploadProviderTypeBaiduPan); err != nil {
+		return err
+	}
+	if err := setUploadProviderSecretTx(ctx, tx, providerID, "access_token", accessToken); err != nil {
+		return err
+	}
+	if refreshToken != "" {
+		if err := setUploadProviderSecretTx(ctx, tx, providerID, "refresh_token", refreshToken); err != nil {
+			return err
+		}
+	}
+	if expiresAt == "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM upload_provider_secrets WHERE provider_id = ? AND secret_key = 'access_token_expires_at'`, providerID); err != nil {
+			return err
+		}
+	} else if err := setUploadProviderSecretTx(ctx, tx, providerID, "access_token_expires_at", expiresAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE upload_providers SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, providerID); err != nil {
+		return err
+	}
+	if err := deleteUploadProviderCacheTx(ctx, tx, providerID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func require115OpenProviderTx(ctx context.Context, tx *sql.Tx, providerID int64) error {
 	var providerType string
 	if err := tx.QueryRowContext(ctx, `SELECT type FROM upload_providers WHERE id = ?`, providerID).Scan(&providerType); errors.Is(err, sql.ErrNoRows) {
@@ -660,6 +744,19 @@ func require115OpenProviderTx(ctx context.Context, tx *sql.Tx, providerID int64)
 	}
 	if providerType != UploadProviderType115Open {
 		return errors.New("provider does not use 115 Open authentication")
+	}
+	return nil
+}
+
+func requireUploadProviderTypeTx(ctx context.Context, tx *sql.Tx, providerID int64, expectedType string) error {
+	var providerType string
+	if err := tx.QueryRowContext(ctx, `SELECT type FROM upload_providers WHERE id = ?`, providerID).Scan(&providerType); errors.Is(err, sql.ErrNoRows) {
+		return ErrUploadProviderNotFound
+	} else if err != nil {
+		return err
+	}
+	if providerType != expectedType {
+		return fmt.Errorf("provider does not use %s authentication", expectedType)
 	}
 	return nil
 }
@@ -1058,6 +1155,18 @@ func (s *Store) ListUploadTransfersByTarget(ctx context.Context, targetID int64)
 	return items, rows.Err()
 }
 
+func (s *Store) IsUploadTargetCanceled(ctx context.Context, targetID int64) (bool, error) {
+	var status string
+	err := s.db.QueryRowContext(ctx, `SELECT status FROM upload_batch_targets WHERE id = ?`, targetID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrUploadTargetNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	return status == UploadTargetCanceled, nil
+}
+
 func (s *Store) StartUploadTransfer(ctx context.Context, transferID int64) error {
 	_, err := s.db.ExecContext(ctx, `
 UPDATE upload_transfers
@@ -1325,18 +1434,26 @@ func (s *Store) CancelUploadTarget(ctx context.Context, targetID int64) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 UPDATE upload_batch_targets
 SET status = ?, error_summary = '已取消', finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-WHERE id = ? AND status IN (?, ?)
-`, UploadTargetCanceled, targetID, UploadTargetWaiting, UploadTargetPending); err != nil {
+	WHERE id = ? AND status IN (?, ?, ?)
+`, UploadTargetCanceled, targetID, UploadTargetWaiting, UploadTargetPending, UploadTargetRunning)
+	if err != nil {
 		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrUploadTargetNotRetryable
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE upload_transfers
 SET status = ?, error_summary = '已取消', finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-WHERE batch_target_id = ? AND status IN (?, ?)
-`, UploadTransferCanceled, targetID, UploadTransferPending, UploadTransferFailed); err != nil {
+WHERE batch_target_id = ? AND status IN (?, ?, ?)
+`, UploadTransferCanceled, targetID, UploadTransferPending, UploadTransferFailed, UploadTransferRunning); err != nil {
 		return err
 	}
 	if err := refreshUploadBatchStatusTx(ctx, tx, batchID); err != nil {

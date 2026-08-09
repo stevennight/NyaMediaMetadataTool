@@ -9,7 +9,7 @@
 - 媒体目录管理：支持多个目录、递归扫描、实时监控、手动重扫、目录级处理策略覆盖。
 - 任务队列：SQLite 记录任务、日志、产物和工具状态；支持并发处理、失败重试、取消运行中任务、重新排队和忽略失败任务。
 - 伴生文件生成：支持字幕抽取、`mediainfo.json`、BIF 预览索引、单集 NFO、剧集/季度 NFO、单集缩略图。
-- 网盘发布：上传作为每个媒体目录的独立处理步骤；一个目录可配置多个 Provider 实例，并分别设置远端根目录映射、碰撞策略和文件类型。批次按配置独立重试、校验、记录文件清单，并在完成后写入可租约消费的 outbox 事件。当前支持 `115cookie` 和带 PKCE/Token 自动刷新的第三方 `115open`；123 云盘和百度网盘保留运行时注册与凭据契约。
+- 网盘发布：上传作为每个媒体目录的独立处理步骤；一个目录可配置多个 Provider 实例，并分别设置远端根目录映射、碰撞策略和文件类型。批次按配置独立重试、校验、记录文件清单，并在完成后写入可租约消费的 outbox 事件。当前支持 `115cookie`、`115open` 和百度网盘 Open（`baidupan`），123 云盘保留运行时注册与凭据契约。
 - 元数据增强：支持 TMDB 查询、缓存、语言/地区配置、备用语言、代理，以及可选 fanart.tv 图片来源。
 - 图片接管：默认关闭；开启后可生成 `poster.jpg`、`fanart.jpg`、`clearlogo.png`、`clearart.png` 和季度海报。
 - 桌面工作台：提供仪表盘、首次运行检查、设置、媒体目录、任务、上传、重命名、剧集核对等页面，并集成原生路径选择、文件定位、系统通知和退出保护。
@@ -244,7 +244,9 @@ wails build -clean -platform windows/amd64
 
 `upload.Manager.RegisterProviderDescriptor` 是新增网盘实现的注册入口：它同时注册上传 Builder、显示名称和所需凭据键。`GET /api/upload/provider-types` 始终反映运行时已安装的 Provider，因此前端会自动启用新类型，而不是维护一份独立的硬编码列表。
 
-未安装的预留 Provider（当前为 `115open`、`123pan`、`baidupan`）可以被识别但不能启用，不会进入上传重试队列。通用凭据接口为 `PUT/DELETE /api/upload/providers/{id}/secrets/{key}`；只允许 Provider descriptor 声明的键，且不提供读取接口。`115cookie` 仍保留专用 Cookie 与二维码授权流程，支持选择网页端、Android、iOS、电视端、支付宝小程序、微信小程序或 115 组织 Android。授权设备会和 Cookie 一起保存并显示在 Provider 中；旧 Cookie 无法追溯设备时显示为“未记录”。
+`baidupan` authorization supports the same three modes as NyaMedia: `official`, `broker_relay`, and `broker_token_exchange`. The UI stores Broker settings per Provider. The relay mode uses the Broker's fixed Baidu callback address, while the local callback is used only as the browser return URI. Set `server.publicBaseUrl` when the service is behind a reverse proxy; otherwise the callback origin is derived from the request host.
+
+未安装的预留 Provider（当前为 `115open`、`123pan`）可以被识别但不能启用，不会进入上传重试队列。`baidupan` 已实现百度网盘 Open API 上传，凭据键为 `client_id`、`client_secret`、`access_token`、`refresh_token` 和可选的 `access_token_expires_at`，支持 token 过期自动刷新。通用凭据接口为 `PUT/DELETE /api/upload/providers/{id}/secrets/{key}`；只允许 Provider descriptor 声明的键，且不提供读取接口。`115cookie` 仍保留专用 Cookie 与二维码授权流程，支持选择网页端、Android、iOS、电视端、支付宝小程序、微信小程序或 115 组织 Android。授权设备会和 Cookie 一起保存并显示在 Provider 中；旧 Cookie 无法追溯设备时显示为“未记录”。
 
 ## 生成产物
 
@@ -343,6 +345,8 @@ go run ./cmd/bifunpack -o "D:\Temp\bif-frames" -- "D:\Media\TV\Example\Example-3
 - `PUT/DELETE /api/upload/providers/{id}/cookie`、`POST /api/upload/providers/{id}/check`
 - `PUT/DELETE /api/upload/providers/{id}/secrets/{key}`
 - `POST/GET /api/upload/providers/{id}/auth/115cookie`
+- `GET/PUT/POST /api/upload/providers/{id}/auth/baiduopen`
+- `GET/PUT /api/upload/providers/{id}/auth/baiduopen/broker`銆乣PUT /api/upload/providers/{id}/auth/baiduopen/mode`銆乣PUT /api/upload/providers/{id}/auth/baiduopen/tokens`銆乣GET /api/upload/providers/{id}/auth/baiduopen/callback`
 - `GET /api/upload/provider-types`
 - `GET /api/upload/events`、`POST /api/upload/events/claim`
 - `POST /api/upload/events/{id}/ack`、`POST /api/upload/events/{id}/fail`

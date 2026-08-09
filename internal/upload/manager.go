@@ -276,6 +276,55 @@ func (m *Manager) registerBuiltInProviders() {
 		provider.requestInterval = time.Duration(store.NormalizeUploadRequestIntervalMS(target.RequestIntervalMS)) * time.Millisecond
 		return provider, nil
 	})
+	m.RegisterProviderDescriptor(ProviderDescriptor{
+		Type:       store.UploadProviderTypeBaiduPan,
+		Name:       "百度网盘 Open",
+		SecretKeys: []string{"client_id", "client_secret", "access_token", "refresh_token", "access_token_expires_at"},
+	}, func(ctx context.Context, target store.UploadBatchTarget, lookup SecretLookup) (Provider, error) {
+		clientID, err := lookup(ctx, "client_id")
+		if err != nil {
+			return nil, err
+		}
+		clientSecret, err := lookup(ctx, "client_secret")
+		if err != nil {
+			return nil, err
+		}
+		accessToken, err := lookup(ctx, "access_token")
+		if err != nil {
+			return nil, err
+		}
+		refreshToken, err := lookup(ctx, "refresh_token")
+		if err != nil {
+			return nil, err
+		}
+		expiresAt, err := lookup(ctx, "access_token_expires_at")
+		if err != nil {
+			return nil, err
+		}
+		provider, err := newBaiduOpenProvider(
+			clientID,
+			clientSecret,
+			accessToken,
+			refreshToken,
+			expiresAt,
+			target.UserAgent,
+			time.Duration(store.NormalizeUploadRequestIntervalMS(target.RequestIntervalMS))*time.Millisecond,
+			func(updatedAccessToken, updatedRefreshToken, updatedExpiresAt string) {
+				if m.store == nil {
+					return
+				}
+				persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := m.store.SetUploadProviderBaiduPanRefreshedTokens(persistCtx, target.ProviderID, updatedAccessToken, updatedRefreshToken, updatedExpiresAt); err != nil && m.logger != nil {
+					m.logger.Error("persist refreshed Baidu Open tokens", "provider_id", target.ProviderID, "error", err)
+				}
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		return provider, nil
+	})
 }
 
 func (m *Manager) open115Session(providerID int64, accessToken, refreshToken, expiresAt, userAgent string) *open115Session {
@@ -492,6 +541,17 @@ func (m *Manager) CancelRunningTargets() int {
 	return len(m.active)
 }
 
+func (m *Manager) CancelTarget(targetID int64) bool {
+	m.mu.Lock()
+	cancel, ok := m.active[targetID]
+	m.mu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel()
+	return true
+}
+
 func (m *Manager) CheckProvider(ctx context.Context, providerID int64) error {
 	provider, err := m.store.GetUploadProvider(ctx, providerID)
 	if err != nil {
@@ -559,6 +619,13 @@ func (m *Manager) worker(ctx context.Context) {
 
 		targetCtx, cancel := context.WithCancel(ctx)
 		m.trackTarget(target.ID, cancel)
+		if canceled, checkErr := m.store.IsUploadTargetCanceled(ctx, target.ID); checkErr != nil {
+			m.logger.Warn("check upload target cancellation failed", "targetID", target.ID, "error", checkErr)
+		} else if canceled {
+			cancel()
+			m.untrackTarget(target.ID)
+			continue
+		}
 		err = m.processTarget(targetCtx, target)
 		wasCanceled := errors.Is(targetCtx.Err(), context.Canceled)
 		cancel()
@@ -633,7 +700,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 
 	for _, transfer := range transfers {
 		if transfer.Status != store.UploadTransferCompleted {
-			setActiveTransfer(transfer.ID, transfer.BytesTotal, "checking", "正在检查 115 上传服务")
+			setActiveTransfer(transfer.ID, transfer.BytesTotal, "checking", "正在检查上传服务")
 			break
 		}
 	}
@@ -699,7 +766,7 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			continue
 		}
 		if transfer.Status == store.UploadTransferFailed && strings.Contains(transfer.ErrorSummary, uncertain115CommitMarker) {
-			setActiveTransfer(transfer.ID, transfer.BytesTotal, "verifying", "正在确认 115 远端文件")
+			setActiveTransfer(transfer.ID, transfer.BytesTotal, "verifying", "正在确认远端文件")
 			verificationErr := fmt.Errorf("%s: remote file is still not confirmed", uncertain115CommitMarker)
 			if verifier, ok := client.(ProviderVerifier); ok {
 				remote, found, err := verifier.Verify(ctx, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1)
@@ -741,9 +808,9 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 		}
 		activeMu.Lock()
 		activePhase = "uploading"
-		activeMessage = "正在上传到 115"
+		activeMessage = "正在上传"
 		activeMu.Unlock()
-		m.setTransferRuntime(transfer.ID, "uploading", "正在上传到 115", time.Time{})
+		m.setTransferRuntime(transfer.ID, "uploading", "正在上传", time.Time{})
 		remote, err := client.Upload(ctx, transfer.LocalPath, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1, target.CollisionPolicy)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {

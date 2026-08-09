@@ -5203,19 +5203,19 @@ function BaiduOpenAuthorizationModal(props: { provider: UploadProvider; credenti
           <section className="upload-auth-panel">
             <h3>Authorization mode</h3>
             <label>Mode<select value={props.mode} onChange={(event) => props.onModeChange(event.target.value)} disabled={props.saving || authActive}><option value="official">Official direct</option><option value="broker_relay">OAuth Broker relay</option><option value="broker_token_exchange">OAuth Broker token exchange</option></select></label>
-            <p className="settings-note">Register one Baidu callback address. Broker relay uses the Broker's fixed Baidu callback; the local callback is only the return address.</p>
+            <p className="settings-note">{props.mode === 'official' ? 'Register the direct callback address shown below in Baidu.' : props.mode === 'broker_relay' ? 'Register the Broker callback in Baidu and the local callback as the Broker return_uri allowlist.' : 'This mode completes inside the Broker and does not require a callback whitelist.'}</p>
           </section>
           <section className="upload-auth-panel">
             <h3>Callback addresses</h3>
             {props.mode === 'official' ? <>
               <p className="settings-note">Baidu official redirect URI</p>
               <code>{localCallbackURL}</code>
-            </> : <>
+            </> : props.mode === 'broker_relay' ? <>
               <p className="settings-note">Baidu app callback whitelist</p>
               <code>{brokerCallbackURL}</code>
               <p className="settings-note">Broker return_uri allowlist</p>
               <code>{localCallbackURL}</code>
-            </>}
+            </> : <p className="settings-note">No callback address is required for Broker token exchange.</p>}
           </section>
           <section className="upload-auth-panel">
             <h3>Baidu application</h3>

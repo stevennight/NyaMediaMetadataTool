@@ -19,17 +19,41 @@ type Status struct {
 	CheckedAt string `json:"checkedAt"`
 }
 
-func CheckAll(ctx context.Context, cfg config.ToolsConfig) []Status {
-	checks := []struct {
-		name string
-		path string
-		args []string
-	}{
+type checkDefinition struct {
+	name string
+	path string
+	args []string
+}
+
+func checkDefinitions(cfg config.ToolsConfig) []checkDefinition {
+	return []checkDefinition{
 		{name: "ffmpeg", path: cfg.FFmpeg, args: []string{"-version"}},
 		{name: "ffprobe", path: cfg.FFprobe, args: []string{"-version"}},
 		{name: "mediainfo", path: cfg.MediaInfo, args: []string{"--Version"}},
 	}
+}
 
+func IsCurrentStatusSet(statuses []Status) bool {
+	definitions := checkDefinitions(config.ToolsConfig{})
+	if len(statuses) != len(definitions) {
+		return false
+	}
+
+	expected := make(map[string]struct{}, len(definitions))
+	for _, definition := range definitions {
+		expected[definition.name] = struct{}{}
+	}
+	for _, status := range statuses {
+		if _, ok := expected[status.Name]; !ok {
+			return false
+		}
+		delete(expected, status.Name)
+	}
+	return len(expected) == 0
+}
+
+func CheckAll(ctx context.Context, cfg config.ToolsConfig) []Status {
+	checks := checkDefinitions(cfg)
 	statuses := make([]Status, 0, len(checks))
 	for _, check := range checks {
 		statuses = append(statuses, Check(ctx, check.name, check.path, check.args...))

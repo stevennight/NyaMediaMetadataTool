@@ -318,8 +318,12 @@ func (s *Server) handleToolsStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(statuses) == 0 {
+	if !tools.IsCurrentStatusSet(statuses) {
 		statuses = tools.CheckAll(r.Context(), cfg.Tools)
+		if err := s.store.SaveToolStatuses(r.Context(), statuses); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, statuses)
 

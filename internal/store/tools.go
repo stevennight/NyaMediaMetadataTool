@@ -13,6 +13,10 @@ func (s *Store) SaveToolStatuses(ctx context.Context, statuses []tools.Status) e
 	}
 	defer tx.Rollback()
 
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tool_status`); err != nil {
+		return err
+	}
+
 	stmt, err := tx.PrepareContext(ctx, `
 INSERT INTO tool_status (name, path, available, version, checked_at, error)
 VALUES (?, ?, ?, ?, ?, ?)

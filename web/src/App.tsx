@@ -4064,7 +4064,7 @@ export function App() {
               <DashboardMetric label="活跃任务" value={String(activeTaskCount)} tone={activeTaskCount ? 'warn' : 'neutral'} />
               <DashboardMetric label="失败任务" value={String(failedTaskCount)} tone={failedTaskCount ? 'bad' : 'good'} />
               <DashboardMetric label="媒体目录" value={`${enabledWatchDirCount}/${watchDirs.length}`} />
-              <DashboardMetric label="可用工具" value={`${availableToolCount}/${tools.length || 4}`} tone={tools.length && availableToolCount !== tools.length ? 'bad' : 'good'} />
+              <DashboardMetric label="可用工具" value={`${availableToolCount}/${tools.length || 3}`} tone={tools.length && availableToolCount !== tools.length ? 'bad' : 'good'} />
             </div>
           </section>
 

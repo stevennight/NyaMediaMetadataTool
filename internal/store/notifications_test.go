@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -118,6 +119,23 @@ func TestUploadCompletionNotificationUsesRemoteSeriesDirectoryAndRouteVariables(
 	}
 	if headers["X-Webhook-Token"] != "secret-token" || headers["X-Notification-Mode"] != "fixed" {
 		t.Fatalf("unexpected notification headers: %#v", headers)
+	}
+	if err := st.CompleteUploadNotification(ctx, notification.ID, http.StatusNoContent); err != nil {
+		t.Fatal(err)
+	}
+	records, err := st.ListUploadNotificationRecords(ctx, UploadNotificationRecordFilters{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records.Total != 1 || len(records.Items) != 1 || records.Items[0].Status != UploadNotificationDelivered || records.Items[0].BatchID != batch.ID || records.Items[0].ProviderName != "115 Notification" {
+		t.Fatalf("unexpected notification records: %#v", records)
+	}
+	detail, err := st.GetUploadBatchDetail(ctx, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Batch.NotificationCount != 1 || detail.Batch.DeliveredNotifications != 1 || detail.Batch.PendingNotifications != 0 || detail.Batch.FailedNotifications != 0 || len(detail.Notifications) != 1 {
+		t.Fatalf("unexpected notification summary: batch=%#v notifications=%#v", detail.Batch, detail.Notifications)
 	}
 }
 

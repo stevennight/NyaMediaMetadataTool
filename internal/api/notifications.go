@@ -12,6 +12,22 @@ import (
 
 const uploadNotificationTemplatesPrefix = "/api/upload/notification-templates/"
 
+func (s *Server) handleListUploadNotificationRecords(w http.ResponseWriter, r *http.Request) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
+	result, err := s.store.ListUploadNotificationRecords(r.Context(), store.UploadNotificationRecordFilters{
+		Page:     page,
+		PageSize: pageSize,
+		Status:   r.URL.Query().Get("status"),
+		Path:     r.URL.Query().Get("path"),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleListUploadNotificationTemplates(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListUploadNotificationTemplates(r.Context())
 	if err != nil {

@@ -451,7 +451,7 @@ h1 {
 }
 
 .task-table.upload-batch-table {
-  min-width: 1040px;
+  min-width: 1140px;
 }
 
 .upload-batch-progress {
@@ -713,6 +713,31 @@ h1 {
 .upload-notification-template-table code {
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.task-table.upload-notification-record-table,
+.task-table.upload-notification-detail-table {
+  min-width: 1120px;
+}
+
+.upload-notification-record-table td small,
+.upload-notification-detail-table td small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.upload-notification-record-path,
+.upload-notification-record-url {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-notification-record-url {
+  max-width: 220px;
 }
 
 

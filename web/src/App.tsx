@@ -228,6 +228,34 @@ type UploadNotificationTemplate = {
   updatedAt: string;
 };
 
+type UploadNotificationRecord = {
+  id: number;
+  batchId: number;
+  batchTargetId: number;
+  seriesPath: string;
+  batchStatus: string;
+  providerName: string;
+  targetStatus: string;
+  templateId: number;
+  templateName: string;
+  url: string;
+  status: string;
+  attempts: number;
+  availableAt: string;
+  responseStatus: number;
+  errorSummary: string;
+  createdAt: string;
+  deliveredAt: string;
+  updatedAt: string;
+};
+
+type UploadNotificationRecordListResponse = {
+  items: UploadNotificationRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+};
+
 type UploadProviderDescriptor = {
   type: string;
   name: string;
@@ -274,6 +302,10 @@ type UploadBatch = {
   transferCount: number;
   completedTransfers: number;
   failedTransfers: number;
+  notificationCount: number;
+  deliveredNotifications: number;
+  pendingNotifications: number;
+  failedNotifications: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -328,6 +360,7 @@ type UploadBatchDetail = {
   files: UploadBatchFile[];
   targets: UploadBatchTarget[];
   transfers: UploadTransfer[];
+  notifications: UploadNotificationRecord[];
 };
 
 type UploadBatchListResponse = {
@@ -567,9 +600,10 @@ function outputProcessingFromConfig(config: AppConfig | null): OutputProcessingC
 }
 type TaskStatusFilter = 'all' | 'pending' | 'running' | 'completed' | 'failed' | 'ignored' | 'canceled';
 type UploadStatusFilter = 'all' | 'collecting' | 'pending' | 'running' | 'completed' | 'partial' | 'failed' | 'canceled';
+type UploadNotificationStatusFilter = 'all' | 'pending' | 'processing' | 'delivered' | 'failed';
 type UploadFileStatus = 'running' | 'pending' | 'failed' | 'canceled' | 'completed';
 type UploadFileStatusFilter = 'all' | UploadFileStatus;
-type UploadView = 'batches' | 'providers' | 'notifications';
+type UploadView = 'batches' | 'providers' | 'notifications' | 'notificationRecords';
 type AuditTab = 'missing' | 'emby' | 'files';
 type ConfirmationRequest = {
   title: string;
@@ -719,6 +753,13 @@ const uploadStatusFilters: { value: UploadStatusFilter; label: string }[] = [
   { value: 'partial', label: '部分失败' },
   { value: 'failed', label: '失败' },
   { value: 'canceled', label: '已取消' }
+];
+const uploadNotificationStatusFilters: { value: UploadNotificationStatusFilter; label: string }[] = [
+  { value: 'all', label: '全部' },
+  { value: 'pending', label: '等待/重试' },
+  { value: 'processing', label: '发送中' },
+  { value: 'delivered', label: '已送达' },
+  { value: 'failed', label: '失败' }
 ];
 const uploadFileStatusFilters: { value: UploadFileStatusFilter; label: string }[] = [
   { value: 'all', label: '全部' },
@@ -1024,6 +1065,39 @@ function uploadStatusLabel(status: string) {
   return uploadStatusFilters.find((item) => item.value === status)?.label ?? status;
 }
 
+function uploadNotificationStatusPillClass(status: string) {
+  switch (status) {
+    case 'delivered':
+      return 'pill ok';
+    case 'failed':
+      return 'pill bad';
+    case 'processing':
+      return 'pill running';
+    case 'pending':
+      return 'pill pending';
+    default:
+      return 'pill';
+  }
+}
+
+function uploadNotificationStatusLabel(status: string) {
+  switch (status) {
+    case 'pending': return '等待/重试';
+    case 'processing': return '发送中';
+    case 'delivered': return '已送达';
+    case 'failed': return '失败';
+    default: return status || '-';
+  }
+}
+
+function uploadBatchNotificationSummary(batch: UploadBatch) {
+  if (batch.notificationCount <= 0) return { className: 'pill ignored', label: '无通知记录' };
+  if (batch.failedNotifications > 0) return { className: 'pill bad', label: `失败 ${batch.failedNotifications}` };
+  if (batch.pendingNotifications > 0) return { className: 'pill pending', label: '发送中' };
+  if (batch.deliveredNotifications === batch.notificationCount) return { className: 'pill ok', label: '已送达' };
+  return { className: 'pill pending', label: '待处理' };
+}
+
 function uploadTargetStatusLabel(target: UploadBatchTarget) {
   if (target.status === 'pending' && target.errorSummary) return '等待自动重试';
   return uploadStatusLabel(target.status);
@@ -1186,6 +1260,7 @@ function renameStatusLabel(status: string) {
 function uploadViewFromPath(pathname: string): UploadView {
   if (pathname === '/uploads/providers') return 'providers';
   if (pathname === '/uploads/notifications') return 'notifications';
+  if (pathname === '/uploads/notification-records') return 'notificationRecords';
   return 'batches';
 }
 
@@ -1231,6 +1306,7 @@ export function App() {
   const [uploadProviders, setUploadProviders] = useState<UploadProvider[]>([]);
   const [uploadProviderTypes, setUploadProviderTypes] = useState<UploadProviderDescriptor[]>([]);
   const [uploadNotificationTemplates, setUploadNotificationTemplates] = useState<UploadNotificationTemplate[]>([]);
+  const [uploadNotificationRecords, setUploadNotificationRecords] = useState<UploadNotificationRecord[]>([]);
   const [uploadView, setUploadView] = useState<UploadView>(() => uploadViewFromPath(window.location.pathname));
   const [uploadProviderUsage, setUploadProviderUsage] = useState<UploadProvider | null>(null);
   const [uploadNotificationTemplateModal, setUploadNotificationTemplateModal] = useState<UploadNotificationTemplate | null>(null);
@@ -1250,6 +1326,12 @@ export function App() {
   const [uploadStatusFilter, setUploadStatusFilter] = useState<UploadStatusFilter>('all');
   const [uploadPathFilter, setUploadPathFilter] = useState('');
   const [appliedUploadPathFilter, setAppliedUploadPathFilter] = useState('');
+  const [uploadNotificationTotal, setUploadNotificationTotal] = useState(0);
+  const [uploadNotificationPage, setUploadNotificationPage] = useState(1);
+  const [uploadNotificationStatusFilter, setUploadNotificationStatusFilter] = useState<UploadNotificationStatusFilter>('all');
+  const [uploadNotificationPathFilter, setUploadNotificationPathFilter] = useState('');
+  const [appliedUploadNotificationPathFilter, setAppliedUploadNotificationPathFilter] = useState('');
+  const [refreshingUploadNotifications, setRefreshingUploadNotifications] = useState(false);
   const [refreshingUploads, setRefreshingUploads] = useState(false);
   const [refreshingUploadProviders, setRefreshingUploadProviders] = useState(false);
   const [savingUploadNotificationTemplate, setSavingUploadNotificationTemplate] = useState(false);
@@ -1393,6 +1475,7 @@ export function App() {
   const renamePreviewAbortRef = useRef<AbortController | null>(null);
   const refreshingUploadsRef = useRef(false);
   const refreshingUploadProvidersRef = useRef(false);
+  const refreshingUploadNotificationsRef = useRef(false);
   const uploadDetailRequestRef = useRef(0);
   const missingAuditRequestRef = useRef(0);
   const embyAuditRequestRef = useRef(0);
@@ -1964,6 +2047,19 @@ export function App() {
     setUploadPage(value.page ?? 1);
   }
 
+  function applyUploadNotificationFilters() {
+    const path = uploadNotificationPathFilter.trim();
+    setAppliedUploadNotificationPathFilter(path);
+    void refreshUploadNotificationRecords(1, uploadNotificationStatusFilter, path);
+  }
+
+  function resetUploadNotificationFilters() {
+    setUploadNotificationPathFilter('');
+    setAppliedUploadNotificationPathFilter('');
+    setUploadNotificationStatusFilter('all');
+    void refreshUploadNotificationRecords(1, 'all', '');
+  }
+
   function observeTaskRunStatuses(items: TaskRun[], baselineStartedAt: number) {
     const observed = observedTaskRunStatusesRef.current;
     const notified = notifiedTaskRunIDsRef.current;
@@ -2007,7 +2103,13 @@ export function App() {
   function navigateUploadView(view: UploadView) {
     setActivePage('uploads');
     setUploadView(view);
-    const path = view === 'providers' ? '/uploads/providers' : view === 'notifications' ? '/uploads/notifications' : '/uploads';
+    const path = view === 'providers'
+      ? '/uploads/providers'
+      : view === 'notifications'
+        ? '/uploads/notifications'
+        : view === 'notificationRecords'
+          ? '/uploads/notification-records'
+          : '/uploads';
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
   }
 
@@ -2048,6 +2150,32 @@ export function App() {
     const response = await fetch('/api/upload/notification-templates');
     if (!response.ok) throw new Error(await readErrorMessage(response));
     setUploadNotificationTemplates(asArray<UploadNotificationTemplate>(await response.json()));
+  }
+
+  async function loadUploadNotificationRecords(page = uploadNotificationPage, status = uploadNotificationStatusFilter, path = appliedUploadNotificationPathFilter) {
+    const params = new URLSearchParams({ page: String(page), pageSize: String(taskPageSize) });
+    if (status !== 'all') params.set('status', status);
+    if (path.trim()) params.set('path', path.trim());
+    const response = await fetch(`/api/upload/notifications?${params.toString()}`);
+    if (!response.ok) throw new Error(await readErrorMessage(response));
+    const value = await response.json() as UploadNotificationRecordListResponse;
+    setUploadNotificationRecords(asArray<UploadNotificationRecord>(value.items));
+    setUploadNotificationTotal(value.total ?? 0);
+    setUploadNotificationPage(value.page ?? 1);
+  }
+
+  async function refreshUploadNotificationRecords(page = uploadNotificationPage, status = uploadNotificationStatusFilter, path = appliedUploadNotificationPathFilter) {
+    if (refreshingUploadNotificationsRef.current) return;
+    refreshingUploadNotificationsRef.current = true;
+    setRefreshingUploadNotifications(true);
+    try {
+      await loadUploadNotificationRecords(page, status, path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载通知记录失败');
+    } finally {
+      refreshingUploadNotificationsRef.current = false;
+      setRefreshingUploadNotifications(false);
+    }
   }
 
   async function saveUploadNotificationTemplate(template: UploadNotificationTemplate) {
@@ -2635,12 +2763,19 @@ export function App() {
       void loadUploadNotificationTemplates().catch((err) => setError(err instanceof Error ? err.message : '加载通知模板失败'));
       return;
     }
+    if (uploadView === 'notificationRecords') {
+      void refreshUploadNotificationRecords(uploadNotificationPage, uploadNotificationStatusFilter, appliedUploadNotificationPathFilter);
+      const interval = window.setInterval(() => {
+        void refreshUploadNotificationRecords(uploadNotificationPage, uploadNotificationStatusFilter, appliedUploadNotificationPathFilter);
+      }, uploadListRefreshIntervalMs);
+      return () => window.clearInterval(interval);
+    }
     void refreshUploads(uploadPage, uploadStatusFilter, appliedUploadPathFilter);
     const interval = window.setInterval(() => {
       void refreshUploads(uploadPage, uploadStatusFilter, appliedUploadPathFilter);
     }, uploadListRefreshIntervalMs);
     return () => window.clearInterval(interval);
-  }, [activePage, uploadView, uploadPage, uploadStatusFilter, appliedUploadPathFilter, taskPageSize]);
+  }, [activePage, uploadView, uploadPage, uploadStatusFilter, appliedUploadPathFilter, uploadNotificationPage, uploadNotificationStatusFilter, appliedUploadNotificationPathFilter, taskPageSize]);
 
   useEffect(() => {
     if (!runtimeInfo?.desktop) return;
@@ -4654,6 +4789,7 @@ export function App() {
             <button className={uploadView === 'batches' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={uploadView === 'batches'} onClick={() => navigateUploadView('batches')}>上传批次</button>
             <button className={uploadView === 'providers' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={uploadView === 'providers'} onClick={() => navigateUploadView('providers')}>Provider 账号</button>
             <button className={uploadView === 'notifications' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={uploadView === 'notifications'} onClick={() => navigateUploadView('notifications')}>通知模板</button>
+            <button className={uploadView === 'notificationRecords' ? 'status-tab active' : 'status-tab'} type="button" role="tab" aria-selected={uploadView === 'notificationRecords'} onClick={() => navigateUploadView('notificationRecords')}>通知记录</button>
           </nav>
 
           {uploadView === 'batches' && <>
@@ -4677,7 +4813,7 @@ export function App() {
               </form>
               <div className="task-table-wrap">
                 <table className="task-table upload-batch-table">
-                  <thead><tr><th>ID</th><th>状态</th><th>番剧目录</th><th>文件</th><th>上传到</th><th>进度</th><th>可上传时间</th><th>操作</th></tr></thead>
+                  <thead><tr><th>ID</th><th>状态</th><th>番剧目录</th><th>文件</th><th>上传到</th><th>进度</th><th>通知</th><th>可上传时间</th><th>操作</th></tr></thead>
                   <tbody>
                     {uploadBatches.length ? uploadBatches.map((batch) => (
                       <tr key={batch.id} tabIndex={0} onClick={() => void loadUploadBatchDetail(batch.id)} onKeyDown={(event) => { if (event.target !== event.currentTarget || !['Enter', ' '].includes(event.key)) return; event.preventDefault(); void loadUploadBatchDetail(batch.id); }} title="按 Enter 或空格打开详情">
@@ -4687,10 +4823,11 @@ export function App() {
                         <td>{batch.fileCount}</td>
                         <td className="upload-batch-destination"><strong>{batch.providerName || '-'}</strong>{batch.remoteRoot && <small>{batch.remoteRoot}</small>}</td>
                         <td><UploadBatchProgress batch={batch} /></td>
+                        <td><span className={uploadBatchNotificationSummary(batch).className}>{uploadBatchNotificationSummary(batch).label}</span></td>
                         <td>{formatStoredTime(batch.readyAt, displayTimezone)}</td>
                         <td><ActionIconButton label={`查看上传批次 ${batch.id} 详情`} icon={Eye} onClick={(event) => { event.stopPropagation(); void loadUploadBatchDetail(batch.id); }} /></td>
                       </tr>
-                    )) : <tr><td colSpan={8} className="empty-cell">暂无上传批次。</td></tr>}
+                    )) : <tr><td colSpan={9} className="empty-cell">暂无上传批次。</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -4748,6 +4885,23 @@ export function App() {
               </table>
             </div>
           </Card>}
+
+          {uploadView === 'notificationRecords' && <UploadNotificationRecordsCard
+            records={uploadNotificationRecords}
+            total={uploadNotificationTotal}
+            page={uploadNotificationPage}
+            pageSize={taskPageSize}
+            status={uploadNotificationStatusFilter}
+            path={uploadNotificationPathFilter}
+            refreshing={refreshingUploadNotifications}
+            timezone={displayTimezone}
+            onRefresh={() => void refreshUploadNotificationRecords()}
+            onStatusChange={(status) => { setUploadNotificationStatusFilter(status); void refreshUploadNotificationRecords(1, status, appliedUploadNotificationPathFilter); }}
+            onPathChange={setUploadNotificationPathFilter}
+            onApply={applyUploadNotificationFilters}
+            onReset={resetUploadNotificationFilters}
+            onPageChange={(page) => void refreshUploadNotificationRecords(page)}
+          />}
         </section>
       )}
 
@@ -5468,6 +5622,64 @@ function UploadBatchProgress(props: { batch: UploadBatch }) {
   );
 }
 
+function UploadNotificationRecordsCard(props: {
+  records: UploadNotificationRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+  status: UploadNotificationStatusFilter;
+  path: string;
+  refreshing: boolean;
+  timezone: string;
+  onRefresh: () => void;
+  onStatusChange: (status: UploadNotificationStatusFilter) => void;
+  onPathChange: (path: string) => void;
+  onApply: () => void;
+  onReset: () => void;
+  onPageChange: (page: number) => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil(props.total / props.pageSize));
+  return (
+    <Card title="通知记录" action={<ActionIconButton label="刷新通知记录" icon={RefreshCw} loading={props.refreshing} disabled={props.refreshing} onClick={props.onRefresh} />}>
+      <div className="task-status-tabs" role="group" aria-label="通知状态过滤">
+        {uploadNotificationStatusFilters.map((status) => (
+          <button className={props.status === status.value ? 'status-tab active' : 'status-tab'} type="button" key={status.value} aria-pressed={props.status === status.value} disabled={props.refreshing} onClick={() => props.onStatusChange(status.value)}>
+            {status.label}
+          </button>
+        ))}
+      </div>
+      <form className="task-filters upload-filters" onSubmit={(event) => { event.preventDefault(); props.onApply(); }}>
+        <label>番剧目录<input value={props.path} onChange={(event) => props.onPathChange(event.target.value)} placeholder="输入番剧目录关键词" /></label>
+        <div className="filter-actions list-toolbar-icons"><ActionIconButton label="应用过滤" icon={Filter} type="submit" disabled={props.refreshing} /><ActionIconButton label="重置过滤" icon={RotateCcw} disabled={props.refreshing} onClick={props.onReset} /></div>
+      </form>
+      <div className="task-table-wrap">
+        <table className="task-table upload-notification-record-table">
+          <thead><tr><th>ID</th><th>上传批次</th><th>Provider</th><th>模板 / 地址</th><th>状态</th><th>尝试</th><th>HTTP</th><th>时间</th><th>错误</th></tr></thead>
+          <tbody>
+            {props.records.length ? props.records.map((record) => (
+              <tr key={record.id}>
+                <td>#{record.id}</td>
+                <td><strong>#{record.batchId}</strong><small className="upload-notification-record-path">{record.seriesPath}</small></td>
+                <td>{record.providerName || '-'}</td>
+                <td><strong>{record.templateName || '-'}</strong><small className="upload-notification-record-url" title={record.url}>{record.url || '-'}</small></td>
+                <td><span className={uploadNotificationStatusPillClass(record.status)}>{uploadNotificationStatusLabel(record.status)}</span></td>
+                <td>{record.attempts}</td>
+                <td>{record.responseStatus || '-'}</td>
+                <td>{formatStoredTime(record.deliveredAt || record.updatedAt || record.createdAt, props.timezone)}</td>
+                <td className="path-cell upload-error-cell">{record.errorSummary || '-'}</td>
+              </tr>
+            )) : <tr><td colSpan={9} className="empty-cell">暂无通知记录。</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div className="pagination-bar">
+        <span>共 {props.total} 条，第 {props.page} / {totalPages} 页</span>
+        <div className="inline-actions"><ActionIconButton label="上一页" icon={ChevronLeft} disabled={props.refreshing || props.page <= 1} onClick={() => props.onPageChange(props.page - 1)} /><ActionIconButton label="下一页" icon={ChevronRight} disabled={props.refreshing || props.page >= totalPages} onClick={() => props.onPageChange(props.page + 1)} /></div>
+      </div>
+    </Card>
+  );
+}
+
 function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: string; actionTargetID: number | null; onClose: () => void; onRetry: (target: UploadBatchTarget) => void; onCancel: (target: UploadBatchTarget) => void }) {
   const [fileStatusFilter, setFileStatusFilter] = useState<UploadFileStatusFilter>('all');
   const [filePage, setFilePage] = useState(1);
@@ -5576,6 +5788,28 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
                 })}</tbody>
               </table>
             </div>
+          </section>
+          <section className="upload-detail-section">
+            <div className="upload-detail-section-header">
+              <h3>通知</h3>
+              <small>{props.detail.notifications?.length ? `${props.detail.notifications.length} 条记录` : '未配置通知'}</small>
+            </div>
+            {props.detail.notifications?.length ? <div className="task-table-wrap">
+              <table className="task-table upload-notification-detail-table">
+                <thead><tr><th>Provider</th><th>模板</th><th>状态</th><th>尝试</th><th>HTTP</th><th>时间</th><th>错误</th></tr></thead>
+                <tbody>{props.detail.notifications.map((notification) => (
+                  <tr key={notification.id}>
+                    <td>{notification.providerName || '-'}</td>
+                    <td><strong>{notification.templateName || '-'}</strong><small className="upload-notification-record-url" title={notification.url}>{notification.url || '-'}</small></td>
+                    <td><span className={uploadNotificationStatusPillClass(notification.status)}>{uploadNotificationStatusLabel(notification.status)}</span></td>
+                    <td>{notification.attempts}</td>
+                    <td>{notification.responseStatus || '-'}</td>
+                    <td>{formatStoredTime(notification.deliveredAt || notification.updatedAt || notification.createdAt, props.timezone)}</td>
+                    <td className="path-cell upload-error-cell">{notification.errorSummary || '-'}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div> : <p className="settings-note">该上传目标没有生成通知记录，可能是未配置通知模板，或本次没有产生需要通知的远端变更。</p>}
           </section>
           <section className="upload-detail-section">
             <div className="upload-detail-section-header">

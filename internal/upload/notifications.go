@@ -47,6 +47,14 @@ func (m *Manager) notificationWorker(ctx context.Context) {
 		if err == nil {
 			if completeErr := m.store.CompleteUploadNotification(ctx, notification.ID, responseStatus); completeErr != nil {
 				m.logger.Warn("complete upload notification failed", "notificationID", notification.ID, "error", completeErr)
+			} else {
+				m.logger.Info("upload completion notification delivered",
+					"notificationID", notification.ID,
+					"batchTargetID", notification.BatchTargetID,
+					"template", notification.TemplateName,
+					"attempt", notification.Attempts,
+					"responseStatus", responseStatus,
+				)
 			}
 			continue
 		}
@@ -59,8 +67,11 @@ func (m *Manager) notificationWorker(ctx context.Context) {
 		}
 		m.logger.Warn("upload completion notification failed",
 			"notificationID", notification.ID,
+			"batchTargetID", notification.BatchTargetID,
 			"template", notification.TemplateName,
 			"attempt", notification.Attempts,
+			"responseStatus", responseStatus,
+			"willRetry", !retryAt.IsZero(),
 			"error", err,
 		)
 	}

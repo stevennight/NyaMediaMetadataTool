@@ -247,6 +247,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/upload/providers", s.handleListUploadProviders)
 	s.mux.HandleFunc("POST /api/upload/providers", s.handleCreateUploadProvider)
 	s.mux.HandleFunc("/api/upload/providers/", s.handleUploadProviderRoute)
+	s.mux.HandleFunc("GET /api/upload/notifications", s.handleListUploadNotificationRecords)
 	s.mux.HandleFunc("GET /api/upload/notification-templates", s.handleListUploadNotificationTemplates)
 	s.mux.HandleFunc("POST /api/upload/notification-templates", s.handleCreateUploadNotificationTemplate)
 	s.mux.HandleFunc("/api/upload/notification-templates/", s.handleUploadNotificationTemplate)

@@ -80,6 +80,9 @@ func Start(parent context.Context, configPath string, logger *slog.Logger) (*Ser
 	if err := db.ResetRunningUploadWork(ctx); err != nil {
 		return nil, fmt.Errorf("reset running upload work: %w", err)
 	}
+	if err := db.ResetProcessingUploadNotifications(ctx); err != nil {
+		return nil, fmt.Errorf("reset processing upload notifications: %w", err)
+	}
 	if err := db.DisableWatchDirScanOnStart(ctx); err != nil {
 		return nil, fmt.Errorf("disable watch dir scan on start: %w", err)
 	}

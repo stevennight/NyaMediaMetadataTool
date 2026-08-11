@@ -121,25 +121,29 @@ type UploadProviderRoute struct {
 }
 
 type UploadBatch struct {
-	ID                 int64  `json:"id"`
-	WatchDirID         *int64 `json:"watchDirId"`
-	UploadRouteID      *int64 `json:"uploadRouteId,omitempty"`
-	SeriesKey          string `json:"seriesKey"`
-	SeriesPath         string `json:"seriesPath"`
-	Status             string `json:"status"`
-	Revision           int    `json:"revision"`
-	ReadyAt            string `json:"readyAt"`
-	FileCount          int    `json:"fileCount"`
-	ProviderName       string `json:"providerName"`
-	RemoteRoot         string `json:"remoteRoot"`
-	TargetCount        int    `json:"targetCount"`
-	CompletedTargets   int    `json:"completedTargets"`
-	FailedTargets      int    `json:"failedTargets"`
-	TransferCount      int    `json:"transferCount"`
-	CompletedTransfers int    `json:"completedTransfers"`
-	FailedTransfers    int    `json:"failedTransfers"`
-	CreatedAt          string `json:"createdAt"`
-	UpdatedAt          string `json:"updatedAt"`
+	ID                     int64  `json:"id"`
+	WatchDirID             *int64 `json:"watchDirId"`
+	UploadRouteID          *int64 `json:"uploadRouteId,omitempty"`
+	SeriesKey              string `json:"seriesKey"`
+	SeriesPath             string `json:"seriesPath"`
+	Status                 string `json:"status"`
+	Revision               int    `json:"revision"`
+	ReadyAt                string `json:"readyAt"`
+	FileCount              int    `json:"fileCount"`
+	ProviderName           string `json:"providerName"`
+	RemoteRoot             string `json:"remoteRoot"`
+	TargetCount            int    `json:"targetCount"`
+	CompletedTargets       int    `json:"completedTargets"`
+	FailedTargets          int    `json:"failedTargets"`
+	TransferCount          int    `json:"transferCount"`
+	CompletedTransfers     int    `json:"completedTransfers"`
+	FailedTransfers        int    `json:"failedTransfers"`
+	NotificationCount      int    `json:"notificationCount"`
+	DeliveredNotifications int    `json:"deliveredNotifications"`
+	PendingNotifications   int    `json:"pendingNotifications"`
+	FailedNotifications    int    `json:"failedNotifications"`
+	CreatedAt              string `json:"createdAt"`
+	UpdatedAt              string `json:"updatedAt"`
 }
 
 type UploadBatchFile struct {
@@ -238,10 +242,11 @@ type UploadEvent struct {
 }
 
 type UploadBatchDetail struct {
-	Batch     UploadBatch         `json:"batch"`
-	Files     []UploadBatchFile   `json:"files"`
-	Targets   []UploadBatchTarget `json:"targets"`
-	Transfers []UploadTransfer    `json:"transfers"`
+	Batch         UploadBatch                `json:"batch"`
+	Files         []UploadBatchFile          `json:"files"`
+	Targets       []UploadBatchTarget        `json:"targets"`
+	Transfers     []UploadTransfer           `json:"transfers"`
+	Notifications []UploadNotificationRecord `json:"notifications"`
 }
 
 type UploadBatchFilters struct {
@@ -1256,8 +1261,8 @@ WHERE id = (SELECT batch_file_id FROM upload_transfers WHERE id = ?)
 }
 
 // CompleteUploadTarget finalizes successful reconciliation. It writes an
-// outbox event only when at least one transfer changed the remote namespace;
-// notification delivery is intentionally owned by a future consumer.
+// outbox event and queues the configured notification only when at least one
+// transfer changed the remote namespace.
 func (s *Store) CompleteUploadTarget(ctx context.Context, targetID int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1523,7 +1528,11 @@ func (s *Store) GetUploadBatchDetail(ctx context.Context, id int64) (UploadBatch
 	if err != nil {
 		return UploadBatchDetail{}, err
 	}
-	return UploadBatchDetail{Batch: batch, Files: files, Targets: targets, Transfers: transfers}, nil
+	notifications, err := s.listUploadNotificationRecordsByBatch(ctx, id)
+	if err != nil {
+		return UploadBatchDetail{}, err
+	}
+	return UploadBatchDetail{Batch: batch, Files: files, Targets: targets, Transfers: transfers, Notifications: notifications}, nil
 }
 
 func (s *Store) ListUploadBatches(ctx context.Context, filters UploadBatchFilters) (UploadBatchListResult, error) {
@@ -1860,6 +1869,22 @@ SELECT b.id, b.watch_dir_id, b.upload_route_id, b.series_key, b.series_path, b.s
           FROM upload_transfers tr
           JOIN upload_batch_targets t ON t.id = tr.batch_target_id
          WHERE t.batch_id = b.id AND t.status = 'failed' AND tr.status = 'failed'),
+       (SELECT COUNT(*)
+          FROM upload_notifications n
+          JOIN upload_batch_targets t ON t.id = n.batch_target_id
+         WHERE t.batch_id = b.id),
+       (SELECT COUNT(*)
+          FROM upload_notifications n
+          JOIN upload_batch_targets t ON t.id = n.batch_target_id
+         WHERE t.batch_id = b.id AND n.status = 'delivered'),
+       (SELECT COUNT(*)
+          FROM upload_notifications n
+          JOIN upload_batch_targets t ON t.id = n.batch_target_id
+         WHERE t.batch_id = b.id AND n.status IN ('pending', 'processing')),
+       (SELECT COUNT(*)
+          FROM upload_notifications n
+          JOIN upload_batch_targets t ON t.id = n.batch_target_id
+         WHERE t.batch_id = b.id AND n.status = 'failed'),
        b.created_at, b.updated_at
 FROM upload_batches b`
 
@@ -1949,6 +1974,10 @@ func scanUploadBatch(scanner uploadBatchScanner) (UploadBatch, error) {
 		&item.TransferCount,
 		&item.CompletedTransfers,
 		&item.FailedTransfers,
+		&item.NotificationCount,
+		&item.DeliveredNotifications,
+		&item.PendingNotifications,
+		&item.FailedNotifications,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 	)

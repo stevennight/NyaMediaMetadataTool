@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/store"
@@ -59,5 +60,108 @@ func TestUploadNotificationTemplateCRUDAPI(t *testing.T) {
 	handler.ServeHTTP(deleteResponse, httptest.NewRequest(http.MethodDelete, "/api/upload/notification-templates/"+jsonNumber(created.ID), nil))
 	if deleteResponse.Code != http.StatusNoContent {
 		t.Fatalf("delete status=%d body=%s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+}
+
+func TestUploadNotificationRecordsAPIIsSafeAndQueryable(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	template, err := st.CreateUploadNotificationTemplate(ctx, store.UploadNotificationTemplate{
+		Name:            "Safe record",
+		URL:             "https://example.test/notify",
+		HeadersTemplate: `{"X-Webhook-Token":"{{webhook_token}}"}`,
+		PayloadTemplate: `{"source_path":"{{path}}"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := st.CreateUploadProvider(ctx, store.UploadProvider{Name: "Record Provider", Type: store.UploadProviderType115Cookie, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	watchDir, err := st.CreateWatchDir(ctx, store.WatchDir{
+		Path:         root,
+		WatchEnabled: true,
+		UploadConfigs: []store.UploadProviderRoute{{
+			ProviderID:             provider.ID,
+			Enabled:                true,
+			RemoteRoot:             "/Video",
+			CollisionPolicy:        "fail",
+			IncludeTypes:           []string{"video"},
+			NotificationTemplateID: &template.ID,
+			NotificationVariables:  map[string]string{"webhook_token": "private-token"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seriesPath := filepath.Join(root, "Record Show")
+	batch, _, err := st.CollectUploadBatch(ctx, store.UploadCollectionInput{
+		WatchDirID:  &watchDir.ID,
+		SeriesKey:   "record-show",
+		SeriesPath:  seriesPath,
+		QuietPeriod: time.Millisecond,
+		Files: []store.UploadCandidate{{
+			LocalPath:    filepath.Join(seriesPath, "episode.mkv"),
+			RelativePath: "Record Show/episode.mkv",
+			FileType:     "video",
+			Size:         10,
+			ModifiedAt:   time.Now().Add(-time.Minute),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SealDueUploadBatches(ctx, time.Now(), time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	target, err := st.ClaimNextUploadTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfers, err := st.ListUploadTransfersByTarget(ctx, target.ID)
+	if err != nil || len(transfers) != 1 {
+		t.Fatalf("transfers=%#v err=%v", transfers, err)
+	}
+	if err := st.StartUploadTransfer(ctx, transfers[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompleteUploadTransferWithResult(ctx, transfers[0].ID, store.UploadTransferCompletion{Outcome: store.UploadOutcomeCreated}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompleteUploadTarget(ctx, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	notification, err := st.ClaimNextUploadNotification(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompleteUploadNotification(ctx, notification.ID, http.StatusNoContent); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewServer(config.Default(), filepath.Join(t.TempDir(), "config.yaml"), st, nil, nil, slog.Default())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/upload/notifications?status=delivered&path=Record+Show", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", response.Code, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("private-token")) {
+		t.Fatal("notification credentials leaked through records API")
+	}
+	var listed store.UploadNotificationRecordListResult
+	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if listed.Total != 1 || len(listed.Items) != 1 || listed.Items[0].BatchID != batch.ID || listed.Items[0].Status != store.UploadNotificationDelivered {
+		t.Fatalf("unexpected notification records: %#v", listed)
 	}
 }

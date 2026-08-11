@@ -16,7 +16,7 @@
   "info": {
     "companyName": "NyaMediaMetadataTool",
     "productName": "NyaMediaMetadataTool",
-    "productVersion": "0.1.9",
+    "productVersion": "0.1.10",
     "copyright": "Copyright (c) 2026 NyaMediaMetadataTool",
     "comments": "Local media metadata and companion-file workstation."
   }

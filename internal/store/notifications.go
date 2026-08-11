@@ -58,6 +58,44 @@ type UploadNotification struct {
 	UpdatedAt      string `json:"updatedAt"`
 }
 
+// UploadNotificationRecord is the safe, queryable view of a notification
+// attempt. Headers and payload are intentionally excluded because they may
+// contain webhook credentials.
+type UploadNotificationRecord struct {
+	ID             int64  `json:"id"`
+	BatchID        int64  `json:"batchId"`
+	BatchTargetID  int64  `json:"batchTargetId"`
+	SeriesPath     string `json:"seriesPath"`
+	BatchStatus    string `json:"batchStatus"`
+	ProviderName   string `json:"providerName"`
+	TargetStatus   string `json:"targetStatus"`
+	TemplateID     int64  `json:"templateId"`
+	TemplateName   string `json:"templateName"`
+	URL            string `json:"url"`
+	Status         string `json:"status"`
+	Attempts       int    `json:"attempts"`
+	AvailableAt    string `json:"availableAt"`
+	ResponseStatus int    `json:"responseStatus"`
+	ErrorSummary   string `json:"errorSummary"`
+	CreatedAt      string `json:"createdAt"`
+	DeliveredAt    string `json:"deliveredAt"`
+	UpdatedAt      string `json:"updatedAt"`
+}
+
+type UploadNotificationRecordFilters struct {
+	Page     int
+	PageSize int
+	Status   string
+	Path     string
+}
+
+type UploadNotificationRecordListResult struct {
+	Items    []UploadNotificationRecord `json:"items"`
+	Total    int                        `json:"total"`
+	Page     int                        `json:"page"`
+	PageSize int                        `json:"pageSize"`
+}
+
 func (s *Store) ListUploadNotificationTemplates(ctx context.Context) ([]UploadNotificationTemplate, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, name, url, headers_template, payload_template, created_at, updated_at
@@ -71,6 +109,75 @@ ORDER BY name, id
 	items := make([]UploadNotificationTemplate, 0)
 	for rows.Next() {
 		item, err := scanUploadNotificationTemplate(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) ListUploadNotificationRecords(ctx context.Context, filters UploadNotificationRecordFilters) (UploadNotificationRecordListResult, error) {
+	if filters.Page <= 0 {
+		filters.Page = 1
+	}
+	if filters.PageSize <= 0 || filters.PageSize > 200 {
+		filters.PageSize = 50
+	}
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	if status := strings.TrimSpace(filters.Status); status != "" && status != "all" {
+		clauses = append(clauses, "n.status = ?")
+		args = append(args, status)
+	}
+	if path := strings.TrimSpace(filters.Path); path != "" {
+		clauses = append(clauses, "b.series_path LIKE ?")
+		args = append(args, "%"+path+"%")
+	}
+	where := ""
+	if len(clauses) > 0 {
+		where = " WHERE " + strings.Join(clauses, " AND ")
+	}
+	countArgs := append([]any{}, args...)
+	var total int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM upload_notifications n
+JOIN upload_batch_targets t ON t.id = n.batch_target_id
+JOIN upload_batches b ON b.id = t.batch_id`+where, countArgs...).Scan(&total); err != nil {
+		return UploadNotificationRecordListResult{}, err
+	}
+
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, filters.PageSize, (filters.Page-1)*filters.PageSize)
+	rows, err := s.db.QueryContext(ctx, uploadNotificationRecordSelect+where+` ORDER BY n.id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	if err != nil {
+		return UploadNotificationRecordListResult{}, err
+	}
+	defer rows.Close()
+	items := make([]UploadNotificationRecord, 0)
+	for rows.Next() {
+		item, err := scanUploadNotificationRecord(rows)
+		if err != nil {
+			return UploadNotificationRecordListResult{}, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return UploadNotificationRecordListResult{}, err
+	}
+	return UploadNotificationRecordListResult{Items: items, Total: total, Page: filters.Page, PageSize: filters.PageSize}, nil
+}
+
+func (s *Store) listUploadNotificationRecordsByBatch(ctx context.Context, batchID int64) ([]UploadNotificationRecord, error) {
+	rows, err := s.db.QueryContext(ctx, uploadNotificationRecordSelect+` WHERE b.id = ? ORDER BY n.id ASC`, batchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]UploadNotificationRecord, 0)
+	for rows.Next() {
+		item, err := scanUploadNotificationRecord(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -560,6 +667,15 @@ SELECT id, batch_target_id, template_id, template_name, url, headers, payload, s
 FROM upload_notifications
 `
 
+const uploadNotificationRecordSelect = `
+SELECT n.id, n.batch_target_id, t.batch_id, b.series_path, b.status, t.provider_name, t.status,
+       n.template_id, n.template_name, n.url, n.status, n.attempts, n.available_at,
+       n.response_status, n.error_summary, n.created_at, COALESCE(n.delivered_at, ''), n.updated_at
+FROM upload_notifications n
+JOIN upload_batch_targets t ON t.id = n.batch_target_id
+JOIN upload_batches b ON b.id = t.batch_id
+`
+
 type notificationTemplateScanner interface {
 	Scan(dest ...any) error
 }
@@ -578,6 +694,17 @@ func scanUploadNotification(scanner notificationScanner) (UploadNotification, er
 	var item UploadNotification
 	err := scanner.Scan(
 		&item.ID, &item.BatchTargetID, &item.TemplateID, &item.TemplateName, &item.URL, &item.Headers, &item.Payload,
+		&item.Status, &item.Attempts, &item.AvailableAt, &item.ResponseStatus, &item.ErrorSummary,
+		&item.CreatedAt, &item.DeliveredAt, &item.UpdatedAt,
+	)
+	return item, err
+}
+
+func scanUploadNotificationRecord(scanner notificationScanner) (UploadNotificationRecord, error) {
+	var item UploadNotificationRecord
+	err := scanner.Scan(
+		&item.ID, &item.BatchTargetID, &item.BatchID, &item.SeriesPath, &item.BatchStatus,
+		&item.ProviderName, &item.TargetStatus, &item.TemplateID, &item.TemplateName, &item.URL,
 		&item.Status, &item.Attempts, &item.AvailableAt, &item.ResponseStatus, &item.ErrorSummary,
 		&item.CreatedAt, &item.DeliveredAt, &item.UpdatedAt,
 	)

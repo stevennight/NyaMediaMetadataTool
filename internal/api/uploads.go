@@ -25,10 +25,11 @@ type uploadTransferDetailResponse struct {
 }
 
 type uploadBatchDetailResponse struct {
-	Batch     store.UploadBatch              `json:"batch"`
-	Files     []store.UploadBatchFile        `json:"files"`
-	Targets   []store.UploadBatchTarget      `json:"targets"`
-	Transfers []uploadTransferDetailResponse `json:"transfers"`
+	Batch         store.UploadBatch                `json:"batch"`
+	Files         []store.UploadBatchFile          `json:"files"`
+	Targets       []store.UploadBatchTarget        `json:"targets"`
+	Transfers     []uploadTransferDetailResponse   `json:"transfers"`
+	Notifications []store.UploadNotificationRecord `json:"notifications"`
 }
 
 func (s *Server) handleUploadSummary(w http.ResponseWriter, r *http.Request) {
@@ -85,10 +86,11 @@ func (s *Server) handleUploadBatchDetail(w http.ResponseWriter, r *http.Request)
 		})
 	}
 	writeJSON(w, http.StatusOK, uploadBatchDetailResponse{
-		Batch:     detail.Batch,
-		Files:     detail.Files,
-		Targets:   detail.Targets,
-		Transfers: transfers,
+		Batch:         detail.Batch,
+		Files:         detail.Files,
+		Targets:       detail.Targets,
+		Transfers:     transfers,
+		Notifications: detail.Notifications,
 	})
 }
 

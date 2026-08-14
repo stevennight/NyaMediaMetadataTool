@@ -771,10 +771,13 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			if verifier, ok := client.(ProviderVerifier); ok {
 				remote, found, err := verifier.Verify(ctx, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1)
 				if err == nil && found {
-					if err := m.completeTransfer(ctx, transfer, remote); err != nil {
+					if err := requireRemoteFileID(remote); err != nil {
+						verificationErr = err
+					} else if err := m.completeTransfer(ctx, transfer, remote); err != nil {
 						return err
+					} else {
+						continue
 					}
-					continue
 				}
 				if err != nil {
 					verificationErr = fmt.Errorf("%s: verify remote file: %w", uncertain115CommitMarker, err)
@@ -822,6 +825,13 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 			}
 			continue
 		}
+		if idErr := requireRemoteFileID(remote); idErr != nil {
+			transferErr := &UploadAttemptError{Outcome: remote.Outcome, LocalSHA1: remote.LocalSHA1, Err: idErr}
+			if err := recordFailure(transfer.ID, transferErr); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := m.completeTransfer(ctx, transfer, remote); err != nil {
 			return err
 		}
@@ -834,6 +844,9 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 }
 
 func (m *Manager) completeTransfer(ctx context.Context, transfer store.UploadTransfer, remote RemoteFile) error {
+	if err := requireRemoteFileID(remote); err != nil {
+		return err
+	}
 	outcome := strings.ToLower(strings.TrimSpace(remote.Outcome))
 	if store.UploadOutcomeChangesRemote(transfer.Outcome) &&
 		(outcome == "" || outcome == store.UploadOutcomeUnchanged) {
@@ -854,6 +867,13 @@ func (m *Manager) completeTransfer(ctx context.Context, transfer store.UploadTra
 		LocalSHA1:  localSHA1,
 		RemoteSHA1: remote.SHA1,
 	})
+}
+
+func requireRemoteFileID(remote RemoteFile) error {
+	if strings.TrimSpace(remote.ID) == "" {
+		return errors.New("upload provider returned an empty remote file ID")
+	}
+	return nil
 }
 
 func uploadSnapshotTimeMatches(snapshot string, actual time.Time) bool {

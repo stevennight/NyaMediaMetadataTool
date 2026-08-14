@@ -26,7 +26,7 @@ import (
 
 const (
 	baiduOpenAPIBaseURL       = "https://pan.baidu.com/rest/2.0/xpan"
-	baiduOpenUploadURL        = "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2"
+	baiduOpenLocateUploadURL  = "https://d.pcs.baidu.com/rest/2.0/pcs/file"
 	baiduOpenOAuthTokenURL    = "https://openapi.baidu.com/oauth/2.0/token"
 	baiduOpenDefaultUserAgent = "pan.baidu.com"
 	baiduOpenPageSize         = 1000
@@ -140,13 +140,63 @@ type baiduOpenPrecreateResponse struct {
 	ReturnType int         `json:"return_type"`
 	BlockList  []int       `json:"block_list"`
 	FSID       json.Number `json:"fs_id"`
-	ServerURL  string      `json:"server_url"`
 }
 
 type baiduOpenCreateResponse struct {
 	baiduOpenAPIResponse
 	FSID json.Number `json:"fs_id"`
 	Path string      `json:"path"`
+}
+
+func baiduOpenFSID(value json.Number) string {
+	return strings.TrimSpace(string(value))
+}
+
+func baiduOpenPrecreateResponseSummary(response *baiduOpenPrecreateResponse) string {
+	if response == nil {
+		return "nil"
+	}
+	return fmt.Sprintf(
+		"errno=%d error_code=%d return_type=%d uploadid_present=%t block_count=%d fs_id_present=%t",
+		response.Errno,
+		response.ErrorCode,
+		response.ReturnType,
+		strings.TrimSpace(response.UploadID) != "",
+		len(response.BlockList),
+		baiduOpenFSID(response.FSID) != "",
+	)
+}
+
+func baiduOpenCreateResponseSummary(response *baiduOpenCreateResponse) string {
+	if response == nil {
+		return "nil"
+	}
+	return fmt.Sprintf(
+		"errno=%d error_code=%d fs_id_present=%t path_present=%t",
+		response.Errno,
+		response.ErrorCode,
+		baiduOpenFSID(response.FSID) != "",
+		strings.TrimSpace(response.Path) != "",
+	)
+}
+
+func normalizeBaiduOpenCollisionPolicy(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "skip", "fail", "replace":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "fail"
+	}
+}
+
+func baiduOpenRTypes(collisionPolicy string) (precreateRType, createRType string) {
+	if normalizeBaiduOpenCollisionPolicy(collisionPolicy) == "replace" {
+		return "3", "3"
+	}
+	// rtype=0 is the documented no-rename/conflict strategy. The create
+	// request must use the same value as precreate, so set it explicitly in
+	// both requests instead of relying on different endpoint defaults.
+	return "0", "0"
 }
 
 type baiduOpenDigest struct {
@@ -227,6 +277,8 @@ func (p *baiduOpenProvider) Upload(ctx context.Context, localPath, remotePath st
 	if err := p.ensureDirectory(ctx, parentPath); err != nil {
 		return RemoteFile{}, err
 	}
+	collisionPolicy = normalizeBaiduOpenCollisionPolicy(collisionPolicy)
+	precreateRType, createRType := baiduOpenRTypes(collisionPolicy)
 	existing, found, err := p.findEntry(ctx, parentPath, name)
 	if err != nil {
 		return RemoteFile{}, err
@@ -263,12 +315,12 @@ func (p *baiduOpenProvider) Upload(ctx context.Context, localPath, remotePath st
 				return RemoteFile{ID: existing.ID, Size: existing.Size, SHA1: localSHA1, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeUnchanged}, nil
 			}
 		}
-		switch strings.ToLower(strings.TrimSpace(collisionPolicy)) {
+		switch collisionPolicy {
 		case "skip":
 			return RemoteFile{ID: existing.ID, Size: existing.Size, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeSkipped}, nil
 		case "fail":
 			return RemoteFile{}, fmt.Errorf("Baidu Open target already exists with different content: %s", remotePath)
-		default:
+		case "replace":
 			intendedOutcome = store.UploadOutcomeReplaced
 		}
 	}
@@ -277,48 +329,72 @@ func (p *baiduOpenProvider) Upload(ctx context.Context, localPath, remotePath st
 	if err != nil {
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("hash local file for upload: %w", err)}
 	}
-	precreated, err := p.precreate(ctx, remotePath, size, resolved, "overwrite")
+	precreated, err := p.precreate(ctx, remotePath, size, resolved, precreateRType)
 	if err != nil {
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open precreate %s: %w", remotePath, err)}
 	}
-	remoteID := strings.TrimSpace(string(precreated.FSID))
-	if precreated.ReturnType != 1 {
-		if strings.TrimSpace(precreated.UploadID) == "" {
-			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: errors.New("Baidu Open precreate returned no uploadid")}
-		}
-		parts := precreated.BlockList
-		if len(parts) == 0 {
-			parts = make([]int, len(resolved.ChunkMD5s))
-			for index := range parts {
-				parts[index] = index
-			}
-		}
-		for _, part := range parts {
-			if part < 0 || part >= len(resolved.ChunkMD5s) {
-				return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open precreate returned invalid block index %d", part)}
-			}
-			if err := p.uploadChunk(ctx, remotePath, precreated.UploadID, part, file, resolved, precreated.ServerURL); err != nil {
-				return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open upload block %d for %s: %w", part, remotePath, err)}
-			}
-		}
-		created, err := p.createFile(ctx, remotePath, size, precreated.UploadID, resolved.ChunkMD5s, "overwrite")
-		if err != nil {
-			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open create %s: %w", remotePath, err)}
-		}
-		if created != nil {
-			remoteID = strings.TrimSpace(string(created.FSID))
+	if precreated == nil {
+		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: errors.New("Baidu Open precreate returned an empty response")}
+	}
+	if strings.TrimSpace(precreated.UploadID) == "" {
+		return RemoteFile{}, &UploadAttemptError{
+			Outcome:   intendedOutcome,
+			LocalSHA1: localSHA1,
+			Err:       fmt.Errorf("Baidu Open precreate returned no uploadid (%s)", baiduOpenPrecreateResponseSummary(precreated)),
 		}
 	}
-	// A successful precreate (rapid upload) or create response is the commit
-	// confirmation. Baidu's list endpoint is eventually consistent and may not
-	// expose the file, or even its fs_id, immediately after that response.
-	return RemoteFile{
-		ID:        remoteID,
-		Size:      size,
-		SHA1:      localSHA1,
-		LocalSHA1: localSHA1,
-		Outcome:   intendedOutcome,
-	}, nil
+	serverURL, err := p.locateUpload(ctx, remotePath, precreated.UploadID)
+	if err != nil {
+		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open locate upload server for %s: %w", remotePath, err)}
+	}
+	// return_type is an internal Baidu status value. The response block_list
+	// is the client-facing instruction for which blocks still need uploading.
+	// Baidu documents an empty response block_list as equivalent to [0].
+	parts := precreated.BlockList
+	if len(parts) == 0 {
+		parts = []int{0}
+	}
+	if len(resolved.ChunkMD5s) == 0 {
+		return RemoteFile{}, &UploadAttemptError{
+			Outcome:   intendedOutcome,
+			LocalSHA1: localSHA1,
+			Err:       fmt.Errorf("Baidu Open precreate requested block 0 for an empty file (%s)", baiduOpenPrecreateResponseSummary(precreated)),
+		}
+	}
+	createBlockMD5s := append([]string(nil), resolved.ChunkMD5s...)
+	for _, part := range parts {
+		if part < 0 || part >= len(resolved.ChunkMD5s) {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open precreate returned invalid block index %d", part)}
+		}
+		returnedMD5, err := p.uploadChunk(ctx, remotePath, precreated.UploadID, part, file, resolved, serverURL)
+		if err != nil {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open upload block %d for %s: %w", part, remotePath, err)}
+		}
+		createBlockMD5s[part] = returnedMD5
+	}
+	created, err := p.createFile(ctx, remotePath, size, precreated.UploadID, createBlockMD5s, createRType)
+	if err != nil {
+		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("Baidu Open create %s: %w", remotePath, err)}
+	}
+	if created == nil || baiduOpenFSID(created.FSID) == "" {
+		return RemoteFile{}, &UploadAttemptError{
+			Outcome:   intendedOutcome,
+			LocalSHA1: localSHA1,
+			Err:       fmt.Errorf("Baidu Open create returned no fs_id (%s)", baiduOpenCreateResponseSummary(created)),
+		}
+	}
+	remote, err := p.waitForRemoteFile(ctx, parentPath, name, size, resolved.MD5)
+	if err != nil {
+		return RemoteFile{}, &UploadAttemptError{
+			Outcome:   intendedOutcome,
+			LocalSHA1: localSHA1,
+			Err:       fmt.Errorf("verify Baidu Open upload %s: %w; precreate=%s", remotePath, err, baiduOpenPrecreateResponseSummary(precreated)),
+		}
+	}
+	remote.LocalSHA1 = localSHA1
+	remote.SHA1 = localSHA1
+	remote.Outcome = intendedOutcome
+	return remote, nil
 }
 
 func calculateBaiduOpenDigest(ctx context.Context, file *os.File) (*baiduOpenDigest, error) {
@@ -463,8 +539,7 @@ func (p *baiduOpenProvider) createDirectory(ctx context.Context, directoryPath s
 	form.Set("isdir", "1")
 	form.Set("size", "0")
 	form.Set("block_list", "[]")
-	form.Set("rtype", "3")
-	form.Set("ondup", "fail")
+	form.Set("rtype", "0")
 	var response baiduOpenCreateResponse
 	if err := p.doJSONRequest(ctx, http.MethodPost, baiduOpenAPIBaseURL+"/file", query, []byte(form.Encode()), "application/x-www-form-urlencoded", nil, &response); err != nil {
 		return nil, err
@@ -472,7 +547,7 @@ func (p *baiduOpenProvider) createDirectory(ctx context.Context, directoryPath s
 	return &response, nil
 }
 
-func (p *baiduOpenProvider) precreate(ctx context.Context, remotePath string, size int64, digest *baiduOpenDigest, ondup string) (*baiduOpenPrecreateResponse, error) {
+func (p *baiduOpenProvider) precreate(ctx context.Context, remotePath string, size int64, digest *baiduOpenDigest, rtype string) (*baiduOpenPrecreateResponse, error) {
 	blockList, err := json.Marshal(digest.ChunkMD5s)
 	if err != nil {
 		return nil, err
@@ -485,8 +560,9 @@ func (p *baiduOpenProvider) precreate(ctx context.Context, remotePath string, si
 	form.Set("isdir", "0")
 	form.Set("autoinit", "1")
 	form.Set("block_list", string(blockList))
-	form.Set("rtype", "3")
-	form.Set("ondup", ondup)
+	if strings.TrimSpace(rtype) != "" {
+		form.Set("rtype", strings.TrimSpace(rtype))
+	}
 	var response baiduOpenPrecreateResponse
 	if err := p.doJSONRequest(ctx, http.MethodPost, baiduOpenAPIBaseURL+"/file", query, []byte(form.Encode()), "application/x-www-form-urlencoded", nil, &response); err != nil {
 		return nil, err
@@ -494,7 +570,7 @@ func (p *baiduOpenProvider) precreate(ctx context.Context, remotePath string, si
 	return &response, nil
 }
 
-func (p *baiduOpenProvider) createFile(ctx context.Context, remotePath string, size int64, uploadID string, chunkMD5s []string, ondup string) (*baiduOpenCreateResponse, error) {
+func (p *baiduOpenProvider) createFile(ctx context.Context, remotePath string, size int64, uploadID string, chunkMD5s []string, rtype string) (*baiduOpenCreateResponse, error) {
 	blockList, err := json.Marshal(chunkMD5s)
 	if err != nil {
 		return nil, err
@@ -507,8 +583,9 @@ func (p *baiduOpenProvider) createFile(ctx context.Context, remotePath string, s
 	form.Set("isdir", "0")
 	form.Set("uploadid", strings.TrimSpace(uploadID))
 	form.Set("block_list", string(blockList))
-	form.Set("rtype", "3")
-	form.Set("ondup", ondup)
+	if strings.TrimSpace(rtype) != "" {
+		form.Set("rtype", strings.TrimSpace(rtype))
+	}
 	var response baiduOpenCreateResponse
 	if err := p.doJSONRequest(ctx, http.MethodPost, baiduOpenAPIBaseURL+"/file", query, []byte(form.Encode()), "application/x-www-form-urlencoded", nil, &response); err != nil {
 		return nil, err
@@ -516,9 +593,48 @@ func (p *baiduOpenProvider) createFile(ctx context.Context, remotePath string, s
 	return &response, nil
 }
 
-func (p *baiduOpenProvider) uploadChunk(ctx context.Context, remotePath, uploadID string, part int, file *os.File, digest *baiduOpenDigest, serverURL string) error {
+type baiduOpenUploadServer struct {
+	Server string `json:"server"`
+}
+
+type baiduOpenUploadResponse struct {
+	baiduOpenAPIResponse
+	MD5 string `json:"md5"`
+}
+
+type baiduOpenLocateUploadResponse struct {
+	baiduOpenAPIResponse
+	Servers []baiduOpenUploadServer `json:"servers"`
+}
+
+func (p *baiduOpenProvider) locateUpload(ctx context.Context, remotePath, uploadID string) (string, error) {
+	query := url.Values{}
+	query.Set("method", "locateupload")
+	query.Set("appid", "250528")
+	query.Set("path", normalizeBaiduOpenPath(remotePath))
+	query.Set("uploadid", strings.TrimSpace(uploadID))
+	query.Set("upload_version", "2.0")
+	var response baiduOpenLocateUploadResponse
+	if err := p.doJSONRequest(ctx, http.MethodGet, baiduOpenLocateUploadURL, query, nil, "", nil, &response); err != nil {
+		return "", err
+	}
+	for _, candidate := range response.Servers {
+		server := strings.TrimRight(strings.TrimSpace(candidate.Server), "/")
+		parsed, err := url.Parse(server)
+		if err != nil || !strings.EqualFold(parsed.Scheme, "https") || strings.TrimSpace(parsed.Host) == "" {
+			continue
+		}
+		if parsed.Path == "" || parsed.Path == "/" {
+			parsed.Path = "/rest/2.0/pcs/superfile2"
+		}
+		return strings.TrimRight(parsed.String(), "/"), nil
+	}
+	return "", errors.New("Baidu Open locate upload returned no HTTPS upload server")
+}
+
+func (p *baiduOpenProvider) uploadChunk(ctx context.Context, remotePath, uploadID string, part int, file *os.File, digest *baiduOpenDigest, serverURL string) (string, error) {
 	if _, err := file.Seek(int64(part)*baiduOpenChunkSize, io.SeekStart); err != nil {
-		return err
+		return "", err
 	}
 	partSize := int64(baiduOpenChunkSize)
 	remaining := digest.Size - int64(part)*baiduOpenChunkSize
@@ -526,23 +642,23 @@ func (p *baiduOpenProvider) uploadChunk(ctx context.Context, remotePath, uploadI
 		partSize = remaining
 	}
 	if partSize <= 0 {
-		return fmt.Errorf("invalid Baidu Open block size for block %d", part)
+		return "", fmt.Errorf("invalid Baidu Open block size for block %d", part)
 	}
 	partData := make([]byte, partSize)
 	if _, err := io.ReadFull(file, partData); err != nil {
-		return err
+		return "", err
 	}
 	var body bytes.Buffer
 	multipartWriter := multipart.NewWriter(&body)
 	partWriter, err := multipartWriter.CreateFormFile("file", pathpkg.Base(remotePath))
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := partWriter.Write(partData); err != nil {
-		return err
+		return "", err
 	}
 	if err := multipartWriter.Close(); err != nil {
-		return err
+		return "", err
 	}
 	query := url.Values{}
 	query.Set("method", "upload")
@@ -550,12 +666,22 @@ func (p *baiduOpenProvider) uploadChunk(ctx context.Context, remotePath, uploadI
 	query.Set("path", normalizeBaiduOpenPath(remotePath))
 	query.Set("uploadid", strings.TrimSpace(uploadID))
 	query.Set("partseq", strconv.Itoa(part))
-	var response baiduOpenAPIResponse
-	endpoint := baiduOpenUploadURL
-	if strings.TrimSpace(serverURL) != "" {
-		endpoint = strings.TrimSpace(serverURL)
+	if strings.TrimSpace(serverURL) == "" {
+		return "", errors.New("Baidu Open upload server is required")
 	}
-	return p.doJSONRequest(ctx, http.MethodPost, endpoint, query, body.Bytes(), multipartWriter.FormDataContentType(), nil, &response)
+	var response baiduOpenUploadResponse
+	if err := p.doJSONRequest(ctx, http.MethodPost, strings.TrimSpace(serverURL), query, body.Bytes(), multipartWriter.FormDataContentType(), nil, &response); err != nil {
+		return "", err
+	}
+	returnedMD5 := strings.TrimSpace(response.MD5)
+	expectedMD5 := strings.TrimSpace(digest.ChunkMD5s[part])
+	if returnedMD5 == "" {
+		return "", fmt.Errorf("Baidu Open upload block %d returned no md5", part)
+	}
+	if !strings.EqualFold(returnedMD5, expectedMD5) {
+		return "", fmt.Errorf("Baidu Open upload block %d returned md5 %q, expected %q", part, returnedMD5, expectedMD5)
+	}
+	return strings.ToLower(returnedMD5), nil
 }
 
 func (p *baiduOpenProvider) waitForRemoteFile(ctx context.Context, directoryPath, name string, size int64, md5Value string) (RemoteFile, error) {

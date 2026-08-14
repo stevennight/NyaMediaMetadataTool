@@ -22,6 +22,7 @@ type fakeProvider struct {
 	fail       error
 	failUpload func(string) error
 	verifyFile func(string, int64) (RemoteFile, bool, error)
+	emptyID    bool
 }
 
 type fakeUpload struct {
@@ -99,7 +100,11 @@ func (p *fakeProvider) Upload(_ context.Context, localPath string, remotePath st
 	if fail != nil {
 		return RemoteFile{}, fail
 	}
-	return RemoteFile{ID: "remote-" + filepath.Base(remotePath), Size: size, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeCreated}, nil
+	remoteID := "remote-" + filepath.Base(remotePath)
+	if p.emptyID {
+		remoteID = ""
+	}
+	return RemoteFile{ID: remoteID, Size: size, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeCreated}, nil
 }
 
 func (p *fakeProvider) Verify(_ context.Context, remotePath string, size int64, _ string) (RemoteFile, bool, error) {
@@ -477,6 +482,69 @@ func TestProcessTargetContinuesAfterOneTransferFails(t *testing.T) {
 	}
 	if detail.Batch.Status != store.UploadBatchCompleted || detail.Targets[0].Status != store.UploadTargetCompleted {
 		t.Fatalf("retry did not complete the batch: %#v", detail)
+	}
+}
+
+func TestProcessTargetRejectsEmptyRemoteID(t *testing.T) {
+	ctx := context.Background()
+	st := openUploadTestStore(t)
+	defer st.Close()
+	root := t.TempDir()
+	showPath := filepath.Join(root, "Show")
+	if err := os.MkdirAll(showPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(showPath, "S01E01.mkv")
+	if err := os.WriteFile(mediaPath, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(mediaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRecord, err := st.CreateUploadProvider(ctx, store.UploadProvider{Name: "Archive", Type: store.UploadProviderType115Cookie, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := st.CreateWatchDir(ctx, store.WatchDir{Path: root, Recursive: true, WatchEnabled: true, UseGlobalProcessing: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir.UploadConfigs = []store.UploadProviderRoute{{
+		ProviderID: providerRecord.ID, Enabled: true, RemoteRoot: "/Archive", CollisionPolicy: "fail", IncludeTypes: []string{"video"},
+	}}
+	if _, err := st.UpdateWatchDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	batch, created, err := st.CollectUploadBatch(ctx, store.UploadCollectionInput{
+		WatchDirID: &dir.ID, SeriesKey: "show", SeriesPath: showPath, QuietPeriod: time.Millisecond,
+		Files: []store.UploadCandidate{{
+			LocalPath: mediaPath, RelativePath: filepath.ToSlash(filepath.Join("Show", "S01E01.mkv")),
+			FileType: "video", Size: info.Size(), ModifiedAt: info.ModTime(),
+		}},
+	})
+	if err != nil || !created {
+		t.Fatalf("collect batch: batch=%#v created=%v err=%v", batch, created, err)
+	}
+	if _, err := st.SealDueUploadBatches(ctx, time.Now(), time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	target, err := st.ClaimNextUploadTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewWithFactory(Options{QuietPeriod: time.Millisecond, MaxAttempts: 1}, st, slog.Default(), func(context.Context, store.UploadBatchTarget) (Provider, error) {
+		return &fakeProvider{emptyID: true}, nil
+	})
+	if err := manager.processTarget(ctx, target); err == nil || !strings.Contains(err.Error(), "empty remote file ID") {
+		t.Fatalf("process target error=%v, want empty remote ID failure", err)
+	}
+	detail, err := st.GetUploadBatchDetail(ctx, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Transfers) != 1 || detail.Transfers[0].Status != store.UploadTransferFailed || detail.Transfers[0].RemoteID != "" {
+		t.Fatalf("empty remote ID was not rejected: %#v", detail.Transfers)
 	}
 }
 

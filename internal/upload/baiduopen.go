@@ -38,7 +38,7 @@ const (
 	baiduOpenVerifyRetryDelay = 1 * time.Second
 )
 
-var errBaiduOpenRemoteFileNotVisible = errors.New("Baidu Open remote file is not visible yet")
+var errBaiduOpenFileMetadataNotVisible = errors.New("Baidu Open file metadata is not visible yet")
 
 type baiduOpenTokenState struct {
 	mu           sync.Mutex
@@ -134,6 +134,11 @@ type baiduOpenListResponse struct {
 	List []baiduOpenFileItem `json:"list"`
 }
 
+type baiduOpenFileMetasResponse struct {
+	baiduOpenAPIResponse
+	Info []baiduOpenFileItem `json:"info"`
+}
+
 type baiduOpenPrecreateResponse struct {
 	baiduOpenAPIResponse
 	UploadID   string      `json:"uploadid"`
@@ -172,11 +177,11 @@ func baiduOpenCreateResponseSummary(response *baiduOpenCreateResponse) string {
 		return "nil"
 	}
 	return fmt.Sprintf(
-		"errno=%d error_code=%d fs_id_present=%t path_present=%t",
+		"errno=%d error_code=%d fs_id=%q path=%q",
 		response.Errno,
 		response.ErrorCode,
-		baiduOpenFSID(response.FSID) != "",
-		strings.TrimSpace(response.Path) != "",
+		baiduOpenFSID(response.FSID),
+		strings.TrimSpace(response.Path),
 	)
 }
 
@@ -383,12 +388,20 @@ func (p *baiduOpenProvider) Upload(ctx context.Context, localPath, remotePath st
 			Err:       fmt.Errorf("Baidu Open create returned no fs_id (%s)", baiduOpenCreateResponseSummary(created)),
 		}
 	}
-	remote, err := p.waitForRemoteFile(ctx, parentPath, name, size, resolved.MD5)
+	createdID := baiduOpenFSID(created.FSID)
+	if strings.TrimSpace(created.Path) != "" && normalizeBaiduOpenPath(created.Path) != remotePath {
+		return RemoteFile{}, &UploadAttemptError{
+			Outcome:   intendedOutcome,
+			LocalSHA1: localSHA1,
+			Err:       fmt.Errorf("Baidu Open create returned unexpected path %q, want %q (fs_id=%s)", created.Path, remotePath, createdID),
+		}
+	}
+	remote, err := p.waitForRemoteFileByID(ctx, createdID, remotePath, size, resolved.MD5)
 	if err != nil {
 		return RemoteFile{}, &UploadAttemptError{
 			Outcome:   intendedOutcome,
 			LocalSHA1: localSHA1,
-			Err:       fmt.Errorf("verify Baidu Open upload %s: %w; precreate=%s", remotePath, err, baiduOpenPrecreateResponseSummary(precreated)),
+			Err:       fmt.Errorf("verify Baidu Open upload %s: %w; create=%s; precreate=%s", remotePath, err, baiduOpenCreateResponseSummary(created), baiduOpenPrecreateResponseSummary(precreated)),
 		}
 	}
 	remote.LocalSHA1 = localSHA1
@@ -526,6 +539,29 @@ func (p *baiduOpenProvider) listFilesPage(ctx context.Context, directoryPath str
 	query.Set("web", "1")
 	var response baiduOpenListResponse
 	if err := p.doJSONRequest(ctx, http.MethodGet, baiduOpenAPIBaseURL+"/file", query, nil, "", nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (p *baiduOpenProvider) fileMetas(ctx context.Context, fsID string) (*baiduOpenFileMetasResponse, error) {
+	fsID = strings.TrimSpace(fsID)
+	if fsID == "" {
+		return nil, errors.New("Baidu Open file metadata requires fs_id")
+	}
+	fsIDs, err := json.Marshal([]json.Number{json.Number(fsID)})
+	if err != nil {
+		return nil, fmt.Errorf("encode Baidu Open fs_id %q: %w", fsID, err)
+	}
+	query := url.Values{}
+	query.Set("method", "filemetas")
+	query.Set("fsids", string(fsIDs))
+	query.Set("dlink", "0")
+	query.Set("thumb", "0")
+	query.Set("extra", "0")
+	query.Set("needmedia", "0")
+	var response baiduOpenFileMetasResponse
+	if err := p.doJSONRequest(ctx, http.MethodGet, baiduOpenAPIBaseURL+"/multimedia", query, nil, "", nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -684,14 +720,41 @@ func (p *baiduOpenProvider) uploadChunk(ctx context.Context, remotePath, uploadI
 	return strings.ToLower(returnedMD5), nil
 }
 
-func (p *baiduOpenProvider) waitForRemoteFile(ctx context.Context, directoryPath, name string, size int64, md5Value string) (RemoteFile, error) {
+func (p *baiduOpenProvider) waitForRemoteFileByID(ctx context.Context, fsID, expectedPath string, size int64, md5Value string) (RemoteFile, error) {
+	fsID = strings.TrimSpace(fsID)
+	expectedPath = normalizeBaiduOpenPath(expectedPath)
 	for attempt := 0; attempt < baiduOpenVerifyAttempts; attempt++ {
-		entry, found, err := p.findEntry(ctx, directoryPath, name)
+		response, err := p.fileMetas(ctx, fsID)
 		if err != nil {
 			return RemoteFile{}, err
 		}
-		if found && !entry.IsDir && entry.Size == size && (strings.TrimSpace(entry.MD5) == "" || strings.EqualFold(entry.MD5, md5Value)) {
-			return RemoteFile{ID: entry.ID, Size: entry.Size}, nil
+		var item *baiduOpenFileItem
+		for index := range response.Info {
+			candidate := &response.Info[index]
+			if baiduOpenFSID(candidate.FSID) == fsID {
+				item = candidate
+				break
+			}
+		}
+		if item != nil {
+			actualPath := normalizeBaiduOpenPath(item.Path)
+			if actualPath != expectedPath {
+				return RemoteFile{}, fmt.Errorf("Baidu Open file metadata path %q does not match %q (fs_id=%s)", item.Path, expectedPath, fsID)
+			}
+			if item.IsDir != 0 {
+				return RemoteFile{}, fmt.Errorf("Baidu Open file metadata is a directory (fs_id=%s)", fsID)
+			}
+			actualSize, sizeErr := strconv.ParseInt(strings.TrimSpace(string(item.Size)), 10, 64)
+			if sizeErr != nil {
+				return RemoteFile{}, fmt.Errorf("Baidu Open file metadata returned invalid size %q (fs_id=%s)", item.Size, fsID)
+			}
+			if actualSize != size {
+				return RemoteFile{}, fmt.Errorf("Baidu Open file metadata size %d does not match %d (fs_id=%s)", actualSize, size, fsID)
+			}
+			if strings.TrimSpace(item.MD5) != "" && !strings.EqualFold(item.MD5, md5Value) {
+				return RemoteFile{}, fmt.Errorf("Baidu Open file metadata md5 %q does not match %q (fs_id=%s)", item.MD5, md5Value, fsID)
+			}
+			return RemoteFile{ID: fsID, Size: actualSize}, nil
 		}
 		if attempt+1 < baiduOpenVerifyAttempts {
 			delay := baiduOpenVerifyRetryDelay
@@ -703,7 +766,7 @@ func (p *baiduOpenProvider) waitForRemoteFile(ctx context.Context, directoryPath
 			}
 		}
 	}
-	return RemoteFile{}, fmt.Errorf("%w: %s", errBaiduOpenRemoteFileNotVisible, pathpkg.Join(directoryPath, name))
+	return RemoteFile{}, fmt.Errorf("%w: fs_id=%s path=%s", errBaiduOpenFileMetadataNotVisible, fsID, expectedPath)
 }
 
 func (p *baiduOpenProvider) doJSONRequest(ctx context.Context, method, endpoint string, query url.Values, body []byte, contentType string, headers http.Header, out any) error {

@@ -36,6 +36,16 @@ func baiduOpenJSONResponse(status int, body string) *http.Response {
 	}
 }
 
+func baiduOpenTestFileMetasResponse(req *http.Request, fsID, path string, size int64, md5Text string) (*http.Response, error) {
+	if req.URL.Query().Get("method") != "filemetas" {
+		return nil, fmt.Errorf("file metadata method = %q", req.URL.Query().Get("method"))
+	}
+	if req.URL.Query().Get("fsids") != "["+fsID+"]" {
+		return nil, fmt.Errorf("file metadata fsids = %q", req.URL.Query().Get("fsids"))
+	}
+	return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"info":[{"fs_id":%s,"path":%q,"server_filename":%q,"isdir":0,"size":%d,"md5":%q}]}`, fsID, path, filepath.Base(path), size, md5Text)), nil
+}
+
 func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
 	content := []byte("baidu-open-upload")
 	localPath := filepath.Join(t.TempDir(), "episode.mkv")
@@ -50,7 +60,6 @@ func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var requests []string
-	animeListCount := 0
 	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		mu.Lock()
 		requests = append(requests, req.URL.Path+"?"+req.URL.RawQuery)
@@ -62,11 +71,7 @@ func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
 				case "/":
 					return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
 				case "/Anime":
-					animeListCount++
-					if animeListCount == 1 {
-						return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
-					}
-					return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[{"fs_id":20,"path":"/Anime/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":`+strconv.Itoa(len(content))+`,"md5":"`+md5Text+`"}]}`), nil
+					return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
 				default:
 					return nil, fmt.Errorf("unexpected list dir %q", req.URL.Query().Get("dir"))
 				}
@@ -100,6 +105,9 @@ func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
 			default:
 				return nil, fmt.Errorf("unexpected xpan method %q", req.URL.Query().Get("method"))
 			}
+		}
+		if req.URL.Path == "/rest/2.0/xpan/multimedia" {
+			return baiduOpenTestFileMetasResponse(req, "20", "/Anime/episode.mkv", int64(len(content)), md5Text)
 		}
 		if req.URL.Path == "/rest/2.0/pcs/file" {
 			if req.URL.Query().Get("method") != "locateupload" || req.URL.Query().Get("appid") != "250528" || req.URL.Query().Get("uploadid") != "upload-1" {
@@ -168,6 +176,8 @@ func TestBaiduOpenUploadUsesOnlyReturnedBlockList(t *testing.T) {
 			default:
 				return nil, fmt.Errorf("unexpected xpan method %q", req.URL.Query().Get("method"))
 			}
+		case "/rest/2.0/xpan/multimedia":
+			return baiduOpenTestFileMetasResponse(req, "20", "/large.bin", int64(len(content)), "")
 		case "/rest/2.0/pcs/file":
 			return baiduOpenJSONResponse(http.StatusOK, `{"error_code":0,"servers":[{"server":"https://upload.example"}]}`), nil
 		case "/rest/2.0/pcs/superfile2":
@@ -218,6 +228,8 @@ func TestBaiduOpenUploadEmptyReturnedBlockListMeansBlockZero(t *testing.T) {
 			default:
 				return nil, fmt.Errorf("unexpected xpan method %q", req.URL.Query().Get("method"))
 			}
+		case "/rest/2.0/xpan/multimedia":
+			return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), md5Text)
 		case "/rest/2.0/pcs/file":
 			return baiduOpenJSONResponse(http.StatusOK, `{"error_code":0,"servers":[{"server":"https://upload.example"}]}`), nil
 		case "/rest/2.0/pcs/superfile2":
@@ -279,6 +291,8 @@ func TestBaiduOpenCollisionPolicyDoesNotRenameOnBaidu(t *testing.T) {
 					default:
 						return nil, fmt.Errorf("unexpected xpan method %q", req.URL.Query().Get("method"))
 					}
+				case "/rest/2.0/xpan/multimedia":
+					return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), "")
 				default:
 					return nil, fmt.Errorf("unexpected request path %s", req.URL.Path)
 				}
@@ -314,10 +328,7 @@ func TestBaiduOpenUploadIgnoresPrecreateReturnType(t *testing.T) {
 			switch req.URL.Query().Get("method") {
 			case "list":
 				listCalls++
-				if listCalls == 1 {
-					return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
-				}
-				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[{"fs_id":20,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":`+strconv.Itoa(len(content))+`,"md5":"`+md5Text+`"}]}`), nil
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
 			case "precreate":
 				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"uploadid":"upload-1","return_type":99,"block_list":[0]}`), nil
 			case "create":
@@ -325,6 +336,8 @@ func TestBaiduOpenUploadIgnoresPrecreateReturnType(t *testing.T) {
 			default:
 				return nil, fmt.Errorf("unexpected xpan method %q", req.URL.Query().Get("method"))
 			}
+		case "/rest/2.0/xpan/multimedia":
+			return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), md5Text)
 		case "/rest/2.0/pcs/file":
 			if req.URL.Query().Get("method") != "locateupload" {
 				return nil, fmt.Errorf("unexpected locate method %q", req.URL.Query().Get("method"))
@@ -338,7 +351,7 @@ func TestBaiduOpenUploadIgnoresPrecreateReturnType(t *testing.T) {
 	})
 
 	remote, err := provider.Upload(context.Background(), localPath, "/episode.mkv", int64(len(content)), "", "replace")
-	if err != nil || remote.ID != "20" || listCalls != 2 {
+	if err != nil || remote.ID != "20" || listCalls != 1 {
 		t.Fatalf("remote=%#v error=%v listCalls=%d, want successful upload despite return_type", remote, err, listCalls)
 	}
 }
@@ -388,6 +401,99 @@ func TestBaiduOpenUploadRejectsCreateWithoutFSID(t *testing.T) {
 	}
 }
 
+func TestBaiduOpenUploadWaitsForFileMetas(t *testing.T) {
+	content := []byte("delayed-file-metadata")
+	localPath := filepath.Join(t.TempDir(), "episode.mkv")
+	if err := os.WriteFile(localPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fullMD5 := md5.Sum(content)
+	md5Text := hex.EncodeToString(fullMD5[:])
+	provider, err := newBaiduOpenProvider("client", "secret", "access", "refresh", "2099-01-01T00:00:00Z", "", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.verifyRetryDelay = func(int) time.Duration { return 0 }
+	fileMetaCalls := 0
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/rest/2.0/xpan/file":
+			switch req.URL.Query().Get("method") {
+			case "list":
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
+			case "precreate":
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"uploadid":"upload-1","return_type":1,"block_list":[0]}`), nil
+			case "create":
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"fs_id":20,"path":"/episode.mkv"}`), nil
+			default:
+				return nil, fmt.Errorf("unexpected xpan method %q", req.URL.Query().Get("method"))
+			}
+		case "/rest/2.0/xpan/multimedia":
+			fileMetaCalls++
+			if fileMetaCalls == 1 {
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"info":[]}`), nil
+			}
+			return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), md5Text)
+		case "/rest/2.0/pcs/file":
+			return baiduOpenJSONResponse(http.StatusOK, `{"error_code":0,"servers":[{"server":"https://upload.example"}]}`), nil
+		case "/rest/2.0/pcs/superfile2":
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"md5":"`+md5Text+`"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request path %s", req.URL.Path)
+		}
+	})
+
+	remote, err := provider.Upload(context.Background(), localPath, "/episode.mkv", int64(len(content)), "", "replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.ID != "20" || fileMetaCalls != 2 {
+		t.Fatalf("remote=%#v fileMetaCalls=%d, want fs_id 20 after two metadata calls", remote, fileMetaCalls)
+	}
+}
+
+func TestBaiduOpenUploadRejectsFileMetasPathMismatch(t *testing.T) {
+	content := []byte("metadata-path-mismatch")
+	localPath := filepath.Join(t.TempDir(), "episode.mkv")
+	if err := os.WriteFile(localPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fullMD5 := md5.Sum(content)
+	md5Text := hex.EncodeToString(fullMD5[:])
+	provider, err := newBaiduOpenProvider("client", "secret", "access", "refresh", "2099-01-01T00:00:00Z", "", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/rest/2.0/xpan/file":
+			switch req.URL.Query().Get("method") {
+			case "list":
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
+			case "precreate":
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"uploadid":"upload-1","return_type":1,"block_list":[0]}`), nil
+			case "create":
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"fs_id":20}`), nil
+			default:
+				return nil, fmt.Errorf("unexpected xpan method %q", req.URL.Query().Get("method"))
+			}
+		case "/rest/2.0/xpan/multimedia":
+			return baiduOpenTestFileMetasResponse(req, "20", "/episode (1).mkv", int64(len(content)), md5Text)
+		case "/rest/2.0/pcs/file":
+			return baiduOpenJSONResponse(http.StatusOK, `{"error_code":0,"servers":[{"server":"https://upload.example"}]}`), nil
+		case "/rest/2.0/pcs/superfile2":
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"md5":"`+md5Text+`"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request path %s", req.URL.Path)
+		}
+	})
+
+	_, err = provider.Upload(context.Background(), localPath, "/episode.mkv", int64(len(content)), "", "replace")
+	if err == nil || !strings.Contains(err.Error(), "metadata path") {
+		t.Fatalf("error = %v, want metadata path mismatch", err)
+	}
+}
+
 func TestBaiduOpenRapidUploadVerifiesRemoteFile(t *testing.T) {
 	content := []byte("rapid-upload")
 	localPath := filepath.Join(t.TempDir(), "episode.mkv")
@@ -418,6 +524,8 @@ func TestBaiduOpenRapidUploadVerifiesRemoteFile(t *testing.T) {
 			default:
 				return nil, fmt.Errorf("unexpected xpan method %q", req.URL.Query().Get("method"))
 			}
+		case "/rest/2.0/xpan/multimedia":
+			return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), md5Text)
 		case "/rest/2.0/pcs/file":
 			return baiduOpenJSONResponse(http.StatusOK, `{"error_code":0,"servers":[{"server":"https://upload.example"}]}`), nil
 		case "/rest/2.0/pcs/superfile2":
@@ -434,8 +542,8 @@ func TestBaiduOpenRapidUploadVerifiesRemoteFile(t *testing.T) {
 	if remote.ID != "20" || remote.Size != int64(len(content)) || remote.Outcome != store.UploadOutcomeCreated {
 		t.Fatalf("remote = %#v", remote)
 	}
-	if listCalls != 2 {
-		t.Fatalf("list calls = %d, want initial collision check and remote verification", listCalls)
+	if listCalls != 1 {
+		t.Fatalf("list calls = %d, want only initial collision check", listCalls)
 	}
 }
 
@@ -497,7 +605,7 @@ func TestBaiduOpenRefreshesExpiredTokenOnce(t *testing.T) {
 	}
 }
 
-func TestBaiduOpenWaitForRemoteFileHonorsCancellation(t *testing.T) {
+func TestBaiduOpenWaitForFileMetasHonorsCancellation(t *testing.T) {
 	provider, err := newBaiduOpenProvider("client", "secret", "access", "refresh", "2099-01-01T00:00:00Z", "", 0, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -508,7 +616,7 @@ func TestBaiduOpenWaitForRemoteFileHonorsCancellation(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = provider.waitForRemoteFile(ctx, "/", "missing.mkv", 1, "missing")
+	_, err = provider.waitForRemoteFileByID(ctx, "20", "/missing.mkv", 1, "missing")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
 	}

@@ -46,6 +46,85 @@ func baiduOpenTestFileMetasResponse(req *http.Request, fsID, path string, size i
 	return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"list":[{"fs_id":%s,"path":%q,"server_filename":%q,"isdir":0,"size":%d,"md5":%q}]}`, fsID, path, filepath.Base(path), size, md5Text)), nil
 }
 
+func TestDecodeBaiduOpenMD5(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "normal", raw: "0123456789ABCDEF0123456789abcdef", want: "0123456789abcdef0123456789abcdef"},
+		{name: "encoded", raw: "38f426b7cnc43db126bb9b51eb8343d3", want: "4e6ff05e39d763d062288e3c2798de36"},
+		{name: "encoded upload metadata", raw: "ae5d6f9ffs7ffd0382e8767719287020", want: "75d430ecaf7e2af89083bdcf83cb3310"},
+		{name: "invalid", raw: "0123456789zzzz0123456789abcdef", want: "0123456789zzzz0123456789abcdef"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := decodeBaiduOpenMD5(test.raw); got != test.want {
+				t.Fatalf("decodeBaiduOpenMD5(%q) = %q, want %q", test.raw, got, test.want)
+			}
+		})
+	}
+}
+
+func TestBaiduOpenListDecodesMD5(t *testing.T) {
+	provider, err := newBaiduOpenProvider("client", "secret", "access", "refresh", "2099-01-01T00:00:00Z", "", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("method") != "list" {
+			return nil, fmt.Errorf("list method = %q", req.URL.Query().Get("method"))
+		}
+		return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[{"fs_id":20,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":1,"md5":"38f426b7cnc43db126bb9b51eb8343d3"}]}`), nil
+	})
+
+	response, err := provider.listFilesPage(context.Background(), "/", 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.List) != 1 || response.List[0].MD5 != "4e6ff05e39d763d062288e3c2798de36" {
+		t.Fatalf("file list = %#v", response.List)
+	}
+}
+
+func TestBaiduOpenFileMetasDecodesMD5(t *testing.T) {
+	provider, err := newBaiduOpenProvider("client", "secret", "access", "refresh", "2099-01-01T00:00:00Z", "", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", 1, "38f426b7cnc43db126bb9b51eb8343d3")
+	})
+
+	response, err := provider.fileMetas(context.Background(), "20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.List) != 1 || response.List[0].MD5 != "4e6ff05e39d763d062288e3c2798de36" {
+		t.Fatalf("file metadata = %#v", response.List)
+	}
+}
+
+func TestBaiduOpenFileMetasUsesSingleBlockMD5(t *testing.T) {
+	provider, err := newBaiduOpenProvider("client", "secret", "access", "refresh", "2099-01-01T00:00:00Z", "", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("method") != "filemetas" {
+			return nil, fmt.Errorf("file metadata method = %q", req.URL.Query().Get("method"))
+		}
+		return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[{"fs_id":20,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":1,"md5":"not-the-block-md5","block_list":["38f426b7cnc43db126bb9b51eb8343d3"]}]}`), nil
+	})
+
+	response, err := provider.fileMetas(context.Background(), "20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.List) != 1 || response.List[0].MD5 != "4e6ff05e39d763d062288e3c2798de36" {
+		t.Fatalf("file metadata = %#v", response.List)
+	}
+}
+
 func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
 	content := []byte("baidu-open-upload")
 	localPath := filepath.Join(t.TempDir(), "episode.mkv")
@@ -104,6 +183,9 @@ func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
 				}
 				if values.Get("rtype") != "3" || values.Get("ondup") != "" {
 					return nil, fmt.Errorf("precreate collision fields = rtype=%q ondup=%q", values.Get("rtype"), values.Get("ondup"))
+				}
+				if values.Get("content-md5") != md5Text || values.Get("slice-md5") != md5Text {
+					return nil, fmt.Errorf("precreate md5 fields = content-md5=%q slice-md5=%q", values.Get("content-md5"), values.Get("slice-md5"))
 				}
 				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"uploadid":"upload-1","return_type":1,"block_list":[0]}`), nil
 			default:
@@ -560,7 +642,7 @@ func TestBaiduOpenRapidUploadVerifiesRemoteFile(t *testing.T) {
 				}
 				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[{"fs_id":20,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":`+strconv.Itoa(len(content))+`,"md5":"`+md5Text+`"}]}`), nil
 			case "precreate":
-				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"uploadid":"upload-1","return_type":2,"block_list":[]}`), nil
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"uploadid":"upload-1","return_type":2,"block_list":[],"info":{"fs_id":20,"path":"/episode.mkv","size":12,"isdir":0}}`), nil
 			case "create":
 				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"fs_id":20,"path":"/episode.mkv"}`), nil
 			default:

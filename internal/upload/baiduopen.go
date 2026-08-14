@@ -62,11 +62,12 @@ func (state *baiduOpenTokenState) snapshot() (accessToken, refreshToken, expires
 }
 
 type baiduOpenProvider struct {
-	clientID     string
-	clientSecret string
-	userAgent    string
-	httpClient   *http.Client
-	tokens       *baiduOpenTokenState
+	clientID         string
+	clientSecret     string
+	userAgent        string
+	httpClient       *http.Client
+	tokens           *baiduOpenTokenState
+	progressReporter func(int64)
 
 	onTokenRefreshed func(accessToken, refreshToken, expiresAt string)
 
@@ -75,6 +76,26 @@ type baiduOpenProvider struct {
 	lastRequest     time.Time
 
 	verifyRetryDelay func(int) time.Duration
+}
+
+type baiduOpenRequestBodyFactory func() (io.ReadCloser, int64)
+
+type baiduOpenProgressReader struct {
+	reader      io.Reader
+	offset      int64
+	transferred int64
+	report      func(int64)
+}
+
+func (reader *baiduOpenProgressReader) Read(buffer []byte) (int, error) {
+	read, err := reader.reader.Read(buffer)
+	if read > 0 {
+		reader.transferred += int64(read)
+		if reader.report != nil {
+			reader.report(reader.offset + reader.transferred)
+		}
+	}
+	return read, err
 }
 
 type baiduOpenEntry struct {
@@ -232,6 +253,10 @@ func (p *baiduOpenProvider) Check(ctx context.Context) error {
 		return fmt.Errorf("check Baidu Open account: %w", err)
 	}
 	return nil
+}
+
+func (p *baiduOpenProvider) setProgressReporter(reporter func(int64)) {
+	p.progressReporter = reporter
 }
 
 func (p *baiduOpenProvider) List(ctx context.Context, remotePath string) ([]RemoteEntry, error) {
@@ -651,32 +676,34 @@ func (p *baiduOpenProvider) locateUpload(ctx context.Context, remotePath, upload
 	return "", errors.New("Baidu Open locate upload returned no HTTPS upload server")
 }
 
-func (p *baiduOpenProvider) uploadChunk(ctx context.Context, remotePath, uploadID string, part int, file *os.File, digest *baiduOpenDigest, serverURL string) (string, error) {
-	if _, err := file.Seek(int64(part)*baiduOpenChunkSize, io.SeekStart); err != nil {
-		return "", err
+func baiduOpenMultipartEnvelope(filename string) (prefix, suffix []byte, contentType string, err error) {
+	var envelope bytes.Buffer
+	multipartWriter := multipart.NewWriter(&envelope)
+	if _, err := multipartWriter.CreateFormFile("file", filename); err != nil {
+		return nil, nil, "", err
 	}
+	prefixLength := envelope.Len()
+	if err := multipartWriter.Close(); err != nil {
+		return nil, nil, "", err
+	}
+	envelopeBytes := envelope.Bytes()
+	prefix = append([]byte(nil), envelopeBytes[:prefixLength]...)
+	suffix = append([]byte(nil), envelopeBytes[prefixLength:]...)
+	return prefix, suffix, multipartWriter.FormDataContentType(), nil
+}
+
+func (p *baiduOpenProvider) uploadChunk(ctx context.Context, remotePath, uploadID string, part int, file *os.File, digest *baiduOpenDigest, serverURL string) (string, error) {
+	partOffset := int64(part) * baiduOpenChunkSize
 	partSize := int64(baiduOpenChunkSize)
-	remaining := digest.Size - int64(part)*baiduOpenChunkSize
+	remaining := digest.Size - partOffset
 	if remaining < partSize {
 		partSize = remaining
 	}
 	if partSize <= 0 {
 		return "", fmt.Errorf("invalid Baidu Open block size for block %d", part)
 	}
-	partData := make([]byte, partSize)
-	if _, err := io.ReadFull(file, partData); err != nil {
-		return "", err
-	}
-	var body bytes.Buffer
-	multipartWriter := multipart.NewWriter(&body)
-	partWriter, err := multipartWriter.CreateFormFile("file", pathpkg.Base(remotePath))
+	prefix, suffix, contentType, err := baiduOpenMultipartEnvelope(pathpkg.Base(remotePath))
 	if err != nil {
-		return "", err
-	}
-	if _, err := partWriter.Write(partData); err != nil {
-		return "", err
-	}
-	if err := multipartWriter.Close(); err != nil {
 		return "", err
 	}
 	query := url.Values{}
@@ -688,8 +715,22 @@ func (p *baiduOpenProvider) uploadChunk(ctx context.Context, remotePath, uploadI
 	if strings.TrimSpace(serverURL) == "" {
 		return "", errors.New("Baidu Open upload server is required")
 	}
+	reporter := p.progressReporter
+	bodyFactory := func() (io.ReadCloser, int64) {
+		if reporter != nil {
+			reporter(partOffset)
+		}
+		payload := &baiduOpenProgressReader{
+			reader: io.NewSectionReader(file, partOffset, partSize),
+			offset: partOffset,
+			report: reporter,
+		}
+		body := io.MultiReader(bytes.NewReader(prefix), payload, bytes.NewReader(suffix))
+		bodyLength := int64(len(prefix)) + partSize + int64(len(suffix))
+		return io.NopCloser(body), bodyLength
+	}
 	var response baiduOpenUploadResponse
-	if err := p.doJSONRequest(ctx, http.MethodPost, strings.TrimSpace(serverURL), query, body.Bytes(), multipartWriter.FormDataContentType(), nil, &response); err != nil {
+	if err := p.doJSONRequestWithBodyFactory(ctx, http.MethodPost, strings.TrimSpace(serverURL), query, bodyFactory, contentType, nil, &response); err != nil {
 		return "", err
 	}
 	returnedMD5 := strings.TrimSpace(response.MD5)
@@ -750,10 +791,23 @@ func (p *baiduOpenProvider) waitForRemoteFileByID(ctx context.Context, fsID, exp
 }
 
 func (p *baiduOpenProvider) doJSONRequest(ctx context.Context, method, endpoint string, query url.Values, body []byte, contentType string, headers http.Header, out any) error {
-	return p.doJSONRequestAttempt(ctx, method, endpoint, query, body, contentType, headers, out, false, 0)
+	return p.doJSONRequestWithBodyFactory(ctx, method, endpoint, query, baiduOpenBytesBodyFactory(body), contentType, headers, out)
 }
 
-func (p *baiduOpenProvider) doJSONRequestAttempt(ctx context.Context, method, endpoint string, query url.Values, body []byte, contentType string, headers http.Header, out any, authRetried bool, attempt int) error {
+func baiduOpenBytesBodyFactory(body []byte) baiduOpenRequestBodyFactory {
+	if body == nil {
+		return nil
+	}
+	return func() (io.ReadCloser, int64) {
+		return io.NopCloser(bytes.NewReader(body)), int64(len(body))
+	}
+}
+
+func (p *baiduOpenProvider) doJSONRequestWithBodyFactory(ctx context.Context, method, endpoint string, query url.Values, bodyFactory baiduOpenRequestBodyFactory, contentType string, headers http.Header, out any) error {
+	return p.doJSONRequestAttempt(ctx, method, endpoint, query, bodyFactory, contentType, headers, out, false, 0)
+}
+
+func (p *baiduOpenProvider) doJSONRequestAttempt(ctx context.Context, method, endpoint string, query url.Values, bodyFactory baiduOpenRequestBodyFactory, contentType string, headers http.Header, out any, authRetried bool, attempt int) error {
 	accessToken, err := p.ensureAccessToken(ctx)
 	if err != nil {
 		return err
@@ -765,13 +819,17 @@ func (p *baiduOpenProvider) doJSONRequestAttempt(ctx context.Context, method, en
 	requestQuery := cloneBaiduOpenValues(query)
 	requestQuery.Set("access_token", accessToken)
 	parsed.RawQuery = requestQuery.Encode()
-	requestBody := io.Reader(nil)
-	if body != nil {
-		requestBody = bytes.NewReader(body)
+	var requestBody io.ReadCloser
+	var contentLength int64
+	if bodyFactory != nil {
+		requestBody, contentLength = bodyFactory()
 	}
 	req, err := http.NewRequestWithContext(ctx, method, parsed.String(), requestBody)
 	if err != nil {
 		return err
+	}
+	if bodyFactory != nil {
+		req.ContentLength = contentLength
 	}
 	userAgent := p.userAgent
 	if userAgent == "" {
@@ -795,7 +853,7 @@ func (p *baiduOpenProvider) doJSONRequestAttempt(ctx context.Context, method, en
 			if err := waitBaiduOpen(ctx, baiduOpenRetryDelay*time.Duration(1<<attempt)); err != nil {
 				return err
 			}
-			return p.doJSONRequestAttempt(ctx, method, endpoint, query, body, contentType, headers, out, authRetried, attempt+1)
+			return p.doJSONRequestAttempt(ctx, method, endpoint, query, bodyFactory, contentType, headers, out, authRetried, attempt+1)
 		}
 		return fmt.Errorf("Baidu Open request failed: %w", err)
 	}
@@ -812,13 +870,13 @@ func (p *baiduOpenProvider) doJSONRequestAttempt(ctx context.Context, method, en
 		if err := p.refreshAccessToken(ctx, accessToken, true); err != nil {
 			return err
 		}
-		return p.doJSONRequestAttempt(ctx, method, endpoint, query, body, contentType, headers, out, true, 0)
+		return p.doJSONRequestAttempt(ctx, method, endpoint, query, bodyFactory, contentType, headers, out, true, 0)
 	}
 	if attempt+1 < baiduOpenMaxAttempts && isRetryableBaiduOpenResponse(resp.StatusCode, code, message) {
 		if err := waitBaiduOpen(ctx, baiduOpenRetryDelay*time.Duration(1<<attempt)); err != nil {
 			return err
 		}
-		return p.doJSONRequestAttempt(ctx, method, endpoint, query, body, contentType, headers, out, authRetried, attempt+1)
+		return p.doJSONRequestAttempt(ctx, method, endpoint, query, bodyFactory, contentType, headers, out, authRetried, attempt+1)
 	}
 	if decodeErr != nil {
 		return fmt.Errorf("decode Baidu Open response status=%d: %w", resp.StatusCode, decodeErr)

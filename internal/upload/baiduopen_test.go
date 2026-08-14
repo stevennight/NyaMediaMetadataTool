@@ -58,6 +58,10 @@ func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var progress []int64
+	provider.setProgressReporter(func(bytesTransferred int64) {
+		progress = append(progress, bytesTransferred)
+	})
 	var mu sync.Mutex
 	var requests []string
 	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -119,6 +123,13 @@ func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
 			if req.URL.Query().Get("method") != "upload" || req.URL.Query().Get("partseq") != "0" || req.URL.Query().Get("uploadid") != "upload-1" {
 				return nil, fmt.Errorf("upload query = %s", req.URL.RawQuery)
 			}
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				return nil, fmt.Errorf("read upload body: %w", err)
+			}
+			if !strings.Contains(string(body), string(content)) {
+				return nil, fmt.Errorf("upload body did not contain file content")
+			}
 			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"md5":"`+md5Text+`"}`), nil
 		}
 		return nil, fmt.Errorf("unexpected request path %s", req.URL.Path)
@@ -133,6 +144,14 @@ func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
 	}
 	if len(requests) != 8 {
 		t.Fatalf("requests = %d (%v)", len(requests), requests)
+	}
+	if len(progress) < 2 || progress[0] != 0 || progress[len(progress)-1] != int64(len(content)) {
+		t.Fatalf("progress = %v, want start at 0 and finish at %d", progress, len(content))
+	}
+	for index := 1; index < len(progress); index++ {
+		if progress[index] < progress[index-1] {
+			t.Fatalf("progress regressed: %v", progress)
+		}
 	}
 }
 

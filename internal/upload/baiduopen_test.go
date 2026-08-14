@@ -494,6 +494,39 @@ func TestBaiduOpenUploadRejectsFileMetasPathMismatch(t *testing.T) {
 	}
 }
 
+func TestBaiduOpenVerificationHandlesInvalidFileMetadataMD5(t *testing.T) {
+	content := []byte("metadata-md5")
+	for _, test := range []struct {
+		name      string
+		remoteMD5 string
+		wantError bool
+	}{
+		{name: "invalid remote md5", remoteMD5: "ae5d6f9ffs7ffd0382e8767719287020"},
+		{name: "valid mismatched remote md5", remoteMD5: "0123456789abcdef0123456789abcdef", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider, err := newBaiduOpenProvider("client", "secret", "access", "refresh", "2099-01-01T00:00:00Z", "", 0, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), test.remoteMD5)
+			})
+
+			remote, err := provider.waitForRemoteFileByID(context.Background(), "20", "/episode.mkv", int64(len(content)), "75d430ecaf7e2af89083bdcf83cb3310")
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "metadata md5") {
+					t.Fatalf("error = %v, want metadata md5 mismatch", err)
+				}
+				return
+			}
+			if err != nil || remote.ID != "20" {
+				t.Fatalf("remote=%#v error=%v, want verification success", remote, err)
+			}
+		})
+	}
+}
+
 func TestBaiduOpenRapidUploadVerifiesRemoteFile(t *testing.T) {
 	content := []byte("rapid-upload")
 	localPath := filepath.Join(t.TempDir(), "episode.mkv")

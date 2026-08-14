@@ -494,32 +494,22 @@ func TestBaiduOpenUploadRejectsFileMetasPathMismatch(t *testing.T) {
 	}
 }
 
-func TestBaiduOpenVerificationHandlesInvalidFileMetadataMD5(t *testing.T) {
+func TestBaiduOpenVerificationDoesNotUseFileMetadataMD5(t *testing.T) {
 	content := []byte("metadata-md5")
-	for _, test := range []struct {
-		name      string
-		remoteMD5 string
-		wantError bool
-	}{
-		{name: "invalid remote md5", remoteMD5: "ae5d6f9ffs7ffd0382e8767719287020"},
-		{name: "valid mismatched remote md5", remoteMD5: "0123456789abcdef0123456789abcdef", wantError: true},
+	for _, remoteMD5 := range []string{
+		"ae5d6f9ffs7ffd0382e8767719287020",
+		"0123456789abcdef0123456789abcdef",
 	} {
-		t.Run(test.name, func(t *testing.T) {
+		t.Run(remoteMD5, func(t *testing.T) {
 			provider, err := newBaiduOpenProvider("client", "secret", "access", "refresh", "2099-01-01T00:00:00Z", "", 0, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), test.remoteMD5)
+				return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), remoteMD5)
 			})
 
-			remote, err := provider.waitForRemoteFileByID(context.Background(), "20", "/episode.mkv", int64(len(content)), "75d430ecaf7e2af89083bdcf83cb3310")
-			if test.wantError {
-				if err == nil || !strings.Contains(err.Error(), "metadata md5") {
-					t.Fatalf("error = %v, want metadata md5 mismatch", err)
-				}
-				return
-			}
+			remote, err := provider.waitForRemoteFileByID(context.Background(), "20", "/episode.mkv", int64(len(content)))
 			if err != nil || remote.ID != "20" {
 				t.Fatalf("remote=%#v error=%v, want verification success", remote, err)
 			}
@@ -580,13 +570,12 @@ func TestBaiduOpenRapidUploadVerifiesRemoteFile(t *testing.T) {
 	}
 }
 
-func TestBaiduOpenIdenticalFileDoesNotUploadAgain(t *testing.T) {
+func TestBaiduOpenExistingFileUsesCollisionPolicyWithoutMD5(t *testing.T) {
 	content := []byte("already-on-baidu")
 	localPath := filepath.Join(t.TempDir(), "episode.mkv")
 	if err := os.WriteFile(localPath, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fullMD5 := md5.Sum(content)
 	provider, err := newBaiduOpenProvider("client", "secret", "access", "refresh", "2099-01-01T00:00:00Z", "", 0, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -597,14 +586,14 @@ func TestBaiduOpenIdenticalFileDoesNotUploadAgain(t *testing.T) {
 		if req.URL.Query().Get("method") != "list" || req.URL.Query().Get("dir") != "/" {
 			return nil, fmt.Errorf("unexpected request %s", req.URL.String())
 		}
-		return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"list":[{"fs_id":9,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":%d,"md5":"%s"}]}`, len(content), hex.EncodeToString(fullMD5[:]))), nil
+		return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"list":[{"fs_id":9,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":%d}]}`, len(content))), nil
 	})
 
-	remote, err := provider.Upload(context.Background(), localPath, "/episode.mkv", int64(len(content)), "", "replace")
+	remote, err := provider.Upload(context.Background(), localPath, "/episode.mkv", int64(len(content)), "", "skip")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remote.ID != "9" || remote.Outcome != "unchanged" || requestCount != 1 {
+	if remote.ID != "9" || remote.Outcome != "skipped" || requestCount != 1 {
 		t.Fatalf("remote = %#v, requests = %d", remote, requestCount)
 	}
 }
@@ -649,7 +638,7 @@ func TestBaiduOpenWaitForFileMetasHonorsCancellation(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = provider.waitForRemoteFileByID(ctx, "20", "/missing.mkv", 1, "missing")
+	_, err = provider.waitForRemoteFileByID(ctx, "20", "/missing.mkv", 1)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
 	}

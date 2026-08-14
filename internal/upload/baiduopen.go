@@ -83,7 +83,6 @@ type baiduOpenEntry struct {
 	Path     string
 	IsDir    bool
 	Size     int64
-	MD5      string
 	Category int
 }
 
@@ -125,7 +124,6 @@ type baiduOpenFileItem struct {
 	Size           json.Number `json:"size"`
 	IsDir          int         `json:"isdir"`
 	ServerMTime    int64       `json:"server_mtime"`
-	MD5            string      `json:"md5"`
 	Category       int         `json:"category"`
 }
 
@@ -155,15 +153,6 @@ type baiduOpenCreateResponse struct {
 
 func baiduOpenFSID(value json.Number) string {
 	return strings.TrimSpace(string(value))
-}
-
-func baiduOpenMD5IsValid(value string) bool {
-	value = strings.TrimSpace(value)
-	if len(value) != md5.Size*2 {
-		return false
-	}
-	_, err := hex.DecodeString(value)
-	return err == nil
 }
 
 func baiduOpenPrecreateResponseSummary(response *baiduOpenPrecreateResponse) string {
@@ -216,7 +205,6 @@ func baiduOpenRTypes(collisionPolicy string) (precreateRType, createRType string
 type baiduOpenDigest struct {
 	Size      int64
 	SHA1      string
-	MD5       string
 	ChunkMD5s []string
 }
 
@@ -320,15 +308,6 @@ func (p *baiduOpenProvider) Upload(ctx context.Context, localPath, remotePath st
 		if existing.IsDir {
 			return RemoteFile{}, fmt.Errorf("Baidu Open target path is a directory: %s", remotePath)
 		}
-		if existing.Size == size {
-			resolved, digestErr := ensureDigest()
-			if digestErr != nil {
-				return RemoteFile{}, fmt.Errorf("hash local file for collision check: %w", digestErr)
-			}
-			if baiduOpenMD5IsValid(existing.MD5) && strings.EqualFold(existing.MD5, resolved.MD5) {
-				return RemoteFile{ID: existing.ID, Size: existing.Size, SHA1: localSHA1, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeUnchanged}, nil
-			}
-		}
 		switch collisionPolicy {
 		case "skip":
 			return RemoteFile{ID: existing.ID, Size: existing.Size, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeSkipped}, nil
@@ -405,7 +384,7 @@ func (p *baiduOpenProvider) Upload(ctx context.Context, localPath, remotePath st
 			Err:       fmt.Errorf("Baidu Open create returned unexpected path %q, want %q (fs_id=%s)", created.Path, remotePath, createdID),
 		}
 	}
-	remote, err := p.waitForRemoteFileByID(ctx, createdID, remotePath, size, resolved.MD5)
+	remote, err := p.waitForRemoteFileByID(ctx, createdID, remotePath, size)
 	if err != nil {
 		return RemoteFile{}, &UploadAttemptError{
 			Outcome:   intendedOutcome,
@@ -423,7 +402,6 @@ func calculateBaiduOpenDigest(ctx context.Context, file *os.File) (*baiduOpenDig
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	fullMD5 := md5.New()
 	fullSHA1 := sha1.New()
 	chunkMD5s := make([]string, 0)
 	buffer := make([]byte, baiduOpenChunkSize)
@@ -448,9 +426,6 @@ func calculateBaiduOpenDigest(ctx context.Context, file *os.File) (*baiduOpenDig
 		part := buffer[:read]
 		partHash := md5.Sum(part)
 		chunkMD5s = append(chunkMD5s, hex.EncodeToString(partHash[:]))
-		if _, err := fullMD5.Write(part); err != nil {
-			return nil, err
-		}
 		if _, err := fullSHA1.Write(part); err != nil {
 			return nil, err
 		}
@@ -462,7 +437,6 @@ func calculateBaiduOpenDigest(ctx context.Context, file *os.File) (*baiduOpenDig
 	return &baiduOpenDigest{
 		Size:      size,
 		SHA1:      strings.ToUpper(hex.EncodeToString(fullSHA1.Sum(nil))),
-		MD5:       hex.EncodeToString(fullMD5.Sum(nil)),
 		ChunkMD5s: chunkMD5s,
 	}, nil
 }
@@ -729,7 +703,7 @@ func (p *baiduOpenProvider) uploadChunk(ctx context.Context, remotePath, uploadI
 	return strings.ToLower(returnedMD5), nil
 }
 
-func (p *baiduOpenProvider) waitForRemoteFileByID(ctx context.Context, fsID, expectedPath string, size int64, md5Value string) (RemoteFile, error) {
+func (p *baiduOpenProvider) waitForRemoteFileByID(ctx context.Context, fsID, expectedPath string, size int64) (RemoteFile, error) {
 	fsID = strings.TrimSpace(fsID)
 	expectedPath = normalizeBaiduOpenPath(expectedPath)
 	for attempt := 0; attempt < baiduOpenVerifyAttempts; attempt++ {
@@ -759,9 +733,6 @@ func (p *baiduOpenProvider) waitForRemoteFileByID(ctx context.Context, fsID, exp
 			}
 			if actualSize != size {
 				return RemoteFile{}, fmt.Errorf("Baidu Open file metadata size %d does not match %d (fs_id=%s)", actualSize, size, fsID)
-			}
-			if baiduOpenMD5IsValid(item.MD5) && strings.TrimSpace(md5Value) != "" && !strings.EqualFold(item.MD5, md5Value) {
-				return RemoteFile{}, fmt.Errorf("Baidu Open file metadata md5 %q does not match %q (fs_id=%s)", item.MD5, md5Value, fsID)
 			}
 			return RemoteFile{ID: fsID, Size: actualSize}, nil
 		}
@@ -1094,7 +1065,6 @@ func baiduOpenEntryFromFileItem(parentPath string, item baiduOpenFileItem) baidu
 		Path:     itemPath,
 		IsDir:    item.IsDir != 0,
 		Size:     parseBaiduOpenInt64(string(item.Size)),
-		MD5:      strings.TrimSpace(item.MD5),
 		Category: item.Category,
 	}
 }

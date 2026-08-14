@@ -136,7 +136,7 @@ type baiduOpenListResponse struct {
 
 type baiduOpenFileMetasResponse struct {
 	baiduOpenAPIResponse
-	Info []baiduOpenFileItem `json:"info"`
+	List []baiduOpenFileItem `json:"list"`
 }
 
 type baiduOpenPrecreateResponse struct {
@@ -729,8 +729,8 @@ func (p *baiduOpenProvider) waitForRemoteFileByID(ctx context.Context, fsID, exp
 			return RemoteFile{}, err
 		}
 		var item *baiduOpenFileItem
-		for index := range response.Info {
-			candidate := &response.Info[index]
+		for index := range response.List {
+			candidate := &response.List[index]
 			if baiduOpenFSID(candidate.FSID) == fsID {
 				item = candidate
 				break

@@ -43,7 +43,7 @@ func baiduOpenTestFileMetasResponse(req *http.Request, fsID, path string, size i
 	if req.URL.Query().Get("fsids") != "["+fsID+"]" {
 		return nil, fmt.Errorf("file metadata fsids = %q", req.URL.Query().Get("fsids"))
 	}
-	return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"info":[{"fs_id":%s,"path":%q,"server_filename":%q,"isdir":0,"size":%d,"md5":%q}]}`, fsID, path, filepath.Base(path), size, md5Text)), nil
+	return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"list":[{"fs_id":%s,"path":%q,"server_filename":%q,"isdir":0,"size":%d,"md5":%q}]}`, fsID, path, filepath.Base(path), size, md5Text)), nil
 }
 
 func TestBaiduOpenUploadCreatesDirectoryUploadsAndVerifies(t *testing.T) {
@@ -431,7 +431,7 @@ func TestBaiduOpenUploadWaitsForFileMetas(t *testing.T) {
 		case "/rest/2.0/xpan/multimedia":
 			fileMetaCalls++
 			if fileMetaCalls == 1 {
-				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"info":[]}`), nil
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
 			}
 			return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), md5Text)
 		case "/rest/2.0/pcs/file":

@@ -514,7 +514,7 @@ func (p *baiduOpenProvider) Upload(ctx context.Context, localPath, remotePath st
 			Err:       fmt.Errorf("Baidu Open create returned unexpected path %q, want %q (fs_id=%s)", created.Path, remotePath, createdID),
 		}
 	}
-	remote, err := p.waitForRemoteFileByID(ctx, createdID, remotePath, size)
+	remote, err := p.waitForRemoteFileByID(ctx, createdID, remotePath, size, resolved.MD5)
 	if err != nil {
 		return RemoteFile{}, &UploadAttemptError{
 			Outcome:   intendedOutcome,

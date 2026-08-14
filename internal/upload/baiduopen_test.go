@@ -595,22 +595,50 @@ func TestBaiduOpenUploadRejectsFileMetasPathMismatch(t *testing.T) {
 	}
 }
 
-func TestBaiduOpenVerificationDoesNotUseFileMetadataMD5(t *testing.T) {
+func TestBaiduOpenVerificationUsesDecodedFileMetadataMD5(t *testing.T) {
 	content := []byte("metadata-md5")
-	for _, remoteMD5 := range []string{
-		"ae5d6f9ffs7ffd0382e8767719287020",
-		"0123456789abcdef0123456789abcdef",
-	} {
-		t.Run(remoteMD5, func(t *testing.T) {
+	fullMD5 := md5.Sum(content)
+	localMD5 := hex.EncodeToString(fullMD5[:])
+	tests := []struct {
+		name        string
+		remoteMD5   string
+		expectedMD5 string
+		wantError   bool
+	}{
+		{
+			name:        "encoded",
+			remoteMD5:   "ae5d6f9ffs7ffd0382e8767719287020",
+			expectedMD5: "75d430ecaf7e2af89083bdcf83cb3310",
+		},
+		{
+			name:        "plain",
+			remoteMD5:   localMD5,
+			expectedMD5: localMD5,
+		},
+		{
+			name:        "mismatch",
+			remoteMD5:   localMD5,
+			expectedMD5: strings.Repeat("0", md5.Size*2),
+			wantError:   true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
 			provider, err := newBaiduOpenProvider("client", "secret", "access", "refresh", "2099-01-01T00:00:00Z", "", 0, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), remoteMD5)
+				return baiduOpenTestFileMetasResponse(req, "20", "/episode.mkv", int64(len(content)), test.remoteMD5)
 			})
 
-			remote, err := provider.waitForRemoteFileByID(context.Background(), "20", "/episode.mkv", int64(len(content)))
+			remote, err := provider.waitForRemoteFileByID(context.Background(), "20", "/episode.mkv", int64(len(content)), test.expectedMD5)
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "metadata md5") {
+					t.Fatalf("remote=%#v error=%v, want metadata md5 mismatch", remote, err)
+				}
+				return
+			}
 			if err != nil || remote.ID != "20" {
 				t.Fatalf("remote=%#v error=%v, want verification success", remote, err)
 			}

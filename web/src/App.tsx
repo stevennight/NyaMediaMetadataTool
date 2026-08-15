@@ -334,6 +334,7 @@ type UploadBatchTarget = {
   providerType: string;
   remoteRoot: string;
   retryable: boolean;
+  notificationTemplateId?: number;
   status: string;
   attempts: number;
   errorSummary: string;
@@ -1102,6 +1103,45 @@ function uploadBatchNotificationSummary(batch: UploadBatch) {
   if (batch.pendingNotifications > 0) return { className: 'pill pending', label: '发送中' };
   if (batch.deliveredNotifications === batch.notificationCount) return { className: 'pill ok', label: '已送达' };
   return { className: 'pill pending', label: '待处理' };
+}
+
+function uploadBatchNotificationDetailSummary(detail: UploadBatchDetail) {
+  const notifications = detail.notifications ?? [];
+  if (notifications.length > 0) {
+    return {
+      label: `${notifications.length} 条记录`,
+      emptyMessage: ''
+    };
+  }
+
+  const configuredTargets = detail.targets.filter((target) => (target.notificationTemplateId ?? 0) > 0);
+  if (configuredTargets.length === 0) {
+    return {
+      label: '未配置通知',
+      emptyMessage: '该上传目标没有配置通知模板。'
+    };
+  }
+
+  const waitingTargets = configuredTargets.some((target) => ['waiting', 'pending', 'running'].includes(target.status));
+  if (waitingTargets) {
+    return {
+      label: '已配置，等待上传完成',
+      emptyMessage: '通知将在上传目标完成且检测到远端变化后生成。'
+    };
+  }
+
+  const allConfiguredTargetsCompleted = configuredTargets.every((target) => target.status === 'completed');
+  if (allConfiguredTargetsCompleted) {
+    return {
+      label: '本次无需发送',
+      emptyMessage: '上传已完成，但没有检测到需要通知的远端变化。'
+    };
+  }
+
+  return {
+    label: '已配置，尚未生成记录',
+    emptyMessage: '通知模板已配置，但上传目标未成功完成。'
+  };
 }
 
 function uploadTargetStatusLabel(target: UploadBatchTarget) {
@@ -5818,6 +5858,7 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
   const visibleActiveSignature = filteredFileRows.filter((row) => row.active).map((row) => row.file.id).join(',');
   const waitingTransferCount = props.detail.transfers.filter(uploadTransferIsWaiting).length;
   const waitingRetryCount = props.detail.targets.filter((target) => target.status === 'pending' && target.errorSummary).length;
+  const notificationSummary = uploadBatchNotificationDetailSummary(props.detail);
 
   useEffect(() => {
     setFileStatusFilter('all');
@@ -5877,7 +5918,7 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
           <section className="upload-detail-section">
             <div className="upload-detail-section-header">
               <h3>通知</h3>
-              <small>{props.detail.notifications?.length ? `${props.detail.notifications.length} 条记录` : '未配置通知'}</small>
+              <small>{notificationSummary.label}</small>
             </div>
             {props.detail.notifications?.length ? <div className="task-table-wrap">
               <table className="task-table upload-notification-detail-table">
@@ -5894,7 +5935,7 @@ function UploadBatchDetailModal(props: { detail: UploadBatchDetail; timezone: st
                   </tr>
                 ))}</tbody>
               </table>
-            </div> : <p className="settings-note">该上传目标没有生成通知记录，可能是未配置通知模板，或本次没有产生需要通知的远端变更。</p>}
+            </div> : <p className="settings-note">{notificationSummary.emptyMessage}</p>}
           </section>
           <section className="upload-detail-section">
             <div className="upload-detail-section-header">

@@ -227,6 +227,7 @@ func (s *Store) ensureUploadColumns(ctx context.Context) error {
 	}{
 		{"upload_providers", "auth_device", `ALTER TABLE upload_providers ADD COLUMN auth_device TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_providers", "request_interval_ms", `ALTER TABLE upload_providers ADD COLUMN request_interval_ms INTEGER NOT NULL DEFAULT 500`, ""},
+		{"upload_providers", "preupload_before_rapid", `ALTER TABLE upload_providers ADD COLUMN preupload_before_rapid INTEGER NOT NULL DEFAULT 0`, ""},
 		{"upload_notification_templates", "headers_template", `ALTER TABLE upload_notification_templates ADD COLUMN headers_template TEXT NOT NULL DEFAULT '{}'`, ""},
 		{"upload_provider_routes", "notification_template_id", `ALTER TABLE upload_provider_routes ADD COLUMN notification_template_id INTEGER`, ""},
 		{"upload_provider_routes", "notification_variables", `ALTER TABLE upload_provider_routes ADD COLUMN notification_variables TEXT NOT NULL DEFAULT '{}'`, ""},
@@ -237,6 +238,7 @@ func (s *Store) ensureUploadColumns(ctx context.Context) error {
 		{"upload_batch_targets", "notification_template_id", `ALTER TABLE upload_batch_targets ADD COLUMN notification_template_id INTEGER`, ""},
 		{"upload_batch_targets", "notification_variables", `ALTER TABLE upload_batch_targets ADD COLUMN notification_variables TEXT NOT NULL DEFAULT '{}'`, ""},
 		{"upload_batch_targets", "request_interval_ms", `ALTER TABLE upload_batch_targets ADD COLUMN request_interval_ms INTEGER NOT NULL DEFAULT 500`, ""},
+		{"upload_batch_targets", "preupload_before_rapid", `ALTER TABLE upload_batch_targets ADD COLUMN preupload_before_rapid INTEGER NOT NULL DEFAULT 0`, ""},
 		{"upload_transfers", "outcome", `ALTER TABLE upload_transfers ADD COLUMN outcome TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_transfers", "remote_sha1", `ALTER TABLE upload_transfers ADD COLUMN remote_sha1 TEXT NOT NULL DEFAULT ''`, ""},
 		{"upload_events", "attempts", `ALTER TABLE upload_events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`, ""},
@@ -645,6 +647,7 @@ CREATE TABLE IF NOT EXISTS upload_providers (
   collision_policy TEXT NOT NULL DEFAULT 'replace',
   auth_device TEXT NOT NULL DEFAULT '',
   request_interval_ms INTEGER NOT NULL DEFAULT 500,
+  preupload_before_rapid INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -768,6 +771,7 @@ CREATE TABLE IF NOT EXISTS upload_batch_targets (
   notification_template_id INTEGER,
   notification_variables TEXT NOT NULL DEFAULT '{}',
   request_interval_ms INTEGER NOT NULL DEFAULT 500,
+  preupload_before_rapid INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   error_summary TEXT NOT NULL DEFAULT '',

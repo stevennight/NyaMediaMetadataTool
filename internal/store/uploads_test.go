@@ -142,7 +142,7 @@ func TestCollectUploadBatchesCoalescesFilesByRoute(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	defer st.Close()
-	first, err := st.CreateUploadProvider(ctx, UploadProvider{Name: "115 A", Type: UploadProviderType115Cookie, Enabled: true, RequestIntervalMS: 750})
+	first, err := st.CreateUploadProvider(ctx, UploadProvider{Name: "115 A", Type: UploadProviderType115Cookie, Enabled: true, RequestIntervalMS: 750, PreuploadBeforeRapid: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestCollectUploadBatchesCoalescesFilesByRoute(t *testing.T) {
 		if index == 1 {
 			wantRoot = "/B"
 		}
-		if detail.Targets[0].ProviderID != first.ID || detail.Targets[0].RemoteRoot != wantRoot || detail.Targets[0].RequestIntervalMS != 750 {
+		if detail.Targets[0].ProviderID != first.ID || detail.Targets[0].RemoteRoot != wantRoot || detail.Targets[0].RequestIntervalMS != 750 || !detail.Targets[0].PreuploadBeforeRapid {
 			t.Fatalf("unexpected target: %#v", detail.Targets[0])
 		}
 	}

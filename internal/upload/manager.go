@@ -100,6 +100,55 @@ type providerProgressReporter interface {
 	setProgressReporter(func(bytesTransferred int64))
 }
 
+type providerContextProgressReporter interface {
+	usesContextProgress()
+}
+
+type providerFileConcurrency interface {
+	MaxConcurrentFiles(context.Context) (int, error)
+}
+
+type transferProgressReporterKey struct{}
+
+func withTransferProgress(ctx context.Context, reporter func(bytesTransferred int64)) context.Context {
+	return context.WithValue(ctx, transferProgressReporterKey{}, reporter)
+}
+
+func transferProgressReporter(ctx context.Context) func(bytesTransferred int64) {
+	if ctx == nil {
+		return nil
+	}
+	reporter, _ := ctx.Value(transferProgressReporterKey{}).(func(int64))
+	return reporter
+}
+
+type uploadFileLimiter struct {
+	slots chan struct{}
+}
+
+func newUploadFileLimiter(limit int) *uploadFileLimiter {
+	if limit <= 0 {
+		limit = 1
+	}
+	return &uploadFileLimiter{slots: make(chan struct{}, limit)}
+}
+
+func (limiter *uploadFileLimiter) acquire(ctx context.Context) error {
+	select {
+	case limiter.slots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (limiter *uploadFileLimiter) release() {
+	select {
+	case <-limiter.slots:
+	default:
+	}
+}
+
 type ProviderFactory func(ctx context.Context, target store.UploadBatchTarget) (Provider, error)
 
 type open115ProviderCacheScope struct {
@@ -143,6 +192,8 @@ type Manager struct {
 	cookie115Guards  map[int64]*cookie115RequestGuard
 	open115Mu        sync.Mutex
 	open115Sessions  map[int64]*open115Session
+	fileLimiterMu    sync.Mutex
+	fileLimiters     map[int64]*uploadFileLimiter
 
 	runtimeMu        sync.RWMutex
 	transferRuntime  map[int64]TransferRuntimeState
@@ -174,6 +225,7 @@ func newManager(options Options, st *store.Store, logger *slog.Logger, factory P
 		providers:        providerDescriptorMap(),
 		cookie115Guards:  make(map[int64]*cookie115RequestGuard),
 		open115Sessions:  make(map[int64]*open115Session),
+		fileLimiters:     make(map[int64]*uploadFileLimiter),
 		transferRuntime:  make(map[int64]TransferRuntimeState),
 		notificationHTTP: &http.Client{Timeout: 10 * time.Second},
 	}
@@ -347,7 +399,7 @@ func (m *Manager) registerBuiltInProviders() {
 				"upload_provider", target.ProviderName,
 			)
 		}
-		provider, err := newBaiduPCSProvider(cookie, bdstoken, target.UserAgent, time.Duration(store.NormalizeUploadRequestIntervalMS(target.RequestIntervalMS))*time.Millisecond, providerLogger)
+		provider, err := newBaiduPCSProviderWithOptions(cookie, bdstoken, target.UserAgent, time.Duration(store.NormalizeUploadRequestIntervalMS(target.RequestIntervalMS))*time.Millisecond, target.PreuploadBeforeRapid, providerLogger)
 		if err != nil {
 			return nil, err
 		}
@@ -383,6 +435,20 @@ func (m *Manager) cookie115RequestGuard(providerID int64) *cookie115RequestGuard
 		m.cookie115Guards[providerID] = guard
 	}
 	return guard
+}
+
+func (m *Manager) uploadFileLimiter(providerID int64, limit int) *uploadFileLimiter {
+	if providerID <= 0 {
+		return newUploadFileLimiter(limit)
+	}
+	m.fileLimiterMu.Lock()
+	defer m.fileLimiterMu.Unlock()
+	if limiter := m.fileLimiters[providerID]; limiter != nil {
+		return limiter
+	}
+	limiter := newUploadFileLimiter(limit)
+	m.fileLimiters[providerID] = limiter
+	return limiter
 }
 
 func (m *Manager) TransferRuntimeStates() map[int64]TransferRuntimeState {
@@ -695,6 +761,25 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 	if err != nil {
 		return err
 	}
+	maxConcurrentFiles := 1
+	if capability, ok := client.(providerFileConcurrency); ok {
+		resolved, resolveErr := capability.MaxConcurrentFiles(ctx)
+		if resolveErr != nil {
+			m.logger.Warn("resolve provider file concurrency; using conservative limit", "targetID", target.ID, "provider", target.ProviderName, "error", resolveErr)
+		} else if resolved > 0 {
+			maxConcurrentFiles = resolved
+		}
+	}
+	if maxConcurrentFiles > 1 {
+		if err := client.Check(ctx); err != nil {
+			return fmt.Errorf("check provider %s: %w", target.ProviderName, err)
+		}
+		return m.processTargetConcurrent(ctx, target, client, transfers, maxConcurrentFiles)
+	}
+	return m.processTargetSequential(ctx, target, client, transfers)
+}
+
+func (m *Manager) processTargetSequential(ctx context.Context, target store.UploadBatchTarget, client Provider, transfers []store.UploadTransfer) error {
 
 	var activeMu sync.RWMutex
 	var activeTransferID int64
@@ -751,20 +836,22 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 		defer reporter.setWaitReporter(nil)
 	}
 	if reporter, ok := client.(providerProgressReporter); ok {
-		reporter.setProgressReporter(func(bytesTransferred int64) {
-			activeMu.RLock()
-			defer activeMu.RUnlock()
-			transferID := activeTransferID
-			bytesTotal := activeTransferBytesTotal
-			if transferID == 0 {
-				return
-			}
-			if bytesTotal > 0 && bytesTransferred > bytesTotal {
-				bytesTransferred = bytesTotal
-			}
-			m.setTransferProgress(transferID, bytesTransferred)
-		})
-		defer reporter.setProgressReporter(nil)
+		if _, contextProgress := client.(providerContextProgressReporter); !contextProgress {
+			reporter.setProgressReporter(func(bytesTransferred int64) {
+				activeMu.RLock()
+				defer activeMu.RUnlock()
+				transferID := activeTransferID
+				bytesTotal := activeTransferBytesTotal
+				if transferID == 0 {
+					return
+				}
+				if bytesTotal > 0 && bytesTransferred > bytesTotal {
+					bytesTransferred = bytesTotal
+				}
+				m.setTransferProgress(transferID, bytesTransferred)
+			})
+			defer reporter.setProgressReporter(nil)
+		}
 	}
 	if err := client.Check(ctx); err != nil {
 		return fmt.Errorf("check provider %s: %w", target.ProviderName, err)
@@ -842,7 +929,19 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 		activeMessage = "正在上传"
 		activeMu.Unlock()
 		m.setTransferRuntime(transfer.ID, "uploading", "正在上传", time.Time{})
-		remote, err := client.Upload(ctx, transfer.LocalPath, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1, target.CollisionPolicy)
+		uploadCtx := ctx
+		if _, contextProgress := client.(providerContextProgressReporter); contextProgress {
+			uploadCtx = withTransferProgress(ctx, func(bytesTransferred int64) {
+				if bytesTransferred < 0 {
+					bytesTransferred = 0
+				}
+				if transfer.BytesTotal > 0 && bytesTransferred > transfer.BytesTotal {
+					bytesTransferred = transfer.BytesTotal
+				}
+				m.setTransferProgress(transfer.ID, bytesTransferred)
+			})
+		}
+		remote, err := client.Upload(uploadCtx, transfer.LocalPath, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1, target.CollisionPolicy)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -869,6 +968,149 @@ func (m *Manager) processTarget(ctx context.Context, target store.UploadBatchTar
 		return fmt.Errorf("%d file(s) failed; first failure: %w", failedTransfers, firstFailure)
 	}
 	return m.store.CompleteUploadTarget(ctx, target.ID)
+}
+
+type transferProcessingResult struct {
+	failure error
+	fatal   error
+}
+
+func (m *Manager) processTargetConcurrent(ctx context.Context, target store.UploadBatchTarget, client Provider, transfers []store.UploadTransfer, maxConcurrentFiles int) error {
+	pending := make([]store.UploadTransfer, 0, len(transfers))
+	for _, transfer := range transfers {
+		if transfer.Status != store.UploadTransferCompleted {
+			pending = append(pending, transfer)
+		}
+	}
+	if len(pending) == 0 {
+		return m.store.CompleteUploadTarget(ctx, target.ID)
+	}
+	limiter := m.uploadFileLimiter(target.ProviderID, maxConcurrentFiles)
+	if maxConcurrentFiles > len(pending) {
+		maxConcurrentFiles = len(pending)
+	}
+	jobs := make(chan store.UploadTransfer, len(pending))
+	results := make(chan transferProcessingResult, len(pending))
+	var workers sync.WaitGroup
+	for index := 0; index < maxConcurrentFiles; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for transfer := range jobs {
+				if err := limiter.acquire(ctx); err != nil {
+					results <- transferProcessingResult{fatal: err}
+					continue
+				}
+				result := m.processTransferConcurrent(ctx, target, client, transfer)
+				limiter.release()
+				results <- result
+			}
+		}()
+	}
+	for _, transfer := range pending {
+		jobs <- transfer
+	}
+	close(jobs)
+	workers.Wait()
+	close(results)
+
+	failedTransfers := 0
+	var firstFailure error
+	for result := range results {
+		if result.fatal != nil {
+			if errors.Is(result.fatal, context.Canceled) || errors.Is(result.fatal, context.DeadlineExceeded) {
+				return result.fatal
+			}
+			return result.fatal
+		}
+		if result.failure != nil {
+			failedTransfers++
+			if firstFailure == nil {
+				firstFailure = result.failure
+			}
+		}
+	}
+	if failedTransfers > 0 {
+		return fmt.Errorf("%d file(s) failed; first failure: %w", failedTransfers, firstFailure)
+	}
+	return m.store.CompleteUploadTarget(ctx, target.ID)
+}
+
+func (m *Manager) processTransferConcurrent(ctx context.Context, target store.UploadBatchTarget, client Provider, transfer store.UploadTransfer) transferProcessingResult {
+	defer m.clearTransferRuntime(transfer.ID)
+	m.setTransferRuntime(transfer.ID, "checking", "正在检查上传服务", time.Time{})
+	recordFailure := func(transferErr error) transferProcessingResult {
+		var attemptErr *UploadAttemptError
+		outcome := ""
+		localSHA1 := ""
+		if errors.As(transferErr, &attemptErr) {
+			outcome = attemptErr.Outcome
+			localSHA1 = attemptErr.LocalSHA1
+		}
+		if err := m.store.FailUploadTransferWithResult(ctx, transfer.ID, transferErr.Error(), outcome, localSHA1); err != nil {
+			return transferProcessingResult{fatal: fmt.Errorf("mark transfer %d failed: %w", transfer.ID, err)}
+		}
+		return transferProcessingResult{failure: transferErr}
+	}
+
+	if transfer.Status == store.UploadTransferFailed && strings.Contains(transfer.ErrorSummary, uncertain115CommitMarker) {
+		m.setTransferRuntime(transfer.ID, "verifying", "正在确认远端文件", time.Time{})
+		verificationErr := fmt.Errorf("%s: remote file is still not confirmed", uncertain115CommitMarker)
+		if verifier, ok := client.(ProviderVerifier); ok {
+			remote, found, err := verifier.Verify(ctx, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1)
+			if err == nil && found {
+				if err := requireRemoteFileID(remote); err != nil {
+					verificationErr = err
+				} else if err := m.completeTransfer(ctx, transfer, remote); err != nil {
+					return transferProcessingResult{fatal: err}
+				} else {
+					return transferProcessingResult{}
+				}
+			}
+			if err != nil {
+				verificationErr = fmt.Errorf("%s: verify remote file: %w", uncertain115CommitMarker, err)
+			}
+		}
+		if target.Attempts < m.options.MaxAttempts {
+			return recordFailure(verificationErr)
+		}
+	}
+
+	m.setTransferRuntime(transfer.ID, "preparing", "正在准备上传", time.Time{})
+	if err := m.store.StartUploadTransfer(ctx, transfer.ID); err != nil {
+		return transferProcessingResult{fatal: fmt.Errorf("start transfer %d: %w", transfer.ID, err)}
+	}
+	info, err := os.Stat(transfer.LocalPath)
+	if err != nil {
+		return recordFailure(fmt.Errorf("stat local file %s: %w", transfer.LocalPath, err))
+	}
+	if info.IsDir() || info.Size() != transfer.BytesTotal || !uploadSnapshotTimeMatches(transfer.ModifiedAt, info.ModTime()) {
+		return recordFailure(fmt.Errorf("local file changed after batch snapshot: %s", transfer.LocalPath))
+	}
+	m.setTransferRuntime(transfer.ID, "uploading", "正在上传", time.Time{})
+	uploadCtx := withTransferProgress(ctx, func(bytesTransferred int64) {
+		if bytesTransferred < 0 {
+			bytesTransferred = 0
+		}
+		if transfer.BytesTotal > 0 && bytesTransferred > transfer.BytesTotal {
+			bytesTransferred = transfer.BytesTotal
+		}
+		m.setTransferProgress(transfer.ID, bytesTransferred)
+	})
+	remote, err := client.Upload(uploadCtx, transfer.LocalPath, transfer.RemotePath, transfer.BytesTotal, transfer.LocalSHA1, target.CollisionPolicy)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return transferProcessingResult{fatal: ctxErr}
+		}
+		return recordFailure(fmt.Errorf("upload %s: %w", transfer.LocalPath, err))
+	}
+	if idErr := requireRemoteFileID(remote); idErr != nil {
+		return recordFailure(&UploadAttemptError{Outcome: remote.Outcome, LocalSHA1: remote.LocalSHA1, Err: idErr})
+	}
+	if err := m.completeTransfer(ctx, transfer, remote); err != nil {
+		return transferProcessingResult{fatal: err}
+	}
+	return transferProcessingResult{}
 }
 
 func (m *Manager) completeTransfer(ctx context.Context, transfer store.UploadTransfer, remote RemoteFile) error {
@@ -926,13 +1168,14 @@ func (m *Manager) untrackTarget(targetID int64) {
 
 func targetFromProvider(provider store.UploadProvider) store.UploadBatchTarget {
 	return store.UploadBatchTarget{
-		ProviderID:        provider.ID,
-		ProviderName:      provider.Name,
-		ProviderType:      provider.Type,
-		UserAgent:         provider.UserAgent,
-		RequestIntervalMS: provider.RequestIntervalMS,
-		RemoteRoot:        "/",
-		CollisionPolicy:   "fail",
+		ProviderID:           provider.ID,
+		ProviderName:         provider.Name,
+		ProviderType:         provider.Type,
+		UserAgent:            provider.UserAgent,
+		RequestIntervalMS:    provider.RequestIntervalMS,
+		PreuploadBeforeRapid: provider.PreuploadBeforeRapid,
+		RemoteRoot:           "/",
+		CollisionPolicy:      "fail",
 	}
 }
 

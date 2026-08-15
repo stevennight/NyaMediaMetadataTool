@@ -200,6 +200,7 @@ type UploadProvider = {
   hasCookie: boolean;
   hasCredentials: boolean;
   authDevice: string;
+  preuploadBeforeRapid: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -5066,6 +5067,7 @@ function newUploadProviderDraft(): UploadProvider {
     hasCookie: false,
     hasCredentials: false,
     authDevice: '',
+    preuploadBeforeRapid: false,
     createdAt: '',
     updatedAt: ''
   };
@@ -5367,6 +5369,7 @@ function UploadProviderModal(props: { provider?: UploadProvider; providerTypes: 
           <label>Provider 类型<select value={draft.type} disabled={editing || props.saving} onChange={(event) => setDraft({ ...draft, type: event.target.value })}>{providerTypes.map((providerType) => <option key={providerType.type} value={providerType.type} disabled={!providerType.implemented && providerType.type !== draft.type}>{providerType.name}{providerType.implemented ? '' : '（尚未安装）'}</option>)}</select><small>{editing ? 'Provider 类型在创建后固定。' : (selectedProviderType?.implemented ? '已安装的 Provider 可立即配置授权。' : '此 Provider 类型已预留，但尚未安装上传实现。')}</small></label>
           <label>自定义 User-Agent（可选）<input value={draft.userAgent} onChange={(event) => setDraft({ ...draft, userAgent: event.target.value })} placeholder="Mozilla/5.0" /></label>
           {['115open', 'baidupcs'].includes(draft.type) && <label>上传 API 请求间隔（毫秒）<input type="number" min={250} max={10000} required value={draft.requestIntervalMs} onChange={(event) => setDraft({ ...draft, requestIntervalMs: Number(event.target.value) })} /><small>限制 250–10000 毫秒；默认 500 毫秒。</small></label>}
+          {draft.type === 'baidupcs' && <div className="config-toggle-field"><Toggle label="MD5 计算完成前预先上传分片" checked={draft.preuploadBeforeRapid} onChange={(enabled) => setDraft({ ...draft, preuploadBeforeRapid: enabled })} /><small>开启后会在计算完整 MD5 的同时按网页端策略并发上传分片；默认关闭，优先尝试 rapidupload 秒传。</small></div>}
           <Toggle label="启用此 Provider" checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} />
           <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={() => props.onClose(dirty)} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : (!editing && ['115cookie', '115open', 'baidupan', 'baidupcs'].includes(draft.type) ? '保存并授权' : '保存 Provider')}</button></div>
         </form>

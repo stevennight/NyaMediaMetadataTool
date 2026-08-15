@@ -92,17 +92,18 @@ var uploadFileTypeSet = func() map[string]struct{} {
 // UploadProvider is one configured account instance. Secrets are deliberately
 // excluded so API list responses cannot expose credentials.
 type UploadProvider struct {
-	ID                int64  `json:"id"`
-	Name              string `json:"name"`
-	Type              string `json:"type"`
-	Enabled           bool   `json:"enabled"`
-	UserAgent         string `json:"userAgent"`
-	HasCookie         bool   `json:"hasCookie"`
-	HasCredentials    bool   `json:"hasCredentials"`
-	AuthDevice        string `json:"authDevice"`
-	RequestIntervalMS int    `json:"requestIntervalMs"`
-	CreatedAt         string `json:"createdAt"`
-	UpdatedAt         string `json:"updatedAt"`
+	ID                   int64  `json:"id"`
+	Name                 string `json:"name"`
+	Type                 string `json:"type"`
+	Enabled              bool   `json:"enabled"`
+	UserAgent            string `json:"userAgent"`
+	HasCookie            bool   `json:"hasCookie"`
+	HasCredentials       bool   `json:"hasCredentials"`
+	AuthDevice           string `json:"authDevice"`
+	RequestIntervalMS    int    `json:"requestIntervalMs"`
+	PreuploadBeforeRapid bool   `json:"preuploadBeforeRapid"`
+	CreatedAt            string `json:"createdAt"`
+	UpdatedAt            string `json:"updatedAt"`
 }
 
 // UploadProviderRoute is one upload step configured on a watch directory.
@@ -169,6 +170,7 @@ type UploadBatchTarget struct {
 	RemoteRoot             string            `json:"remoteRoot"`
 	UserAgent              string            `json:"userAgent"`
 	RequestIntervalMS      int               `json:"requestIntervalMs"`
+	PreuploadBeforeRapid   bool              `json:"preuploadBeforeRapid"`
 	CollisionPolicy        string            `json:"collisionPolicy"`
 	IncludeTypes           []string          `json:"includeTypes"`
 	Retryable              bool              `json:"retryable"`
@@ -293,9 +295,9 @@ func (s *Store) CreateUploadProvider(ctx context.Context, provider UploadProvide
 		return UploadProvider{}, err
 	}
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO upload_providers (name, type, enabled, user_agent, auth_device, request_interval_ms, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-`, provider.Name, provider.Type, boolToInt(provider.Enabled), provider.UserAgent, provider.AuthDevice, provider.RequestIntervalMS)
+INSERT INTO upload_providers (name, type, enabled, user_agent, auth_device, request_interval_ms, preupload_before_rapid, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+`, provider.Name, provider.Type, boolToInt(provider.Enabled), provider.UserAgent, provider.AuthDevice, provider.RequestIntervalMS, boolToInt(provider.PreuploadBeforeRapid))
 	if err != nil {
 		return UploadProvider{}, err
 	}
@@ -356,9 +358,10 @@ SET name = ?,
     enabled = ?,
     user_agent = ?,
     request_interval_ms = ?,
+    preupload_before_rapid = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND type = ?
-`, provider.Name, boolToInt(provider.Enabled), provider.UserAgent, provider.RequestIntervalMS, provider.ID, provider.Type)
+`, provider.Name, boolToInt(provider.Enabled), provider.UserAgent, provider.RequestIntervalMS, boolToInt(provider.PreuploadBeforeRapid), provider.ID, provider.Type)
 	if err != nil {
 		return UploadProvider{}, err
 	}
@@ -940,11 +943,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			}
 			if _, err := tx.ExecContext(ctx, `
 INSERT INTO upload_batch_targets
-  (batch_id, provider_id, provider_name, provider_type, remote_root, user_agent, request_interval_ms, collision_policy, include_types,
+  (batch_id, provider_id, provider_name, provider_type, remote_root, user_agent, request_interval_ms, preupload_before_rapid, collision_policy, include_types,
    notification_template_id, notification_variables, status, available_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, batchID, configured.provider.ID, configured.provider.Name, configured.provider.Type, configured.route.RemoteRoot,
-				configured.provider.UserAgent, configured.provider.RequestIntervalMS, configured.route.CollisionPolicy, string(encodedTypes),
+				configured.provider.UserAgent, configured.provider.RequestIntervalMS, boolToInt(configured.provider.PreuploadBeforeRapid), configured.route.CollisionPolicy, string(encodedTypes),
 				configured.route.NotificationTemplateID, encodedVariables, UploadTargetWaiting, readyAt); err != nil {
 				return nil, 0, err
 			}
@@ -1844,7 +1847,7 @@ func (s *Store) CountUploadTargetsByStatuses(ctx context.Context, statuses ...st
 }
 
 const uploadProviderSelect = `
-SELECT id, name, type, enabled, user_agent, request_interval_ms,
+SELECT id, name, type, enabled, user_agent, request_interval_ms, preupload_before_rapid,
        EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = upload_providers.id AND s.secret_key = 'cookie' AND s.secret_value <> ''),
        EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = upload_providers.id AND s.secret_key IN ('access_token', 'refresh_token') AND s.secret_value <> ''),
        auth_device, created_at, updated_at
@@ -1890,7 +1893,7 @@ SELECT b.id, b.watch_dir_id, b.upload_route_id, b.series_key, b.series_path, b.s
 FROM upload_batches b`
 
 const uploadBatchTargetSelect = `
-SELECT t.id, t.batch_id, t.provider_id, t.provider_name, t.provider_type, t.remote_root, t.user_agent, t.request_interval_ms, t.collision_policy, t.include_types,
+SELECT t.id, t.batch_id, t.provider_id, t.provider_name, t.provider_type, t.remote_root, t.user_agent, t.request_interval_ms, t.preupload_before_rapid, t.collision_policy, t.include_types,
        t.retryable, t.notification_template_id, t.notification_variables,
        t.status, t.attempts, t.error_summary, t.available_at, COALESCE(t.started_at, ''), COALESCE(t.finished_at, ''), t.created_at, t.updated_at
 FROM upload_batch_targets t
@@ -1913,8 +1916,10 @@ func scanUploadProvider(scanner uploadProviderScanner) (UploadProvider, error) {
 	var enabled int
 	var hasCookie int
 	var hasCredentials int
-	err := scanner.Scan(&item.ID, &item.Name, &item.Type, &enabled, &item.UserAgent, &item.RequestIntervalMS, &hasCookie, &hasCredentials, &item.AuthDevice, &item.CreatedAt, &item.UpdatedAt)
+	var preuploadBeforeRapid int
+	err := scanner.Scan(&item.ID, &item.Name, &item.Type, &enabled, &item.UserAgent, &item.RequestIntervalMS, &preuploadBeforeRapid, &hasCookie, &hasCredentials, &item.AuthDevice, &item.CreatedAt, &item.UpdatedAt)
 	item.Enabled = enabled == 1
+	item.PreuploadBeforeRapid = preuploadBeforeRapid == 1
 	item.HasCookie = hasCookie == 1
 	item.HasCredentials = hasCredentials == 1
 	return item, err
@@ -2001,13 +2006,15 @@ func scanUploadBatchTarget(scanner uploadTargetScanner) (UploadBatchTarget, erro
 	var notificationTemplateID sql.NullInt64
 	var encodedVariables string
 	var retryable int
+	var preuploadBeforeRapid int
 	err := scanner.Scan(
 		&item.ID, &item.BatchID, &item.ProviderID, &item.ProviderName, &item.ProviderType, &item.RemoteRoot,
-		&item.UserAgent, &item.RequestIntervalMS, &item.CollisionPolicy, &encodedTypes, &retryable, &notificationTemplateID, &encodedVariables,
+		&item.UserAgent, &item.RequestIntervalMS, &preuploadBeforeRapid, &item.CollisionPolicy, &encodedTypes, &retryable, &notificationTemplateID, &encodedVariables,
 		&item.Status, &item.Attempts, &item.ErrorSummary, &item.AvailableAt, &item.StartedAt, &item.FinishedAt,
 		&item.CreatedAt, &item.UpdatedAt,
 	)
 	item.IncludeTypes = decodeStoredUploadTypes(encodedTypes)
+	item.PreuploadBeforeRapid = preuploadBeforeRapid == 1
 	item.Retryable = retryable == 1
 	if notificationTemplateID.Valid {
 		item.NotificationTemplateID = &notificationTemplateID.Int64
@@ -2194,7 +2201,7 @@ type configuredUploadTarget struct {
 
 func listEnabledWatchDirUploadTargetsTx(ctx context.Context, tx *sql.Tx, watchDirID int64) ([]configuredUploadTarget, error) {
 	rows, err := tx.QueryContext(ctx, `
-SELECT p.id, p.name, p.type, p.enabled, p.user_agent, p.request_interval_ms,
+SELECT p.id, p.name, p.type, p.enabled, p.user_agent, p.request_interval_ms, p.preupload_before_rapid,
        EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = p.id AND s.secret_key = 'cookie' AND s.secret_value <> ''),
        EXISTS(SELECT 1 FROM upload_provider_secrets s WHERE s.provider_id = p.id AND s.secret_key IN ('access_token', 'refresh_token') AND s.secret_value <> ''),
        p.auth_device, p.created_at, p.updated_at,
@@ -2215,6 +2222,7 @@ ORDER BY r.id
 		var providerEnabled int
 		var hasCookie int
 		var hasCredentials int
+		var preuploadBeforeRapid int
 		var routeWatchDirID sql.NullInt64
 		var notificationTemplateID sql.NullInt64
 		var routeEnabled int
@@ -2222,7 +2230,7 @@ ORDER BY r.id
 		var encodedVariables string
 		if err := rows.Scan(
 			&item.provider.ID, &item.provider.Name, &item.provider.Type, &providerEnabled, &item.provider.UserAgent,
-			&item.provider.RequestIntervalMS, &hasCookie, &hasCredentials, &item.provider.AuthDevice, &item.provider.CreatedAt, &item.provider.UpdatedAt,
+			&item.provider.RequestIntervalMS, &preuploadBeforeRapid, &hasCookie, &hasCredentials, &item.provider.AuthDevice, &item.provider.CreatedAt, &item.provider.UpdatedAt,
 			&item.route.ID, &item.route.ProviderID, &routeWatchDirID, &routeEnabled, &item.route.RemoteRoot,
 			&item.route.CollisionPolicy, &encodedTypes, &notificationTemplateID, &encodedVariables,
 			&item.route.CreatedAt, &item.route.UpdatedAt,
@@ -2232,6 +2240,7 @@ ORDER BY r.id
 		item.provider.Enabled = providerEnabled == 1
 		item.provider.HasCookie = hasCookie == 1
 		item.provider.HasCredentials = hasCredentials == 1
+		item.provider.PreuploadBeforeRapid = preuploadBeforeRapid == 1
 		item.route.Enabled = routeEnabled == 1
 		if routeWatchDirID.Valid {
 			item.route.WatchDirID = &routeWatchDirID.Int64

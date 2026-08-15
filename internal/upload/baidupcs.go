@@ -7,6 +7,7 @@ import (
 	"crypto/md5"
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,16 +32,14 @@ const (
 	baiduPCSAPIBaseURL       = "https://pcs.baidu.com"
 	baiduPCSUploadBaseURL    = "https://c2.pcs.baidu.com"
 	baiduPCSAppID            = "250528"
-	baiduPCSDefaultUserAgent = "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;"
+	baiduPCSDefaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36"
 	baiduPCSRequestTimeout   = 5 * time.Minute
 	baiduPCSSliceSize        = 256 * 1024
-	baiduPCSDataContentSize  = 4 * 1024
+	baiduPCSDataContentSize  = baiduPCSSliceSize
 	baiduPCSMinBlockSize     = 4 * 1024 * 1024
-	baiduPCSMiddleBlockSize  = 16 * 1024 * 1024
-	baiduPCSMaxBlockSize     = 64 * 1024 * 1024
-	baiduPCSMiddleThreshold  = 8 * 1024 * 1024 * 1024
-	baiduPCSMaxThreshold     = 32 * 1024 * 1024 * 1024
-	baiduPCSRapidAfterBlocks = 8
+	baiduPCSChunkConcurrency = 3
+	baiduPCSChunkRetryLimit  = 3
+	baiduPCSWorkerStagger    = time.Second
 	baiduPCSVerifyAttempts   = 8
 	baiduPCSVerifyRetryDelay = time.Second
 )
@@ -51,15 +50,21 @@ type baiduPCSProvider struct {
 	userAgent string
 	logger    *slog.Logger
 
-	httpClient       *http.Client
-	requestInterval  time.Duration
-	requestMu        sync.Mutex
-	lastRequest      time.Time
-	requestSequence  atomic.Uint64
-	bdstokenMu       sync.Mutex
-	ukMu             sync.Mutex
-	uk               int64
-	progressReporter func(int64)
+	httpClient           *http.Client
+	requestInterval      time.Duration
+	requestMu            sync.Mutex
+	lastRequest          time.Time
+	requestSequence      atomic.Uint64
+	sessionMu            sync.Mutex
+	uk                   int64
+	vipMu                sync.Mutex
+	vipLoaded            bool
+	vipIdentity          int64
+	maxConcurrentFiles   int
+	chunkConcurrency     int
+	rapidUploadEnabled   bool
+	preuploadBeforeRapid bool
+	progressReporter     func(int64)
 }
 
 type baiduPCSAPIResponse struct {
@@ -91,6 +96,35 @@ type baiduPCSAPIError struct {
 
 func (err *baiduPCSAPIError) Error() string {
 	return fmt.Sprintf("baidu pcs api error status=%d code=%d message=%s", err.StatusCode, err.Code, err.Message)
+}
+
+type baiduPCSRemotePathError struct {
+	Expected string
+	Actual   string
+	FSID     string
+}
+
+func (err *baiduPCSRemotePathError) Error() string {
+	return fmt.Sprintf("BaiduPCS rapid upload created unexpected path %q, want %q (fs_id=%s)", err.Actual, err.Expected, err.FSID)
+}
+
+func baiduPCSOnDup(collisionPolicy string) string {
+	switch normalizeBaiduOpenCollisionPolicy(collisionPolicy) {
+	case "replace":
+		return "overwrite"
+	case "skip", "fail":
+		return "fail"
+	default:
+		return "fail"
+	}
+}
+
+func baiduPCSTargetPath(remotePath string) string {
+	parent := pathpkg.Dir(normalizeBaiduOpenPath(remotePath))
+	if parent == "." || parent == "/" {
+		return "/"
+	}
+	return strings.TrimRight(parent, "/") + "/"
 }
 
 type baiduPCSFileItem struct {
@@ -144,6 +178,18 @@ type baiduPCSUserInfoResponse struct {
 	} `json:"records"`
 }
 
+type baiduPCSWebTemplateResponse struct {
+	baiduPCSAPIResponse
+	Result map[string]json.RawMessage `json:"result"`
+}
+
+type baiduPCSLoginStatusResponse struct {
+	baiduPCSAPIResponse
+	LoginInfo struct {
+		VIPIdentity json.RawMessage `json:"vip_identity"`
+	} `json:"login_info"`
+}
+
 type baiduPCSUploadServer struct {
 	Server string `json:"server"`
 }
@@ -159,6 +205,37 @@ type baiduPCSProgressReader struct {
 	offset int64
 	read   int64
 	report func(int64)
+}
+
+type baiduPCSUploadProgress struct {
+	mu       sync.Mutex
+	parts    map[int]int64
+	total    int64
+	reporter func(int64)
+}
+
+func newBaiduPCSUploadProgress(reporter func(int64)) *baiduPCSUploadProgress {
+	return &baiduPCSUploadProgress{parts: make(map[int]int64), reporter: reporter}
+}
+
+func (progress *baiduPCSUploadProgress) update(part int, bytesRead int64) {
+	if progress == nil || bytesRead < 0 {
+		return
+	}
+	progress.mu.Lock()
+	previous := progress.parts[part]
+	if bytesRead <= previous {
+		progress.mu.Unlock()
+		return
+	}
+	progress.parts[part] = bytesRead
+	progress.total += bytesRead - previous
+	total := progress.total
+	reporter := progress.reporter
+	progress.mu.Unlock()
+	if reporter != nil {
+		reporter(total)
+	}
 }
 
 func (reader *baiduPCSProgressReader) Read(buffer []byte) (int, error) {
@@ -182,6 +259,10 @@ type baiduPCSDigest struct {
 }
 
 func newBaiduPCSProvider(cookie, bdstoken, userAgent string, requestInterval time.Duration, loggers ...*slog.Logger) (*baiduPCSProvider, error) {
+	return newBaiduPCSProviderWithOptions(cookie, bdstoken, userAgent, requestInterval, false, loggers...)
+}
+
+func newBaiduPCSProviderWithOptions(cookie, bdstoken, userAgent string, requestInterval time.Duration, preuploadBeforeRapid bool, loggers ...*slog.Logger) (*baiduPCSProvider, error) {
 	if strings.TrimSpace(cookie) == "" {
 		return nil, errors.New("BaiduPCS cookie is required")
 	}
@@ -195,17 +276,32 @@ func newBaiduPCSProvider(cookie, bdstoken, userAgent string, requestInterval tim
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableCompression = true
 	return &baiduPCSProvider{
-		cookie:          strings.TrimSpace(cookie),
-		bdstoken:        strings.TrimSpace(bdstoken),
-		userAgent:       strings.TrimSpace(userAgent),
-		logger:          logger,
-		httpClient:      &http.Client{Timeout: baiduPCSRequestTimeout, Transport: transport},
-		requestInterval: requestInterval,
+		cookie:               strings.TrimSpace(cookie),
+		bdstoken:             strings.TrimSpace(bdstoken),
+		userAgent:            strings.TrimSpace(userAgent),
+		logger:               logger,
+		httpClient:           &http.Client{Timeout: baiduPCSRequestTimeout, Transport: transport},
+		requestInterval:      requestInterval,
+		chunkConcurrency:     baiduPCSChunkConcurrency,
+		rapidUploadEnabled:   true,
+		preuploadBeforeRapid: preuploadBeforeRapid,
 	}, nil
 }
 
 func (p *baiduPCSProvider) setProgressReporter(reporter func(int64)) {
 	p.progressReporter = reporter
+}
+
+func (p *baiduPCSProvider) usesContextProgress() {}
+
+func (p *baiduPCSProvider) reportProgress(ctx context.Context, bytesTransferred int64) {
+	if reporter := transferProgressReporter(ctx); reporter != nil {
+		reporter(bytesTransferred)
+		return
+	}
+	if p.progressReporter != nil {
+		p.progressReporter(bytesTransferred)
+	}
 }
 
 func (p *baiduPCSProvider) log(ctx context.Context, level slog.Level, message string, args ...any) {
@@ -326,6 +422,7 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 		"remote_path", remotePath,
 		"size", size,
 		"collision_policy", collisionPolicy,
+		"preupload_before_rapid", p.preuploadBeforeRapid,
 	)
 	name := pathpkg.Base(remotePath)
 	if name == "." || name == "/" || name == "" {
@@ -343,9 +440,7 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 	if info.IsDir() || info.Size() != size {
 		return RemoteFile{}, fmt.Errorf("local file changed after batch snapshot: %s", localPath)
 	}
-	if p.progressReporter != nil {
-		p.progressReporter(0)
-	}
+	p.reportProgress(ctx, 0)
 
 	parentPath := pathpkg.Dir(remotePath)
 	if err := p.ensureDirectory(ctx, parentPath); err != nil {
@@ -378,122 +473,113 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 		}
 	}
 
-	digest, err := calculateBaiduPCSDigest(ctx, file)
-	if err != nil {
-		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("hash local file for BaiduPCS upload: %w", err)}
-	}
-	if digest.Size != size {
-		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("local file changed after hash: %s", localPath)}
-	}
-	localSHA1 = digest.SHA1
-	p.log(ctx, slog.LevelInfo, "baidu pcs digest calculated",
-		"remote_path", remotePath,
-		"size", digest.Size,
-		"block_size", digest.BlockSize,
-		"block_count", len(digest.ChunkMD5s),
-		"sha1", digest.SHA1,
-		"content_md5", digest.MD5,
-		"slice_md5", digest.SliceMD5,
-		"encoded_content_md5", encodeBaiduOpenMD5(digest.MD5),
-		"encoded_slice_md5", encodeBaiduOpenMD5(digest.SliceMD5),
-	)
-	if found && existing.Size == size && baiduOpenMD5IsValid(existing.MD5) && strings.EqualFold(existing.MD5, digest.MD5) {
-		p.log(ctx, slog.LevelInfo, "baidu pcs upload skipped because remote file is unchanged",
+	var digest *baiduPCSDigest
+	var precreated *baiduPCSPrecreateResponse
+	preuploadMode := p.preuploadBeforeRapid && p.rapidUploadEnabled && size > baiduPCSDataContentSize
+	if preuploadMode {
+		initialDigest, initialErr := calculateBaiduPCSInitialDigest(ctx, file)
+		if initialErr != nil {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("prepare local file for BaiduPCS preupload: %w", initialErr)}
+		}
+		if initialDigest.Size != size {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("local file changed before hash: %s", localPath)}
+		}
+		precreated, err = p.precreate(ctx, remotePath, info.ModTime(), initialDigest, collisionPolicy)
+		if err != nil {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS precreate %s: %w", remotePath, err)}
+		}
+		if err := validateBaiduPCSPrecreateResponse(precreated); err != nil {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: err}
+		}
+		p.log(ctx, slog.LevelInfo, "baidu pcs precreate result",
 			"remote_path", remotePath,
-			"remote_id", existing.ID,
+			"return_type", precreated.ReturnType,
+			"block_count", len(precreated.BlockList),
+			"block_list", summarizeBaiduPCSBlocks(precreated.BlockList),
+			"uploadid_present", strings.TrimSpace(precreated.UploadID) != "",
+			"fs_id", strings.TrimSpace(string(precreated.FSID)),
+			"info_fs_id", baiduPCSInfoFSID(precreated.Info),
 		)
-		return RemoteFile{ID: existing.ID, Size: existing.Size, SHA1: localSHA1, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeUnchanged}, nil
-	}
 
-	precreated, err := p.precreate(ctx, remotePath, info.ModTime(), digest)
-	if err != nil {
-		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS precreate %s: %w", remotePath, err)}
-	}
-	if precreated == nil {
-		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: errors.New("BaiduPCS precreate returned an empty response")}
-	}
-	p.log(ctx, slog.LevelInfo, "baidu pcs precreate result",
-		"remote_path", remotePath,
-		"return_type", precreated.ReturnType,
-		"block_count", len(precreated.BlockList),
-		"block_list", summarizeBaiduPCSBlocks(precreated.BlockList),
-		"uploadid_present", strings.TrimSpace(precreated.UploadID) != "",
-		"fs_id", strings.TrimSpace(string(precreated.FSID)),
-		"info_fs_id", baiduPCSInfoFSID(precreated.Info),
-	)
-	createdID := baiduPCSResponseFSID(precreated)
-	if precreated.ReturnType == 2 {
-		p.log(ctx, slog.LevelInfo, "baidu pcs precreate reported rapid upload",
+		fullDigest, rapid, rapidErr, uploadErr := p.preuploadAndRapid(ctx, remotePath, precreated.UploadID, file, info.ModTime(), initialDigest)
+		if fullDigest == nil {
+			if rapidErr == nil {
+				rapidErr = errors.New("BaiduPCS full digest was not produced")
+			}
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("preupload BaiduPCS file %s: %w", remotePath, rapidErr)}
+		}
+		digest = fullDigest
+		localSHA1 = digest.SHA1
+		if rapidErr == nil {
+			verified, verifyErr := p.verifyRemoteFile(ctx, rapid.ID, remotePath, size)
+			if verifyErr != nil {
+				return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("verify BaiduPCS rapid upload %s: %w", remotePath, verifyErr)}
+			}
+			verified.LocalSHA1 = localSHA1
+			verified.SHA1 = localSHA1
+			verified.Outcome = intendedOutcome
+			p.reportProgress(ctx, size)
+			return verified, nil
+		}
+		var pathErr *baiduPCSRemotePathError
+		if errors.As(rapidErr, &pathErr) {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: rapidErr}
+		}
+		if uploadErr != nil {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS upload chunks for %s: %w", remotePath, uploadErr)}
+		}
+		p.log(ctx, slog.LevelWarn, "baidu pcs rapid upload missed; continuing preuploaded chunks",
 			"remote_path", remotePath,
-			"fs_id", createdID,
+			"error", p.logError(rapidErr),
 		)
-		if createdID == "" {
-			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: errors.New("BaiduPCS precreate rapid upload returned no fs_id")}
+	} else {
+		digest, err = calculateBaiduPCSDigest(ctx, file)
+		if err != nil {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("hash local file for BaiduPCS upload: %w", err)}
 		}
-		verified, verifyErr := p.verifyRemoteFile(ctx, createdID, remotePath, size)
-		if verifyErr != nil {
-			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("verify BaiduPCS rapid upload %s: %w", remotePath, verifyErr)}
+		if digest.Size != size {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("local file changed after hash: %s", localPath)}
 		}
-		verified.LocalSHA1 = localSHA1
-		verified.SHA1 = localSHA1
-		verified.Outcome = intendedOutcome
-		if p.progressReporter != nil {
-			p.progressReporter(size)
+		localSHA1 = digest.SHA1
+		p.log(ctx, slog.LevelInfo, "baidu pcs digest calculated",
+			"remote_path", remotePath,
+			"size", digest.Size,
+			"block_size", digest.BlockSize,
+			"block_count", len(digest.ChunkMD5s),
+			"sha1", digest.SHA1,
+			"content_md5", digest.MD5,
+			"slice_md5", digest.SliceMD5,
+			"encoded_content_md5", encodeBaiduOpenMD5(digest.MD5),
+			"encoded_slice_md5", encodeBaiduOpenMD5(digest.SliceMD5),
+		)
+		if found && existing.Size == size && baiduOpenMD5IsValid(existing.MD5) && strings.EqualFold(existing.MD5, digest.MD5) {
+			p.log(ctx, slog.LevelInfo, "baidu pcs upload skipped because remote file is unchanged",
+				"remote_path", remotePath,
+				"remote_id", existing.ID,
+			)
+			return RemoteFile{ID: existing.ID, Size: existing.Size, SHA1: localSHA1, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeUnchanged}, nil
 		}
-		return verified, nil
-	}
-	if strings.TrimSpace(precreated.UploadID) == "" {
-		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: errors.New("BaiduPCS precreate returned no uploadid")}
-	}
 
-	parts := append([]int(nil), precreated.BlockList...)
-	if len(parts) == 0 && size > 0 {
-		parts = []int{0}
-	}
-	for _, part := range parts {
-		if part < 0 || part >= len(digest.ChunkMD5s) {
-			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS precreate returned invalid block index %d", part)}
+		precreated, err = p.precreate(ctx, remotePath, info.ModTime(), digest, collisionPolicy)
+		if err != nil {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS precreate %s: %w", remotePath, err)}
 		}
-	}
-	serverURL, err := p.locateUpload(ctx, remotePath, precreated.UploadID)
-	if err != nil {
-		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("locate BaiduPCS upload server: %w", err)}
-	}
-	p.log(ctx, slog.LevelInfo, "baidu pcs upload server selected",
-		"remote_path", remotePath,
-		"server_host", baiduPCSURLHost(serverURL),
-	)
-	for index, part := range parts {
-		if err := p.uploadChunk(ctx, serverURL, remotePath, precreated.UploadID, part, file, digest); err != nil {
-			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS upload block %d for %s: %w", part, remotePath, err)}
+		if err := validateBaiduPCSPrecreateResponse(precreated); err != nil {
+			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: err}
 		}
-		// The web client retries rapid upload after several temporary blocks.
-		// This preserves the traffic-saving path while retaining a normal
-		// create fallback when the server does not recognize the slice.
-		if (index+1)%baiduPCSRapidAfterBlocks == 0 || index+1 == len(parts) {
+		p.log(ctx, slog.LevelInfo, "baidu pcs precreate result",
+			"remote_path", remotePath,
+			"return_type", precreated.ReturnType,
+			"block_count", len(precreated.BlockList),
+			"block_list", summarizeBaiduPCSBlocks(precreated.BlockList),
+			"uploadid_present", strings.TrimSpace(precreated.UploadID) != "",
+			"fs_id", strings.TrimSpace(string(precreated.FSID)),
+			"info_fs_id", baiduPCSInfoFSID(precreated.Info),
+		)
+
+		if p.rapidUploadEnabled && digest.Size > baiduPCSDataContentSize {
 			rapid, rapidErr := p.rapidUploadFromFile(ctx, remotePath, precreated.UploadID, file, info.ModTime(), digest, 1)
-			if rapidErr != nil {
-				p.log(ctx, slog.LevelWarn, "baidu pcs rapid upload attempt failed; continuing with upload",
-					"remote_path", remotePath,
-					"uploaded_block", part,
-					"uploaded_block_position", index+1,
-					"uploaded_block_count", len(parts),
-					"error", p.logError(rapidErr),
-				)
-			} else if rapid.ID == "" {
-				p.log(ctx, slog.LevelWarn, "baidu pcs rapid upload attempt returned no fs_id; continuing with upload",
-					"remote_path", remotePath,
-					"uploaded_block", part,
-					"uploaded_block_position", index+1,
-					"uploaded_block_count", len(parts),
-				)
-			} else {
-				p.log(ctx, slog.LevelInfo, "baidu pcs rapid upload succeeded after block upload",
-					"remote_path", remotePath,
-					"fs_id", rapid.ID,
-					"uploaded_block_position", index+1,
-					"uploaded_block_count", len(parts),
-				)
+			if rapidErr == nil {
 				verified, verifyErr := p.verifyRemoteFile(ctx, rapid.ID, remotePath, size)
 				if verifyErr != nil {
 					return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("verify BaiduPCS rapid upload %s: %w", remotePath, verifyErr)}
@@ -501,15 +587,42 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 				verified.LocalSHA1 = localSHA1
 				verified.SHA1 = localSHA1
 				verified.Outcome = intendedOutcome
-				if p.progressReporter != nil {
-					p.progressReporter(size)
-				}
+				p.reportProgress(ctx, size)
 				return verified, nil
+			}
+			var pathErr *baiduPCSRemotePathError
+			if errors.As(rapidErr, &pathErr) {
+				return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: rapidErr}
+			}
+			p.log(ctx, slog.LevelWarn, "baidu pcs rapid upload missed; falling back to chunk upload",
+				"remote_path", remotePath,
+				"error", p.logError(rapidErr),
+			)
+		} else {
+			p.log(ctx, slog.LevelInfo, "baidu pcs rapid upload skipped for small file or disabled",
+				"remote_path", remotePath,
+				"size", digest.Size,
+				"rapid_upload_enabled", p.rapidUploadEnabled,
+			)
+		}
+
+		parts := baiduPCSParts(digest.Size, digest.BlockSize)
+		if len(parts) > 0 {
+			serverURL, locateErr := p.locateUpload(ctx, remotePath, precreated.UploadID)
+			if locateErr != nil {
+				return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("locate BaiduPCS upload server: %w", locateErr)}
+			}
+			p.log(ctx, slog.LevelInfo, "baidu pcs upload server selected",
+				"remote_path", remotePath,
+				"server_host", baiduPCSURLHost(serverURL),
+			)
+			if err := p.uploadChunks(ctx, serverURL, remotePath, precreated.UploadID, parts, file, digest); err != nil {
+				return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS upload chunks for %s: %w", remotePath, err)}
 			}
 		}
 	}
 
-	created, err := p.createFile(ctx, remotePath, size, precreated.UploadID, digest, 3)
+	created, err := p.createFile(ctx, remotePath, size, precreated.UploadID, digest, 3, collisionPolicy)
 	if err != nil {
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS create %s: %w", remotePath, err)}
 	}
@@ -520,7 +633,7 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 		"path", created.Path,
 		"info_fs_id", baiduPCSInfoFSID(created.Info),
 	)
-	createdID = baiduPCSResponseFSID(created)
+	createdID := baiduPCSResponseFSID(created)
 	if createdID == "" {
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: errors.New("BaiduPCS create returned no fs_id")}
 	}
@@ -531,10 +644,193 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 	verified.LocalSHA1 = localSHA1
 	verified.SHA1 = localSHA1
 	verified.Outcome = intendedOutcome
-	if p.progressReporter != nil {
-		p.progressReporter(size)
-	}
+	p.reportProgress(ctx, size)
 	return verified, nil
+}
+
+func validateBaiduPCSPrecreateResponse(response *baiduPCSPrecreateResponse) error {
+	if response == nil {
+		return errors.New("BaiduPCS precreate returned an empty response")
+	}
+	if strings.TrimSpace(response.UploadID) == "" {
+		return errors.New("BaiduPCS precreate returned no uploadid")
+	}
+	return nil
+}
+
+func baiduPCSParts(size, blockSize int64) []int {
+	if size <= 0 || blockSize <= 0 {
+		return nil
+	}
+	count := (size + blockSize - 1) / blockSize
+	parts := make([]int, count)
+	for index := range parts {
+		parts[index] = index
+	}
+	return parts
+}
+
+type baiduPCSPreuploadDigestResult struct {
+	digest *baiduPCSDigest
+	err    error
+}
+
+// preuploadAndRapid follows the web uploader's race: ordinary chunks start
+// while the complete digest is calculated, then rapidupload is attempted as
+// soon as that digest is ready. A rapid miss leaves the chunk workers running
+// so the normal create path can reuse the data already sent.
+func (p *baiduPCSProvider) preuploadAndRapid(ctx context.Context, remotePath, uploadID string, file *os.File, modTime time.Time, initialDigest *baiduPCSDigest) (*baiduPCSDigest, RemoteFile, error, error) {
+	parts := baiduPCSParts(initialDigest.Size, initialDigest.BlockSize)
+	serverURL, err := p.locateUpload(ctx, remotePath, uploadID)
+	if err != nil {
+		return nil, RemoteFile{}, nil, fmt.Errorf("locate BaiduPCS upload server: %w", err)
+	}
+	p.log(ctx, slog.LevelInfo, "baidu pcs upload server selected",
+		"remote_path", remotePath,
+		"server_host", baiduPCSURLHost(serverURL),
+		"preupload", true,
+	)
+
+	uploadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	digestResults := make(chan baiduPCSPreuploadDigestResult, 1)
+	go func() {
+		digest, digestErr := calculateBaiduPCSDigest(ctx, file)
+		digestResults <- baiduPCSPreuploadDigestResult{digest: digest, err: digestErr}
+	}()
+	uploadResults := make(chan error, 1)
+	go func() {
+		uploadResults <- p.uploadChunks(uploadCtx, serverURL, remotePath, uploadID, parts, file, initialDigest)
+	}()
+
+	var fullDigest *baiduPCSDigest
+	var rapid RemoteFile
+	var rapidErr error
+	var uploadErr error
+	digestDone := false
+	uploadDone := false
+	for !digestDone || !uploadDone {
+		select {
+		case result := <-digestResults:
+			digestDone = true
+			if result.err != nil {
+				cancel()
+				uploadErr = <-uploadResults
+				return nil, RemoteFile{}, result.err, uploadErr
+			}
+			fullDigest = result.digest
+			if fullDigest == nil {
+				cancel()
+				uploadErr = <-uploadResults
+				return nil, RemoteFile{}, errors.New("BaiduPCS full digest was empty"), uploadErr
+			}
+			if fullDigest.Size != initialDigest.Size {
+				cancel()
+				uploadErr = <-uploadResults
+				return nil, RemoteFile{}, fmt.Errorf("local file changed while hashing: size=%d want=%d", fullDigest.Size, initialDigest.Size), uploadErr
+			}
+			p.log(ctx, slog.LevelInfo, "baidu pcs digest calculated",
+				"remote_path", remotePath,
+				"size", fullDigest.Size,
+				"block_size", fullDigest.BlockSize,
+				"block_count", len(fullDigest.ChunkMD5s),
+				"sha1", fullDigest.SHA1,
+				"content_md5", fullDigest.MD5,
+				"slice_md5", fullDigest.SliceMD5,
+				"encoded_content_md5", encodeBaiduOpenMD5(fullDigest.MD5),
+				"encoded_slice_md5", encodeBaiduOpenMD5(fullDigest.SliceMD5),
+				"preupload_complete", true,
+			)
+			rapid, rapidErr = p.rapidUploadFromFile(ctx, remotePath, uploadID, file, modTime, fullDigest, 1)
+			if rapidErr == nil {
+				cancel()
+				uploadErr = <-uploadResults
+				return fullDigest, rapid, nil, nil
+			}
+			var pathErr *baiduPCSRemotePathError
+			if errors.As(rapidErr, &pathErr) {
+				cancel()
+				uploadErr = <-uploadResults
+				return fullDigest, RemoteFile{}, rapidErr, uploadErr
+			}
+			p.log(ctx, slog.LevelWarn, "baidu pcs rapid upload missed; waiting for preuploaded chunks",
+				"remote_path", remotePath,
+				"error", p.logError(rapidErr),
+			)
+		case uploadErr = <-uploadResults:
+			uploadDone = true
+		case <-ctx.Done():
+			cancel()
+			if !uploadDone {
+				uploadErr = <-uploadResults
+				uploadDone = true
+			}
+			if !digestDone {
+				result := <-digestResults
+				fullDigest = result.digest
+				digestDone = true
+			}
+			return fullDigest, RemoteFile{}, ctx.Err(), uploadErr
+		}
+	}
+	return fullDigest, rapid, rapidErr, uploadErr
+}
+
+func calculateBaiduPCSInitialDigest(ctx context.Context, file *os.File) (*baiduPCSDigest, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	blockSize := int64(baiduPCSMinBlockSize)
+	blockCount := (info.Size() + blockSize - 1) / blockSize
+	initialBlockCount := blockCount
+	if initialBlockCount > 2 {
+		initialBlockCount = 2
+	}
+	chunkMD5s := make([]string, 0, initialBlockCount)
+	sliceMD5 := md5.New()
+	chunkBuffer := make([]byte, blockSize)
+	var sliceRemaining int64 = baiduPCSSliceSize
+	for index := int64(0); index < initialBlockCount; index++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		read, readErr := io.ReadFull(file, chunkBuffer)
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			readErr = nil
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+		if read == 0 {
+			break
+		}
+		chunk := chunkBuffer[:read]
+		chunkHash := md5.Sum(chunk)
+		chunkMD5s = append(chunkMD5s, fmt.Sprintf("%x", chunkHash))
+		if sliceRemaining > 0 {
+			sliceRead := int64(read)
+			if sliceRead > sliceRemaining {
+				sliceRead = sliceRemaining
+			}
+			if _, err := sliceMD5.Write(chunk[:sliceRead]); err != nil {
+				return nil, err
+			}
+			sliceRemaining -= sliceRead
+		}
+		if read < len(chunkBuffer) {
+			break
+		}
+	}
+	return &baiduPCSDigest{
+		Size:      info.Size(),
+		SliceMD5:  fmt.Sprintf("%x", sliceMD5.Sum(nil)),
+		ChunkMD5s: chunkMD5s,
+		BlockSize: blockSize,
+	}, nil
 }
 
 func calculateBaiduPCSDigest(ctx context.Context, file *os.File) (*baiduPCSDigest, error) {
@@ -546,11 +842,6 @@ func calculateBaiduPCSDigest(ctx context.Context, file *os.File) (*baiduPCSDiges
 		return nil, err
 	}
 	blockSize := int64(baiduPCSMinBlockSize)
-	if info.Size() >= baiduPCSMaxThreshold {
-		blockSize = baiduPCSMaxBlockSize
-	} else if info.Size() >= baiduPCSMiddleThreshold {
-		blockSize = baiduPCSMiddleBlockSize
-	}
 	fullMD5 := md5.New()
 	fullSHA1 := sha1.New()
 	sliceMD5 := md5.New()
@@ -721,7 +1012,7 @@ func (p *baiduPCSProvider) createDirectory(ctx context.Context, directoryPath st
 	query.Set("rtype", "1")
 	form := url.Values{}
 	form.Set("path", directoryPath)
-	form.Set("target_path", pathpkg.Dir(directoryPath)+"/")
+	form.Set("target_path", baiduPCSTargetPath(directoryPath))
 	form.Set("size", "0")
 	form.Set("isdir", "1")
 	form.Set("rtype", "1")
@@ -736,8 +1027,12 @@ func (p *baiduPCSProvider) createDirectory(ctx context.Context, directoryPath st
 	return err
 }
 
-func (p *baiduPCSProvider) precreate(ctx context.Context, remotePath string, modTime time.Time, digest *baiduPCSDigest) (*baiduPCSPrecreateResponse, error) {
-	blockList, err := json.Marshal(digest.ChunkMD5s)
+func (p *baiduPCSProvider) precreate(ctx context.Context, remotePath string, modTime time.Time, digest *baiduPCSDigest, collisionPolicy string) (*baiduPCSPrecreateResponse, error) {
+	initialBlockCount := len(digest.ChunkMD5s)
+	if initialBlockCount > 2 {
+		initialBlockCount = 2
+	}
+	blockList, err := json.Marshal(digest.ChunkMD5s[:initialBlockCount])
 	if err != nil {
 		return nil, err
 	}
@@ -748,24 +1043,17 @@ func (p *baiduPCSProvider) precreate(ctx context.Context, remotePath string, mod
 	query.Set("rtype", "1")
 	form := url.Values{}
 	form.Set("path", normalizeBaiduOpenPath(remotePath))
-	form.Set("target_path", pathpkg.Dir(normalizeBaiduOpenPath(remotePath))+"/")
-	form.Set("size", strconv.FormatInt(digest.Size, 10))
-	form.Set("isdir", "0")
+	form.Set("target_path", baiduPCSTargetPath(remotePath))
 	form.Set("autoinit", "1")
 	form.Set("local_mtime", strconv.FormatInt(modTime.Unix(), 10))
-	form.Set("local_ctime", strconv.FormatInt(modTime.Unix(), 10))
-	form.Set("content-md5", digest.MD5)
-	form.Set("slice-md5", digest.SliceMD5)
 	form.Set("block_list", string(blockList))
-	form.Set("ondup", "overwrite")
+	form.Set("ondup", baiduPCSOnDup(collisionPolicy))
 	var response baiduPCSPrecreateResponse
 	encoded := form.Encode()
 	p.log(ctx, slog.LevelInfo, "baidu pcs precreate started",
 		"remote_path", remotePath,
 		"size", digest.Size,
-		"block_count", len(digest.ChunkMD5s),
-		"content_md5", digest.MD5,
-		"slice_md5", digest.SliceMD5,
+		"block_count", initialBlockCount,
 	)
 	if err := p.doJSONRequest(ctx, http.MethodPost, baiduPCSBaseURL+"/api/precreate", query, []byte(encoded), "application/x-www-form-urlencoded", int64(len(encoded)), false, &response); err != nil {
 		return nil, err
@@ -773,7 +1061,7 @@ func (p *baiduPCSProvider) precreate(ctx context.Context, remotePath string, mod
 	return &response, nil
 }
 
-func (p *baiduPCSProvider) createFile(ctx context.Context, remotePath string, size int64, uploadID string, digest *baiduPCSDigest, rtype int) (*baiduPCSCreateResponse, error) {
+func (p *baiduPCSProvider) createFile(ctx context.Context, remotePath string, size int64, uploadID string, digest *baiduPCSDigest, rtype int, collisionPolicy string) (*baiduPCSCreateResponse, error) {
 	blockList, err := json.Marshal(digest.ChunkMD5s)
 	if err != nil {
 		return nil, err
@@ -786,12 +1074,12 @@ func (p *baiduPCSProvider) createFile(ctx context.Context, remotePath string, si
 	form := url.Values{}
 	form.Set("uploadid", strings.TrimSpace(uploadID))
 	form.Set("path", normalizeBaiduOpenPath(remotePath))
-	form.Set("target_path", pathpkg.Dir(normalizeBaiduOpenPath(remotePath))+"/")
+	form.Set("target_path", baiduPCSTargetPath(remotePath))
 	form.Set("size", strconv.FormatInt(size, 10))
 	form.Set("isdir", "0")
 	form.Set("rtype", strconv.Itoa(rtype))
 	form.Set("block_list", string(blockList))
-	form.Set("ondup", "overwrite")
+	form.Set("ondup", baiduPCSOnDup(collisionPolicy))
 	var response baiduPCSCreateResponse
 	encoded := form.Encode()
 	p.log(ctx, slog.LevelInfo, "baidu pcs file create started",
@@ -864,7 +1152,77 @@ func (p *baiduPCSProvider) locateUpload(ctx context.Context, remotePath, uploadI
 	return baiduPCSUploadBaseURL + "/rest/2.0/pcs/superfile2", nil
 }
 
-func (p *baiduPCSProvider) uploadChunk(ctx context.Context, serverURL, remotePath, uploadID string, part int, file *os.File, digest *baiduPCSDigest) error {
+func (p *baiduPCSProvider) uploadChunks(ctx context.Context, serverURL, remotePath, uploadID string, parts []int, file *os.File, digest *baiduPCSDigest) error {
+	if len(parts) == 0 {
+		return nil
+	}
+	workerCount := p.chunkConcurrency
+	if workerCount <= 0 {
+		workerCount = baiduPCSChunkConcurrency
+	}
+	if workerCount > len(parts) {
+		workerCount = len(parts)
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var next atomic.Int64
+	progress := newBaiduPCSUploadProgress(func(bytesTransferred int64) {
+		p.reportProgress(ctx, bytesTransferred)
+	})
+	errorsCh := make(chan error, 1)
+	var workers sync.WaitGroup
+	for worker := 0; worker < workerCount; worker++ {
+		workers.Add(1)
+		go func(workerIndex int) {
+			defer workers.Done()
+			if workerIndex > 0 {
+				if err := waitBaiduOpen(workerCtx, time.Duration(workerIndex)*baiduPCSWorkerStagger); err != nil {
+					return
+				}
+			}
+			for {
+				index := int(next.Add(1) - 1)
+				if index >= len(parts) {
+					return
+				}
+				part := parts[index]
+				var err error
+				for attempt := 0; attempt < baiduPCSChunkRetryLimit; attempt++ {
+					err = p.uploadChunk(workerCtx, serverURL, remotePath, uploadID, part, file, digest, progress)
+					if err == nil {
+						break
+					}
+					if workerCtx.Err() != nil || attempt+1 >= baiduPCSChunkRetryLimit {
+						break
+					}
+					if waitErr := waitBaiduOpen(workerCtx, time.Duration(attempt+1)*time.Second); waitErr != nil {
+						return
+					}
+				}
+				if err != nil {
+					select {
+					case errorsCh <- fmt.Errorf("BaiduPCS upload block %d after %d attempts: %w", part, baiduPCSChunkRetryLimit, err):
+					default:
+					}
+					cancel()
+					return
+				}
+			}
+		}(worker)
+	}
+	workers.Wait()
+	select {
+	case err := <-errorsCh:
+		return err
+	default:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
+func (p *baiduPCSProvider) uploadChunk(ctx context.Context, serverURL, remotePath, uploadID string, part int, file *os.File, digest *baiduPCSDigest, progress *baiduPCSUploadProgress) error {
 	partOffset := int64(part) * digest.BlockSize
 	partSize := digest.Size - partOffset
 	if partSize > digest.BlockSize {
@@ -889,9 +1247,18 @@ func (p *baiduPCSProvider) uploadChunk(ctx context.Context, serverURL, remotePat
 	query.Set("channel", "chunlei")
 	query.Set("web", "1")
 	query.Set("clienttype", "0")
+	query.Set("dp-logid", p.nextDPLogID())
 	body := io.MultiReader(
 		bytes.NewReader(prefix),
-		&baiduPCSProgressReader{reader: io.NewSectionReader(file, partOffset, partSize), offset: partOffset, report: p.progressReporter},
+		&baiduPCSProgressReader{
+			reader: io.NewSectionReader(file, partOffset, partSize),
+			offset: partOffset,
+			report: func(absoluteBytes int64) {
+				if progress != nil {
+					progress.update(part, absoluteBytes-partOffset)
+				}
+			},
+		},
 		bytes.NewReader(suffix),
 	)
 	bodyLength := int64(len(prefix)) + partSize + int64(len(suffix))
@@ -903,7 +1270,7 @@ func (p *baiduPCSProvider) uploadChunk(ctx context.Context, serverURL, remotePat
 		"part_size", partSize,
 		"server_host", baiduPCSURLHost(serverURL),
 	)
-	err = p.doJSONRequest(ctx, http.MethodPost, strings.TrimRight(serverURL, "/"), query, body, contentType, bodyLength, false, &response)
+	err = p.doJSONRequestWithOptions(ctx, http.MethodPost, strings.TrimRight(serverURL, "/"), query, body, contentType, bodyLength, false, false, &response)
 	if err != nil {
 		p.log(ctx, slog.LevelWarn, "baidu pcs superfile2 upload failed",
 			"remote_path", remotePath,
@@ -940,15 +1307,20 @@ func (p *baiduPCSProvider) rapidUploadFromFile(ctx context.Context, remotePath, 
 		return RemoteFile{}, err
 	}
 	dataTime := time.Now().Unix()
-	offset := baiduPCSDataOffset(digest.MD5, uk, dataTime, digest.Size)
+	encodedContentMD5 := encodeBaiduOpenMD5(digest.MD5)
+	offset := baiduPCSDataOffset(encodedContentMD5, uk, dataTime, digest.Size)
 	dataLength := int64(baiduPCSDataContentSize)
 	if digest.Size < dataLength {
 		dataLength = digest.Size
 	}
 	data := make([]byte, dataLength)
 	if dataLength > 0 {
-		if _, err := file.ReadAt(data, offset); err != nil && err != io.EOF {
-			return RemoteFile{}, err
+		read, readErr := file.ReadAt(data, offset)
+		if readErr != nil && !(errors.Is(readErr, io.EOF) && int64(read) == dataLength) {
+			return RemoteFile{}, readErr
+		}
+		if int64(read) != dataLength {
+			return RemoteFile{}, fmt.Errorf("read rapid upload sample: got %d bytes, want %d", read, dataLength)
 		}
 	}
 	p.log(ctx, slog.LevelInfo, "baidu pcs rapidupload prepared",
@@ -960,17 +1332,13 @@ func (p *baiduPCSProvider) rapidUploadFromFile(ctx context.Context, remotePath, 
 		"data_length", len(data),
 		"content_md5", digest.MD5,
 		"slice_md5", digest.SliceMD5,
-		"encoded_content_md5", encodeBaiduOpenMD5(digest.MD5),
+		"encoded_content_md5", encodedContentMD5,
 		"encoded_slice_md5", encodeBaiduOpenMD5(digest.SliceMD5),
 	)
 	return p.rapidUploadWithData(ctx, remotePath, uploadID, modTime, digest, rtype, offset, dataTime, data)
 }
 
 func (p *baiduPCSProvider) rapidUploadWithData(ctx context.Context, remotePath, uploadID string, modTime time.Time, digest *baiduPCSDigest, rtype int, offset, dataTime int64, data []byte) (RemoteFile, error) {
-	blockList, err := json.Marshal(digest.ChunkMD5s)
-	if err != nil {
-		return RemoteFile{}, err
-	}
 	query, err := p.webQuery(ctx, true)
 	if err != nil {
 		return RemoteFile{}, err
@@ -981,20 +1349,14 @@ func (p *baiduPCSProvider) rapidUploadWithData(ctx context.Context, remotePath, 
 		form.Set("uploadid", strings.TrimSpace(uploadID))
 	}
 	form.Set("path", normalizeBaiduOpenPath(remotePath))
-	form.Set("target_path", pathpkg.Dir(normalizeBaiduOpenPath(remotePath))+"/")
+	form.Set("target_path", baiduPCSTargetPath(remotePath))
 	form.Set("content-length", strconv.FormatInt(digest.Size, 10))
 	form.Set("content-md5", encodeBaiduOpenMD5(digest.MD5))
 	form.Set("slice-md5", encodeBaiduOpenMD5(digest.SliceMD5))
 	form.Set("local_mtime", strconv.FormatInt(modTime.Unix(), 10))
-	form.Set("local_ctime", strconv.FormatInt(modTime.Unix(), 10))
 	form.Set("data_time", strconv.FormatInt(dataTime, 10))
 	form.Set("data_offset", strconv.FormatInt(offset, 10))
-	form.Set("data_length", strconv.Itoa(len(data)))
-	form.Set("data_content", strings.TrimRight(base64.StdEncoding.EncodeToString(data), "="))
-	form.Set("block_list", string(blockList))
-	form.Set("mode", "1")
-	form.Set("autoinit", "1")
-	form.Set("checkexist", "0")
+	form.Set("data_content", base64.StdEncoding.EncodeToString(data))
 	encoded := form.Encode()
 	var response baiduPCSRapidResponse
 	if err := p.doJSONRequest(ctx, http.MethodPost, baiduPCSBaseURL+"/api/rapidupload", query, []byte(encoded), "application/x-www-form-urlencoded", int64(len(encoded)), false, &response); err != nil {
@@ -1027,6 +1389,26 @@ func (p *baiduPCSProvider) rapidUploadWithData(ctx context.Context, remotePath, 
 		)
 		return RemoteFile{}, errors.New("BaiduPCS rapid upload did not complete")
 	}
+	actualPath := strings.TrimSpace(response.Path)
+	actualSize := ""
+	if response.Info != nil {
+		if strings.TrimSpace(response.Info.Path) != "" {
+			actualPath = strings.TrimSpace(response.Info.Path)
+		}
+		actualSize = strings.TrimSpace(string(response.Info.Size))
+	}
+	if actualPath != "" && normalizeBaiduOpenPath(actualPath) != normalizeBaiduOpenPath(remotePath) {
+		return RemoteFile{}, &baiduPCSRemotePathError{Expected: normalizeBaiduOpenPath(remotePath), Actual: normalizeBaiduOpenPath(actualPath), FSID: id}
+	}
+	if actualSize != "" {
+		parsedSize, parseErr := strconv.ParseInt(actualSize, 10, 64)
+		if parseErr != nil {
+			return RemoteFile{}, fmt.Errorf("BaiduPCS rapid upload returned invalid size %q (fs_id=%s)", actualSize, id)
+		}
+		if parsedSize != digest.Size {
+			return RemoteFile{}, fmt.Errorf("BaiduPCS rapid upload returned size %d, want %d (fs_id=%s)", parsedSize, digest.Size, id)
+		}
+	}
 	p.log(ctx, slog.LevelInfo, "baidu pcs rapidupload returned fs_id",
 		"remote_path", remotePath,
 		"fs_id", id,
@@ -1035,44 +1417,73 @@ func (p *baiduPCSProvider) rapidUploadWithData(ctx context.Context, remotePath, 
 }
 
 func (p *baiduPCSProvider) userUK(ctx context.Context) (int64, error) {
-	p.ukMu.Lock()
-	defer p.ukMu.Unlock()
-	if p.uk > 0 {
-		return p.uk, nil
-	}
-	query := url.Values{}
-	query.Set("need_selfinfo", "1")
-	var response baiduPCSUserInfoResponse
-	if err := p.doJSONRequest(ctx, http.MethodGet, baiduPCSBaseURL+"/api/user/getinfo", query, nil, "", 0, false, &response); err != nil {
+	if err := p.ensureWebSession(ctx, true); err != nil {
 		return 0, err
 	}
-	if len(response.Records) == 0 {
-		return 0, errors.New("BaiduPCS user info returned no uk")
+	p.sessionMu.Lock()
+	uk := p.uk
+	p.sessionMu.Unlock()
+	if uk <= 0 {
+		return 0, errors.New("BaiduPCS web session returned no uk")
 	}
-	uk, err := strconv.ParseInt(strings.TrimSpace(string(response.Records[0].UK)), 10, 64)
-	if err != nil || uk <= 0 {
-		if err == nil {
-			err = errors.New("uk must be positive")
-		}
-		return 0, err
-	}
-	p.uk = uk
-	p.log(ctx, slog.LevelInfo, "baidu pcs user info resolved",
-		"uk", uk,
-	)
+	p.log(ctx, slog.LevelInfo, "baidu pcs web user resolved", "uk", uk)
 	return uk, nil
 }
 
-func baiduPCSDataOffset(contentMD5 string, uk, dataTime, fileSize int64) int64 {
+func (p *baiduPCSProvider) MaxConcurrentFiles(ctx context.Context) (int, error) {
+	p.vipMu.Lock()
+	if p.vipLoaded {
+		limit := p.maxConcurrentFiles
+		p.vipMu.Unlock()
+		return limit, nil
+	}
+	p.vipMu.Unlock()
+
+	query, err := p.webQuery(ctx, false)
+	if err != nil {
+		return 1, err
+	}
+	query.Set("version", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	var response baiduPCSLoginStatusResponse
+	if err := p.doJSONRequest(ctx, http.MethodGet, baiduPCSBaseURL+"/api/loginStatus", query, nil, "", 0, false, &response); err != nil {
+		return 1, err
+	}
+	identity, err := parseBaiduJSONInt64(response.LoginInfo.VIPIdentity)
+	if err != nil || identity < 0 {
+		if err == nil {
+			err = errors.New("vip_identity must be non-negative")
+		}
+		p.vipMu.Lock()
+		p.vipLoaded = true
+		p.vipIdentity = 0
+		p.maxConcurrentFiles = 1
+		p.vipMu.Unlock()
+		return 1, err
+	}
+	limit := 1
+	if identity/10 == 2 {
+		limit = 3
+	}
+	p.vipMu.Lock()
+	p.vipLoaded = true
+	p.vipIdentity = identity
+	p.maxConcurrentFiles = limit
+	p.vipMu.Unlock()
+	p.log(ctx, slog.LevelInfo, "baidu pcs web upload concurrency resolved",
+		"vip_type", identity/10,
+		"max_concurrent_files", limit,
+	)
+	return limit, nil
+}
+
+func baiduPCSDataOffset(encodedContentMD5 string, uk, dataTime, fileSize int64) int64 {
 	if fileSize <= baiduPCSDataContentSize {
 		return 0
 	}
-	sum := md5.Sum([]byte(fmt.Sprintf("%d%s%d", uk, contentMD5, dataTime)))
-	raw, err := strconv.ParseInt(fmt.Sprintf("%x", sum[:4]), 16, 64)
-	if err != nil {
-		return 0
-	}
-	return raw % (fileSize - baiduPCSDataContentSize + 1)
+	seed := strconv.FormatInt(uk, 10) + encodedContentMD5 + strconv.FormatInt(dataTime, 10)
+	sum := md5.Sum([]byte(seed))
+	raw := binary.BigEndian.Uint32(sum[:4])
+	return int64(uint64(raw) % uint64(fileSize-baiduPCSDataContentSize+1))
 }
 
 func (p *baiduPCSProvider) verifyRemoteFile(ctx context.Context, fsID, expectedPath string, size int64) (RemoteFile, error) {
@@ -1134,6 +1545,7 @@ func (p *baiduPCSProvider) webQuery(ctx context.Context, needsToken bool) (url.V
 	query.Set("channel", "chunlei")
 	query.Set("web", "1")
 	query.Set("clienttype", "0")
+	query.Set("dp-logid", p.nextDPLogID())
 	if !needsToken {
 		return query, nil
 	}
@@ -1145,35 +1557,73 @@ func (p *baiduPCSProvider) webQuery(ctx context.Context, needsToken bool) (url.V
 	return query, nil
 }
 
-func (p *baiduPCSProvider) ensureBDSToken(ctx context.Context) (string, error) {
-	p.bdstokenMu.Lock()
-	defer p.bdstokenMu.Unlock()
-	if strings.TrimSpace(p.bdstoken) != "" {
-		return p.bdstoken, nil
+func (p *baiduPCSProvider) ensureWebSession(ctx context.Context, needUK bool) error {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	needToken := strings.TrimSpace(p.bdstoken) == ""
+	needUserKey := needUK && p.uk <= 0
+	if !needToken && !needUserKey {
+		return nil
+	}
+	fields := make([]string, 0, 2)
+	if needToken {
+		fields = append(fields, "bdstoken")
+	}
+	if needUserKey {
+		fields = append(fields, "uk")
+	}
+	encodedFields, err := json.Marshal(fields)
+	if err != nil {
+		return err
 	}
 	query := url.Values{}
-	query.Set("fields", `["bdstoken"]`)
+	query.Set("fields", string(encodedFields))
 	query.Set("app_id", baiduPCSAppID)
 	query.Set("channel", "chunlei")
 	query.Set("web", "1")
 	query.Set("clienttype", "0")
-	var response struct {
-		baiduPCSAPIResponse
-		Result struct {
-			BDSToken string `json:"bdstoken"`
-		} `json:"result"`
-	}
+	query.Set("dp-logid", p.nextDPLogID())
+	var response baiduPCSWebTemplateResponse
 	if err := p.doJSONRequest(ctx, http.MethodGet, baiduPCSBaseURL+"/api/gettemplatevariable", query, nil, "", 0, false, &response); err != nil {
+		return err
+	}
+	if needToken {
+		p.bdstoken = strings.TrimSpace(jsonRawString(response.Result["bdstoken"]))
+		if p.bdstoken == "" {
+			return errors.New("BaiduPCS gettemplatevariable returned no bdstoken")
+		}
+	}
+	if needUserKey {
+		uk, parseErr := parseBaiduJSONInt64(response.Result["uk"])
+		if parseErr != nil || uk <= 0 {
+			if parseErr == nil {
+				parseErr = errors.New("uk must be positive")
+			}
+			return parseErr
+		}
+		p.uk = uk
+	}
+	return nil
+}
+
+func (p *baiduPCSProvider) ensureBDSToken(ctx context.Context) (string, error) {
+	if err := p.ensureWebSession(ctx, false); err != nil {
 		return "", err
 	}
-	p.bdstoken = strings.TrimSpace(response.Result.BDSToken)
-	if p.bdstoken == "" {
+	p.sessionMu.Lock()
+	token := p.bdstoken
+	p.sessionMu.Unlock()
+	if strings.TrimSpace(token) == "" {
 		return "", errors.New("BaiduPCS gettemplatevariable returned no bdstoken")
 	}
-	return p.bdstoken, nil
+	return token, nil
 }
 
 func (p *baiduPCSProvider) doJSONRequest(ctx context.Context, method, endpoint string, query url.Values, body any, contentType string, contentLength int64, needsToken bool, out any) error {
+	return p.doJSONRequestWithOptions(ctx, method, endpoint, query, body, contentType, contentLength, needsToken, true, out)
+}
+
+func (p *baiduPCSProvider) doJSONRequestWithOptions(ctx context.Context, method, endpoint string, query url.Values, body any, contentType string, contentLength int64, needsToken, throttle bool, out any) error {
 	if needsToken {
 		var err error
 		query, err = p.webQueryWithValues(ctx, query)
@@ -1222,9 +1672,11 @@ func (p *baiduPCSProvider) doJSONRequest(ctx context.Context, method, endpoint s
 	req.Header.Set("Accept-Encoding", "identity")
 	requestStarted := time.Now()
 	p.log(ctx, slog.LevelInfo, "baidu pcs request started", requestFields...)
-	if err := p.waitRequest(ctx); err != nil {
-		p.log(ctx, slog.LevelWarn, "baidu pcs request throttling failed", append(requestFields, "error", p.logError(err))...)
-		return err
+	if throttle {
+		if err := p.waitRequest(ctx); err != nil {
+			p.log(ctx, slog.LevelWarn, "baidu pcs request throttling failed", append(requestFields, "error", p.logError(err))...)
+			return err
+		}
 	}
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -1306,6 +1758,37 @@ func baiduPCSInfoFSID(info *baiduPCSFileItem) string {
 		return ""
 	}
 	return strings.TrimSpace(string(info.FSID))
+}
+
+func parseBaiduJSONInt64(raw json.RawMessage) (int64, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, errors.New("missing numeric value")
+	}
+	var number int64
+	if err := json.Unmarshal(raw, &number); err == nil {
+		return number, nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+}
+
+func jsonRawString(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var value string
+	if json.Unmarshal(raw, &value) == nil {
+		return strings.TrimSpace(value)
+	}
+	return strings.Trim(strings.TrimSpace(string(raw)), `"`)
+}
+
+func (p *baiduPCSProvider) nextDPLogID() string {
+	sequence := p.requestSequence.Add(1) % 10000000
+	return fmt.Sprintf("%013d%07d", time.Now().UnixMilli()%10000000000000, sequence)
 }
 
 func readBaiduPCSResponseBody(response *http.Response) ([]byte, error) {

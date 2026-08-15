@@ -41,6 +41,44 @@ type waitReportingProvider struct {
 	continueUpload   chan struct{}
 }
 
+type concurrentProvider struct {
+	fakeProvider
+	limit     int
+	started   chan struct{}
+	release   chan struct{}
+	active    int
+	maxActive int
+	startOnce sync.Once
+	mu        sync.Mutex
+}
+
+func (p *concurrentProvider) MaxConcurrentFiles(context.Context) (int, error) {
+	return p.limit, nil
+}
+
+func (p *concurrentProvider) Upload(ctx context.Context, localPath, remotePath string, size int64, localSHA1, collisionPolicy string) (RemoteFile, error) {
+	p.mu.Lock()
+	p.active++
+	if p.active > p.maxActive {
+		p.maxActive = p.active
+	}
+	if p.active >= p.limit {
+		p.startOnce.Do(func() { close(p.started) })
+	}
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.active--
+		p.mu.Unlock()
+	}()
+	select {
+	case <-ctx.Done():
+		return RemoteFile{}, ctx.Err()
+	case <-p.release:
+	}
+	return p.fakeProvider.Upload(ctx, localPath, remotePath, size, localSHA1, collisionPolicy)
+}
+
 func (p *waitReportingProvider) setWaitReporter(reporter func(string, time.Time)) {
 	p.reporter = reporter
 }
@@ -229,6 +267,100 @@ func TestProcessTargetPublishesAndClearsRuntimeWaitState(t *testing.T) {
 	}
 	if _, ok := manager.TransferRuntimeStates()[transfers[0].ID]; ok {
 		t.Fatal("completed transfer retained stale runtime wait state")
+	}
+}
+
+func TestProcessTargetUsesProviderFileConcurrency(t *testing.T) {
+	ctx := context.Background()
+	st := openUploadTestStore(t)
+	defer st.Close()
+	root := t.TempDir()
+	showPath := filepath.Join(root, "Show")
+	if err := os.MkdirAll(showPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := st.CreateWatchDir(ctx, store.WatchDir{Path: root, Recursive: true, WatchEnabled: true, UseGlobalProcessing: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRecord, err := st.CreateUploadProvider(ctx, store.UploadProvider{Name: "Baidu Web", Type: store.UploadProviderTypeBaiduPCS, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir.UploadConfigs = []store.UploadProviderRoute{{
+		ProviderID: providerRecord.ID, Enabled: true, RemoteRoot: "/Archive", CollisionPolicy: "fail", IncludeTypes: []string{"video"},
+	}}
+	if _, err := st.UpdateWatchDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	candidates := make([]store.UploadCandidate, 0, 3)
+	for index := 1; index <= 3; index++ {
+		localPath := filepath.Join(showPath, fmt.Sprintf("S01E0%d.mkv", index))
+		content := []byte(fmt.Sprintf("video-%d", index))
+		if err := os.WriteFile(localPath, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(localPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, store.UploadCandidate{
+			LocalPath: localPath, RelativePath: filepath.ToSlash(filepath.Join("Show", filepath.Base(localPath))),
+			FileType: "video", Size: info.Size(), ModifiedAt: info.ModTime(),
+		})
+	}
+	batch, created, err := st.CollectUploadBatch(ctx, store.UploadCollectionInput{
+		WatchDirID: &dir.ID, SeriesKey: "show", SeriesPath: showPath, QuietPeriod: time.Millisecond, Files: candidates,
+	})
+	if err != nil || !created {
+		t.Fatalf("collect upload batch: batch=%#v created=%v err=%v", batch, created, err)
+	}
+	if _, err := st.SealDueUploadBatches(ctx, time.Now(), time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	target, err := st.ClaimNextUploadTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &concurrentProvider{limit: 3, started: make(chan struct{}), release: make(chan struct{})}
+	manager := NewWithFactory(Options{QuietPeriod: time.Millisecond, MaxAttempts: 1}, st, slog.Default(), func(context.Context, store.UploadBatchTarget) (Provider, error) {
+		return provider, nil
+	})
+	processDone := make(chan error, 1)
+	go func() {
+		processDone <- manager.processTarget(ctx, target)
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not reach its file concurrency limit")
+	}
+	provider.mu.Lock()
+	maxActive := provider.maxActive
+	provider.mu.Unlock()
+	if maxActive != 3 {
+		t.Fatalf("max active uploads = %d, want 3", maxActive)
+	}
+	close(provider.release)
+	select {
+	case err := <-processDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent target processing did not finish")
+	}
+	detail, err := st.GetUploadBatchDetail(ctx, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Targets[0].Status != store.UploadTargetCompleted || detail.Batch.Status != store.UploadBatchCompleted {
+		t.Fatalf("target did not complete: %#v", detail)
+	}
+	for _, transfer := range detail.Transfers {
+		if transfer.Status != store.UploadTransferCompleted {
+			t.Fatalf("transfer did not complete: %#v", transfer)
+		}
 	}
 }
 

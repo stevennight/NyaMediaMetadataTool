@@ -6,6 +6,8 @@
 
 本文中的 MAO 文件和远端路径是固定的验证向量，不是主应用的全局硬编码上传目标。
 
+当前主应用已经接入本方案中的 `preuploadBeforeRapid` Provider 配置。默认值仍为关闭；开启后才会启用 MD5 计算与普通分片上传的并行竞速。
+
 ## 1. 当前结论
 
 百度网盘网页端可以在不上传普通文件分片的情况下，通过 `rapidupload` 直接创建完整文件。成功条件不是 `precreate.return_type`，而是：
@@ -233,7 +235,7 @@ slice MD5 + precreate
 
 | 配置 | 默认值 | 作用 |
 | --- | --- | --- |
-| `preuploadBeforeRapid` | `false` | 是否在完整 MD5完成前预上传普通分片 |
+| `preuploadBeforeRapid` | `false` | 是否在完整 MD5 完成前预上传普通分片；在 Provider 编辑页配置并随上传批次快照 |
 | `preuploadConcurrency` | `3` | 预上传并发数，和官方网页端一致 |
 | `chunkSize` | `4194304` | 分片大小，网页端固定为 4 MiB，通常不开放修改 |
 | `rapidUploadEnabled` | `true` | 是否尝试网页端 rapidupload |

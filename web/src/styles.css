@@ -3523,6 +3523,16 @@ h3 {
   line-height: 1.35;
 }
 
+.config-toggle-field {
+  display: grid;
+  gap: 4px;
+}
+
+.config-toggle-field > small {
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
 .settings-form .toggle-row {
   font-size: 14px;
   font-weight: 650;

@@ -60,6 +60,12 @@ var defaultProviderDescriptors = map[string]ProviderDescriptor{
 		Implemented: true,
 		SecretKeys:  []string{"client_id", "client_secret", "access_token", "refresh_token", "access_token_expires_at", "auth_mode", "oauth_broker_base_url", "oauth_broker_client_id", "oauth_broker_token"},
 	},
+	store.UploadProviderTypeBaiduPCS: {
+		Type:        store.UploadProviderTypeBaiduPCS,
+		Name:        "Baidu Pan Web",
+		Implemented: true,
+		SecretKeys:  []string{"cookie", "bdstoken"},
+	},
 }
 
 func ListProviderDescriptors() []ProviderDescriptor {

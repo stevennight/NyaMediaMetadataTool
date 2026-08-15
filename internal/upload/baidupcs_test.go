@@ -1,0 +1,289 @@
+package upload
+
+import (
+	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestBaiduPCSUploadUsesRapidUploadAfterPrecreate(t *testing.T) {
+	content := []byte("rapid-upload-content")
+	localPath := filepath.Join(t.TempDir(), "episode.mkv")
+	if err := os.WriteFile(localPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digestFile, err := os.Open(localPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := calculateBaiduPCSDigest(context.Background(), digestFile)
+	if closeErr := digestFile.Close(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listCalls := 0
+	rapidCalls := 0
+	precreateCalls := 0
+	var rapidValidationErr error
+	var uploadedParts []string
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/list":
+			if req.URL.Host != "pan.baidu.com" || req.URL.Query().Get("bdstoken") != "token" {
+				return nil, fmt.Errorf("web list request host=%q bdstoken=%q", req.URL.Host, req.URL.Query().Get("bdstoken"))
+			}
+			listCalls++
+			if listCalls == 1 {
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[{"fs_id":101,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":20}]}`), nil
+		case "/rest/2.0/pcs/file":
+			if req.URL.Host != "pcs.baidu.com" || req.URL.Query().Get("method") != "locateupload" {
+				return nil, fmt.Errorf("unexpected PCS locateupload request host=%q method=%q", req.URL.Host, req.URL.Query().Get("method"))
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"servers":[{"server":"https://upload.example"}]}`), nil
+		case "/api/user/getinfo":
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"records":[{"uk":12345}]}`), nil
+		case "/api/precreate":
+			precreateCalls++
+			formBytes, _ := io.ReadAll(req.Body)
+			form, _ := url.ParseQuery(string(formBytes))
+			if form.Get("path") != "/episode.mkv" || form.Get("content-md5") != digest.MD5 || form.Get("slice-md5") != digest.SliceMD5 || form.Get("local_ctime") == "" {
+				return nil, fmt.Errorf("precreate form = %s", formBytes)
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"return_type":1,"uploadid":"upload-rapid","block_list":[0]}`), nil
+		case "/rest/2.0/pcs/superfile2":
+			uploadedParts = append(uploadedParts, req.URL.Query().Get("partseq"))
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"md5":"ignored"}`), nil
+		case "/api/rapidupload":
+			rapidCalls++
+			formBytes, _ := io.ReadAll(req.Body)
+			form, _ := url.ParseQuery(string(formBytes))
+			if form.Get("uploadid") != "upload-rapid" || form.Get("content-md5") != encodeBaiduOpenMD5(digest.MD5) || form.Get("slice-md5") != encodeBaiduOpenMD5(digest.SliceMD5) || form.Get("data_content") == "" || form.Get("local_ctime") == "" {
+				rapidValidationErr = fmt.Errorf("rapid form = %s", formBytes)
+				return nil, rapidValidationErr
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"info":{"fs_id":101,"path":"/episode.mkv","size":20}}`), nil
+		case "/api/create":
+			if rapidValidationErr != nil {
+				return nil, rapidValidationErr
+			}
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		default:
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		}
+	})
+
+	remote, err := provider.Upload(context.Background(), localPath, "/episode.mkv", int64(len(content)), "", "replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.ID != "101" || remote.Size != int64(len(content)) || remote.Outcome != "created" {
+		t.Fatalf("remote = %#v", remote)
+	}
+	if precreateCalls != 1 || len(uploadedParts) != 1 || uploadedParts[0] != "0" {
+		t.Fatalf("precreate calls = %d, uploaded parts = %#v", precreateCalls, uploadedParts)
+	}
+	if rapidCalls != 1 {
+		t.Fatalf("rapid calls = %d, want 1", rapidCalls)
+	}
+}
+
+func TestBaiduWebMD5EncodingMatchesCapturedValues(t *testing.T) {
+	tests := map[string]string{
+		"75d430ecaf7e2af89083bdcf83cb3310": "ae5d6f9ffs7ffd0382e8767719287020",
+		"4e6ff05e39d763d062288e3c2798de36": "38f426b7cnc43db126bb9b51eb8343d3",
+		"aeec9c4e038d046789e2dfaeab8b1031": "02ae41002n4751a1aaa8555600491241",
+	}
+	for plain, encoded := range tests {
+		if got := encodeBaiduOpenMD5(plain); got != encoded {
+			t.Fatalf("encodeBaiduOpenMD5(%q) = %q, want %q", plain, got, encoded)
+		}
+		if got := decodeBaiduOpenMD5(encoded); got != plain {
+			t.Fatalf("decodeBaiduOpenMD5(%q) = %q, want %q", encoded, got, plain)
+		}
+	}
+}
+
+func TestBaiduPCSRequestAcceptsPlainJSONWithGzipHeader(t *testing.T) {
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Encoding": []string{"gzip"}},
+			Body:       io.NopCloser(strings.NewReader(`{"errno":0,"list":[]}`)),
+			Request:    req,
+		}, nil
+	})
+
+	var response baiduPCSListResponse
+	if err := provider.doJSONRequest(context.Background(), http.MethodGet, baiduPCSAPIBaseURL+"/rest/2.0/pcs/file", url.Values{"method": []string{"list"}}, nil, "", 0, false, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Errno != 0 || response.List == nil {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestBaiduPCSCreateDirectoryUsesWebAPI(t *testing.T) {
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/api/create" || req.URL.Host != "pan.baidu.com" {
+			return nil, fmt.Errorf("unexpected directory create request: %s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
+		}
+		if req.URL.Query().Get("bdstoken") != "token" || req.URL.Query().Get("rtype") != "1" {
+			return nil, fmt.Errorf("directory create query = %s", req.URL.RawQuery)
+		}
+		formBytes, readErr := io.ReadAll(req.Body)
+		if readErr != nil {
+			return nil, readErr
+		}
+		form, parseErr := url.ParseQuery(string(formBytes))
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if form.Get("path") != "/Video/NEW" || form.Get("isdir") != "1" || form.Get("ondup") != "fail" {
+			return nil, fmt.Errorf("directory create form = %s", formBytes)
+		}
+		return baiduOpenJSONResponse(http.StatusOK, `{"errno":0}`), nil
+	})
+
+	if err := provider.createDirectory(context.Background(), "/Video/NEW"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBaiduPCSPrecreateRapidUploadRequiresFSID(t *testing.T) {
+	localPath := filepath.Join(t.TempDir(), "episode.mkv")
+	if err := os.WriteFile(localPath, []byte("missing-fsid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/list":
+			if req.URL.Host != "pan.baidu.com" {
+				return nil, fmt.Errorf("unexpected web list host %q", req.URL.Host)
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
+		case "/api/precreate":
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"return_type":2,"uploadid":"upload-rapid"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		}
+	})
+
+	_, err = provider.Upload(context.Background(), localPath, "/episode.mkv", int64(len("missing-fsid")), "", "replace")
+	if err == nil || !strings.Contains(err.Error(), "no fs_id") {
+		t.Fatalf("error = %v, want missing fs_id failure", err)
+	}
+}
+
+func TestBaiduPCSUploadUsesReturnedBlockListAndCreateFallback(t *testing.T) {
+	content := make([]byte, baiduPCSMinBlockSize+10)
+	for index := range content {
+		content[index] = byte(index % 251)
+	}
+	localPath := filepath.Join(t.TempDir(), "episode.mkv")
+	if err := os.WriteFile(localPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstBlock := md5.Sum(content[:baiduPCSMinBlockSize])
+	secondBlock := md5.Sum(content[baiduPCSMinBlockSize:])
+	wantBlocks := []string{hex.EncodeToString(firstBlock[:]), hex.EncodeToString(secondBlock[:])}
+	listCalls := 0
+	rapidCalls := 0
+	var uploadedParts []string
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/list":
+			if req.URL.Host != "pan.baidu.com" {
+				return nil, fmt.Errorf("unexpected web list host %q", req.URL.Host)
+			}
+			listCalls++
+			if listCalls == 1 {
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
+			}
+			return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"list":[{"fs_id":202,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":%d}]}`, len(content))), nil
+		case "/rest/2.0/pcs/file":
+			if req.URL.Host != "pcs.baidu.com" || req.URL.Query().Get("method") != "locateupload" {
+				return nil, fmt.Errorf("unexpected PCS locateupload request host=%q method=%q", req.URL.Host, req.URL.Query().Get("method"))
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"servers":[{"server":"https://upload.example"}]}`), nil
+		case "/api/user/getinfo":
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"records":[{"uk":12345}]}`), nil
+		case "/api/rapidupload":
+			rapidCalls++
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":31023,"errmsg":"not found"}`), nil
+		case "/api/precreate":
+			formBytes, _ := io.ReadAll(req.Body)
+			form, _ := url.ParseQuery(string(formBytes))
+			var blocks []string
+			if err := json.Unmarshal([]byte(form.Get("block_list")), &blocks); err != nil {
+				return nil, fmt.Errorf("precreate block list: %w", err)
+			}
+			if len(blocks) != 2 || blocks[0] != wantBlocks[0] || blocks[1] != wantBlocks[1] {
+				return nil, fmt.Errorf("precreate block list = %#v, want %#v", blocks, wantBlocks)
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"return_type":1,"uploadid":"upload-1","block_list":[1]}`), nil
+		case "/rest/2.0/pcs/superfile2":
+			uploadedParts = append(uploadedParts, req.URL.Query().Get("partseq"))
+			return baiduOpenJSONResponse(http.StatusOK, `{"md5":"ignored"}`), nil
+		case "/api/create":
+			formBytes, _ := io.ReadAll(req.Body)
+			form, _ := url.ParseQuery(string(formBytes))
+			var blocks []string
+			if err := json.Unmarshal([]byte(form.Get("block_list")), &blocks); err != nil {
+				return nil, fmt.Errorf("create block list: %w", err)
+			}
+			if form.Get("uploadid") != "upload-1" || form.Get("rtype") != "3" || len(blocks) != 2 || blocks[0] != wantBlocks[0] || blocks[1] != wantBlocks[1] {
+				return nil, fmt.Errorf("create form = %s", formBytes)
+			}
+			return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"fs_id":202,"path":"/episode.mkv","size":%d}`, len(content))), nil
+		default:
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		}
+	})
+
+	remote, err := provider.Upload(context.Background(), localPath, "/episode.mkv", int64(len(content)), "", "replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.ID != "202" || remote.Size != int64(len(content)) || remote.Outcome != "created" {
+		t.Fatalf("remote = %#v", remote)
+	}
+	if rapidCalls != 1 {
+		t.Fatalf("rapid calls = %d, want upload-session attempt", rapidCalls)
+	}
+	if len(uploadedParts) != 1 || uploadedParts[0] != "1" {
+		t.Fatalf("uploaded parts = %#v, want [1]", uploadedParts)
+	}
+}

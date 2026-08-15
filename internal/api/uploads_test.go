@@ -646,7 +646,7 @@ func TestUploadProviderTypesExposeFutureCapabilities(t *testing.T) {
 			}
 		}
 	}
-	if !implemented[store.UploadProviderType115Cookie] || !implemented[store.UploadProviderType115Open] || implemented[store.UploadProviderType123Pan] || !implemented[store.UploadProviderTypeBaiduPan] {
+	if !implemented[store.UploadProviderType115Cookie] || !implemented[store.UploadProviderType115Open] || implemented[store.UploadProviderType123Pan] || !implemented[store.UploadProviderTypeBaiduPan] || !implemented[store.UploadProviderTypeBaiduPCS] {
 		t.Fatalf("unexpected provider descriptors: %#v", descriptors)
 	}
 	for _, code := range []string{"web", "android", "ios", "tv", "alipaymini", "wechatmini", "qandroid"} {

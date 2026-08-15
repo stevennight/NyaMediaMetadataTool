@@ -20,6 +20,7 @@ const (
 	UploadProviderType115Open   = "115open"
 	UploadProviderType123Pan    = "123pan"
 	UploadProviderTypeBaiduPan  = "baidupan"
+	UploadProviderTypeBaiduPCS  = "baidupcs"
 
 	UploadBatchCollecting = "collecting"
 	UploadBatchPending    = "pending"

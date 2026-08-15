@@ -277,6 +277,11 @@ type BaiduOpenCredentials = {
   brokerToken: string;
 };
 
+type BaiduPCSCredentials = {
+  cookie: string;
+  bdstoken: string;
+};
+
 type UploadSummary = {
   collecting: number;
   pending: number;
@@ -968,7 +973,7 @@ function isBaiduOpenAuthorizationActive(auth: BaiduOpenAuthStatus | null) {
 }
 
 function uploadProviderNeedsAuthorization(provider: UploadProvider | undefined) {
-  return Boolean(provider && ((provider.type === '115cookie' && !provider.hasCookie) || (['115open', 'baidupan'].includes(provider.type) && !provider.hasCredentials)));
+  return Boolean(provider && ((['115cookie', 'baidupcs'].includes(provider.type) && !provider.hasCookie) || (['115open', 'baidupan'].includes(provider.type) && !provider.hasCredentials)));
 }
 
 function watchDirDraftSignature(path: string, watchEnabled: boolean, useGlobalProcessing: boolean, processing: OutputProcessingConfig, uploadConfigs: UploadProviderRoute[]) {
@@ -1353,6 +1358,9 @@ export function App() {
   const [baiduOpenAuth, setBaiduOpenAuth] = useState<BaiduOpenAuthStatus | null>(null);
   const [baiduOpenAuthConfig, setBaiduOpenAuthConfig] = useState<BaiduOpenAuthConfig | null>(null);
   const [showBaiduOpenTokens, setShowBaiduOpenTokens] = useState(false);
+  const [uploadBaiduPCSProvider, setUploadBaiduPCSProvider] = useState<UploadProvider | null>(null);
+  const [baiduPCSCredentials, setBaiduPCSCredentials] = useState<BaiduPCSCredentials>({ cookie: '', bdstoken: '' });
+  const [showBaiduPCSSecrets, setShowBaiduPCSSecrets] = useState(false);
   const [savingUploadProvider, setSavingUploadProvider] = useState(false);
   const [checkingUploadProviderID, setCheckingUploadProviderID] = useState<number | null>(null);
   const [uploadTargetActionID, setUploadTargetActionID] = useState<number | null>(null);
@@ -1532,7 +1540,7 @@ export function App() {
   const modalStackKey = [
     remoteDirectoryPicker && 'remote-directory', directoryPicker && 'directory', targetPathEditor && 'target-path', selectedHistoryBatch && 'history-detail', renameHistoryOpen && 'history',
     renameTemplateEditorOpen && 'template', tmdbEpisodeDetail && 'episode-detail', addEmbyKeyOpen && 'emby-key', auditTmdbMatchOpen && 'audit-tmdb', tmdbMatchOpen && 'tmdb',
-    uploadOpen115Provider && 'upload-open115', uploadBaiduOpenProvider && 'upload-baiduopen',
+    uploadOpen115Provider && 'upload-open115', uploadBaiduOpenProvider && 'upload-baiduopen', uploadBaiduPCSProvider && 'upload-baidupcs',
     batchEpisodeOpen && 'batch', uploadCookieProvider && 'upload-cookie', uploadProviderUsage && 'upload-provider-usage', (newUploadProviderOpen || uploadProviderModal) && 'upload-provider',
     (newUploadNotificationTemplateOpen || uploadNotificationTemplateModal) && 'upload-notification-template',
     editingWatchDir && 'edit-dir', addWatchDirOpen && 'add-dir', rescanOpen && 'rescan', selectedUploadBatch && 'upload-detail', selectedTask && 'task-detail',
@@ -1779,6 +1787,7 @@ export function App() {
       else if (uploadCookieProvider && !modalBusyRef.current.savingUploadProvider) requestUploadCookieCloseRef.current();
       else if (uploadOpen115Provider && !modalBusyRef.current.savingUploadProvider) requestUploadOpen115CloseRef.current();
       else if (uploadBaiduOpenProvider && !modalBusyRef.current.savingUploadProvider) setUploadBaiduOpenProvider(null);
+      else if (uploadBaiduPCSProvider && !modalBusyRef.current.savingUploadProvider) setUploadBaiduPCSProvider(null);
       else if (uploadProviderUsage) setUploadProviderUsage(null);
       else if ((newUploadProviderOpen || uploadProviderModal) && !modalBusyRef.current.savingUploadProvider) { setNewUploadProviderOpen(false); setUploadProviderModal(null); }
       else if ((newUploadNotificationTemplateOpen || uploadNotificationTemplateModal) && !modalBusyRef.current.savingUploadNotificationTemplate) { setNewUploadNotificationTemplateOpen(false); setUploadNotificationTemplateModal(null); }
@@ -2361,6 +2370,9 @@ export function App() {
       if (isNew && saved.type === 'baidupan' && !saved.hasCredentials) {
         openBaiduOpenCredentials(saved);
       }
+      if (isNew && saved.type === 'baidupcs' && !saved.hasCookie) {
+        openBaiduPCSAuthorization(saved);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存 Provider 失败');
     } finally {
@@ -2377,7 +2389,46 @@ export function App() {
       openBaiduOpenCredentials(provider);
       return;
     }
+    if (provider.type === 'baidupcs') {
+      openBaiduPCSAuthorization(provider);
+      return;
+    }
     openUploadCookieAuthorization(provider);
+  }
+
+  function openBaiduPCSAuthorization(provider: UploadProvider) {
+    setUploadBaiduPCSProvider(provider);
+    setBaiduPCSCredentials({ cookie: '', bdstoken: '' });
+    setShowBaiduPCSSecrets(false);
+  }
+
+  async function saveBaiduPCSAuthorization() {
+    if (!uploadBaiduPCSProvider) return;
+    const values: Array<[string, string]> = [
+      ['cookie', baiduPCSCredentials.cookie],
+      ['bdstoken', baiduPCSCredentials.bdstoken]
+    ].filter(([, value]) => Boolean(value.trim())) as Array<[string, string]>;
+    if (!values.length) return;
+    setSavingUploadProvider(true);
+    setError('');
+    try {
+      for (const [key, value] of values) {
+        const response = await fetch(`/api/upload/providers/${uploadBaiduPCSProvider.id}/secrets/${key}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: value.trim() })
+        });
+        if (!response.ok) throw new Error(await readErrorMessage(response));
+      }
+      clearRemoteDirectoryCache(uploadBaiduPCSProvider.id);
+      setUploadBaiduPCSProvider(null);
+      setNotice('Baidu Pan Web credentials saved');
+      await loadUploadProviders();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save Baidu Pan Web credentials');
+    } finally {
+      setSavingUploadProvider(false);
+    }
   }
 
   function openBaiduOpenCredentials(provider: UploadProvider) {
@@ -4850,11 +4901,11 @@ export function App() {
                       <tr key={provider.id}>
                         <td><strong>{provider.name}</strong></td>
                         <td>{uploadProviderTypes.find((item) => item.type === provider.type)?.name ?? provider.type}</td>
-                        <td>{['115cookie', '115open', 'baidupan'].includes(provider.type) ? <span className={needsAuthorization ? 'pill warn' : 'pill ok'}>{needsAuthorization ? '未授权' : '已授权'}</span> : <span className="pill ignored">按类型配置</span>}</td>
+                        <td>{['115cookie', '115open', 'baidupan', 'baidupcs'].includes(provider.type) ? <span className={needsAuthorization ? 'pill warn' : 'pill ok'}>{needsAuthorization ? '未授权' : '已授权'}</span> : <span className="pill ignored">按类型配置</span>}</td>
                         <td>{provider.type === '115cookie' && provider.hasCookie ? uploadAuthDeviceName(provider.authDevice, provider.type, uploadProviderTypes) : '-'}</td>
                         <td>{directoryCount ? <button className="secondary upload-provider-directory-button" type="button" onClick={() => setUploadProviderUsage(provider)}>{directoryCount} 个目录</button> : <span className="pill ignored">未使用</span>}</td>
                         <td><span className={provider.enabled ? 'pill ok' : 'pill ignored'}>{provider.enabled ? '可用' : '停用'}</span></td>
-                        <td><div className="table-actions upload-provider-actions"><ActionIconButton label={`编辑 Provider ${provider.name}`} icon={Pencil} onClick={() => setUploadProviderModal(provider)} />{['115cookie', '115open', 'baidupan'].includes(provider.type) && <ActionIconButton label={`${needsAuthorization ? '授权' : '重新授权'} ${provider.name}`} icon={KeyRound} onClick={() => openUploadAuthorization(provider)} />}<ActionIconButton label={`检查连接 ${provider.name}`} icon={CircleGauge} loading={checkingUploadProviderID === provider.id} disabled={checkingUploadProviderID === provider.id || needsAuthorization} onClick={() => void checkUploadProvider(provider)} /><ActionIconButton label={`删除 Provider ${provider.name}`} icon={Trash2} tone="danger" onClick={() => void deleteUploadProvider(provider)} /></div></td>
+                        <td><div className="table-actions upload-provider-actions"><ActionIconButton label={`编辑 Provider ${provider.name}`} icon={Pencil} onClick={() => setUploadProviderModal(provider)} />{['115cookie', '115open', 'baidupan', 'baidupcs'].includes(provider.type) && <ActionIconButton label={`${needsAuthorization ? '授权' : '重新授权'} ${provider.name}`} icon={KeyRound} onClick={() => openUploadAuthorization(provider)} />}<ActionIconButton label={`检查连接 ${provider.name}`} icon={CircleGauge} loading={checkingUploadProviderID === provider.id} disabled={checkingUploadProviderID === provider.id || needsAuthorization} onClick={() => void checkUploadProvider(provider)} /><ActionIconButton label={`删除 Provider ${provider.name}`} icon={Trash2} tone="danger" onClick={() => void deleteUploadProvider(provider)} /></div></td>
                       </tr>
                     );
                   }) : <tr><td colSpan={7} className="empty-cell">尚未添加 Provider。先添加并授权账号，再到媒体目录中配置上传步骤。</td></tr>}
@@ -4985,6 +5036,7 @@ export function App() {
       {(newUploadNotificationTemplateOpen || uploadNotificationTemplateModal) && <UploadNotificationTemplateModal template={uploadNotificationTemplateModal ?? undefined} saving={savingUploadNotificationTemplate} onClose={(dirty) => requestDiscardChanges(dirty, () => { setNewUploadNotificationTemplateOpen(false); setUploadNotificationTemplateModal(null); })} onSubmit={(template) => void saveUploadNotificationTemplate(template)} />}
       {uploadOpen115Provider && <UploadOpen115Modal provider={uploadOpen115Provider} clientID={open115ClientID} auth={open115Auth} tokens={open115Tokens} showTokens={showOpen115Tokens} saving={savingUploadProvider} onClientIDChange={setOpen115ClientID} onTokensChange={setOpen115Tokens} onToggleTokenVisibility={() => setShowOpen115Tokens((value) => !value)} onClose={requestCloseUploadOpen115Modal} onStartAuth={() => void startOpen115Auth()} onImport={() => void importOpen115Tokens()} />}
       {uploadBaiduOpenProvider && <BaiduOpenAuthorizationModal provider={uploadBaiduOpenProvider} credentials={baiduOpenCredentials} mode={baiduOpenMode} auth={baiduOpenAuth} authConfig={baiduOpenAuthConfig} showTokens={showBaiduOpenTokens} saving={savingUploadProvider} onChange={setBaiduOpenCredentials} onModeChange={setBaiduOpenMode} onToggleTokenVisibility={() => setShowBaiduOpenTokens((value) => !value)} onClose={() => setUploadBaiduOpenProvider(null)} onSaveApplication={() => void saveBaiduOpenApplication()} onSaveSettings={() => void saveBaiduOpenAuthorizationSettings()} onStartAuthorization={() => void startBaiduOpenAuthorization()} onImportTokens={() => void importBaiduOpenTokens()} />}
+      {uploadBaiduPCSProvider && <BaiduPCSAuthorizationModal provider={uploadBaiduPCSProvider} credentials={baiduPCSCredentials} showSecrets={showBaiduPCSSecrets} saving={savingUploadProvider} onChange={setBaiduPCSCredentials} onToggleVisibility={() => setShowBaiduPCSSecrets((value) => !value)} onClose={() => setUploadBaiduPCSProvider(null)} onSave={() => void saveBaiduPCSAuthorization()} />}
       {uploadCookieProvider && <UploadCookieModal provider={uploadCookieProvider} devices={uploadAuthDevices(uploadCookieProvider.type, uploadProviderTypes)} device={uploadCookieDevice} cookie={uploadCookieValue} auth={cookieAuth} saving={savingUploadProvider} onDeviceChange={setUploadCookieDevice} onCookieChange={setUploadCookieValue} onClose={requestCloseUploadCookieModal} onSave={() => void saveUploadCookie()} onStartAuth={() => void startCookieAuth()} />}
       {batchEpisodeOpen && <BatchEpisodeModal count={selectedRenamePaths.length} season={batchSeason} mode={batchEpisodeMode} offset={batchEpisodeOffset} start={batchEpisodeStart} applying={applyingBatchEpisode} progress={batchEpisodeProgress} onClose={() => setBatchEpisodeOpen(false)} onSeasonChange={setBatchSeason} onModeChange={setBatchEpisodeMode} onOffsetChange={setBatchEpisodeOffset} onStartChange={setBatchEpisodeStart} onSubmit={() => void applyBatchEpisodeFix()} />}
       {tmdbMatchOpen && <TmdbMatchModal count={selectedRenamePaths.length} query={tmdbQuery} results={tmdbResults} searching={searchingTmdb} applyingShowId={applyingTmdbShowId} applyProgress={tmdbApplyProgress} applyTotal={tmdbApplyTotal} onQueryChange={setTmdbQuery} onSearch={() => void searchTmdbShows()} onApply={(show) => void applyTmdbShowToSelected(show)} onClose={() => setTmdbMatchOpen(false)} />}
@@ -5314,9 +5366,9 @@ function UploadProviderModal(props: { provider?: UploadProvider; providerTypes: 
           <label>显示名称<input autoFocus value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：115 主归档" required /></label>
           <label>Provider 类型<select value={draft.type} disabled={editing || props.saving} onChange={(event) => setDraft({ ...draft, type: event.target.value })}>{providerTypes.map((providerType) => <option key={providerType.type} value={providerType.type} disabled={!providerType.implemented && providerType.type !== draft.type}>{providerType.name}{providerType.implemented ? '' : '（尚未安装）'}</option>)}</select><small>{editing ? 'Provider 类型在创建后固定。' : (selectedProviderType?.implemented ? '已安装的 Provider 可立即配置授权。' : '此 Provider 类型已预留，但尚未安装上传实现。')}</small></label>
           <label>自定义 User-Agent（可选）<input value={draft.userAgent} onChange={(event) => setDraft({ ...draft, userAgent: event.target.value })} placeholder="Mozilla/5.0" /></label>
-          {draft.type === '115open' && <label>上传 API 请求间隔（毫秒）<input type="number" min={250} max={10000} required value={draft.requestIntervalMs} onChange={(event) => setDraft({ ...draft, requestIntervalMs: Number(event.target.value) })} /><small>限制 250–10000 毫秒；默认 500 毫秒。</small></label>}
+          {['115open', 'baidupcs'].includes(draft.type) && <label>上传 API 请求间隔（毫秒）<input type="number" min={250} max={10000} required value={draft.requestIntervalMs} onChange={(event) => setDraft({ ...draft, requestIntervalMs: Number(event.target.value) })} /><small>限制 250–10000 毫秒；默认 500 毫秒。</small></label>}
           <Toggle label="启用此 Provider" checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} />
-          <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={() => props.onClose(dirty)} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : (!editing && ['115cookie', '115open', 'baidupan'].includes(draft.type) ? '保存并授权' : '保存 Provider')}</button></div>
+          <div className="inline-actions modal-actions"><button className="secondary" type="button" onClick={() => props.onClose(dirty)} disabled={props.saving}>取消</button><button type="submit" disabled={!canSubmit}>{props.saving ? '保存中' : (!editing && ['115cookie', '115open', 'baidupan', 'baidupcs'].includes(draft.type) ? '保存并授权' : '保存 Provider')}</button></div>
         </form>
       </section>
     </div>
@@ -5545,6 +5597,36 @@ function BaiduOpenCredentialsModal(props: { provider: UploadProvider; credential
           </section>
         </div>
         <div className="inline-actions modal-actions"><button type="button" className="secondary" onClick={props.onClose} disabled={props.saving}>关闭</button></div>
+      </section>
+    </div>
+  );
+}
+
+function BaiduPCSAuthorizationModal(props: { provider: UploadProvider; credentials: BaiduPCSCredentials; showSecrets: boolean; saving: boolean; onChange: (value: BaiduPCSCredentials) => void; onToggleVisibility: () => void; onClose: () => void; onSave: () => void }) {
+  const values = props.credentials;
+  const canSave = Boolean(values.cookie.trim() || (props.provider.hasCookie && values.bdstoken.trim()));
+  const update = (patch: Partial<BaiduPCSCredentials>) => props.onChange({ ...values, ...patch });
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-card upload-cookie-modal" role="dialog" aria-modal="true" aria-busy={props.saving} aria-labelledby="upload-baidupcs-title" onClick={(event) => event.stopPropagation()}>
+        <div className="card-header"><div><h2 id="upload-baidupcs-title">Baidu Pan Web credentials</h2><small>{props.provider.name}</small></div><IconCloseButton onClick={props.onClose} disabled={props.saving} /></div>
+        <div className="upload-auth-grid">
+          <section className="upload-auth-panel">
+            <h3>Browser Cookie</h3>
+            <p className="settings-note">Paste the Cookie header from a signed-in pan.baidu.com session. It is stored encrypted with the other provider secrets and is never read back into the UI.</p>
+            <textarea value={values.cookie} onChange={(event) => update({ cookie: event.target.value })} placeholder="BDUSS=...; STOKEN=..." rows={7} disabled={props.saving} />
+          </section>
+          <section className="upload-auth-panel upload-auth-import-panel">
+            <h3>Optional bdstoken</h3>
+            <label>bdstoken<input type={props.showSecrets ? 'text' : 'password'} value={values.bdstoken} onChange={(event) => update({ bdstoken: event.target.value })} autoComplete="off" disabled={props.saving} /></label>
+            <p className="settings-note">Leave it empty to let the provider request it through gettemplatevariable.</p>
+            <div className="inline-actions">
+              <button type="button" onClick={props.onSave} disabled={props.saving || !canSave}>{props.saving ? 'Saving' : 'Save credentials'}</button>
+              <button type="button" className="secondary" onClick={props.onToggleVisibility} disabled={props.saving}>{props.showSecrets ? 'Hide secret' : 'Show secret'}</button>
+            </div>
+          </section>
+        </div>
+        <div className="inline-actions modal-actions"><button type="button" className="secondary" onClick={props.onClose} disabled={props.saving}>Close</button></div>
       </section>
     </div>
   );

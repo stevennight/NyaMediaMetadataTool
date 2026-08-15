@@ -228,6 +228,34 @@ func decodeBaiduOpenMD5(value string) string {
 	return result
 }
 
+// The web rapid-upload endpoint expects the same nibble-transformed MD5 that
+// web metadata may return. Keep the Open API's normal MD5 representation at
+// the provider boundary and encode it only when constructing that request.
+func encodeBaiduOpenMD5(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if !baiduOpenMD5IsValid(value) {
+		return value
+	}
+
+	// decodeBaiduOpenMD5 reorders four 8-nibble groups after the XOR step.
+	// Reverse that permutation, then reverse the per-position nibble XOR.
+	ordered := value[8:16] + value[0:8] + value[24:32] + value[16:24]
+	encoded := []byte(ordered)
+	for index, char := range encoded {
+		position := strings.IndexByte(baiduOpenHexDigits, char)
+		if position < 0 {
+			return value
+		}
+		encoded[index] = baiduOpenHexDigits[position^(index&15)]
+	}
+	key := strings.IndexByte(baiduOpenHexDigits, encoded[9])
+	if key < 0 {
+		return value
+	}
+	encoded[9] = byte('g' + key)
+	return string(encoded)
+}
+
 func normalizeBaiduOpenFileItemMD5(item *baiduOpenFileItem) {
 	if item == nil {
 		return

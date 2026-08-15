@@ -325,6 +325,26 @@ func (m *Manager) registerBuiltInProviders() {
 		}
 		return provider, nil
 	})
+	m.RegisterProviderDescriptor(ProviderDescriptor{
+		Type:        store.UploadProviderTypeBaiduPCS,
+		Name:        "Baidu Pan Web",
+		SecretKeys:  []string{"cookie", "bdstoken"},
+		Implemented: true,
+	}, func(ctx context.Context, target store.UploadBatchTarget, lookup SecretLookup) (Provider, error) {
+		cookie, err := lookup(ctx, "cookie")
+		if err != nil {
+			return nil, err
+		}
+		bdstoken, err := lookup(ctx, "bdstoken")
+		if err != nil {
+			return nil, err
+		}
+		provider, err := newBaiduPCSProvider(cookie, bdstoken, target.UserAgent, time.Duration(store.NormalizeUploadRequestIntervalMS(target.RequestIntervalMS))*time.Millisecond)
+		if err != nil {
+			return nil, err
+		}
+		return provider, nil
+	})
 }
 
 func (m *Manager) open115Session(providerID int64, accessToken, refreshToken, expiresAt, userAgent string) *open115Session {

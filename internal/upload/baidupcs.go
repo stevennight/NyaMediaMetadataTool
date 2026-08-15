@@ -64,6 +64,8 @@ type baiduPCSProvider struct {
 	chunkConcurrency     int
 	rapidUploadEnabled   bool
 	preuploadBeforeRapid bool
+	directoryMu          sync.Mutex
+	confirmedDirectories map[string]struct{}
 	progressReporter     func(int64)
 }
 
@@ -106,6 +108,16 @@ type baiduPCSRemotePathError struct {
 
 func (err *baiduPCSRemotePathError) Error() string {
 	return fmt.Sprintf("BaiduPCS rapid upload created unexpected path %q, want %q (fs_id=%s)", err.Actual, err.Expected, err.FSID)
+}
+
+type baiduPCSDirectoryPathError struct {
+	Expected string
+	Actual   string
+	FSID     string
+}
+
+func (err *baiduPCSDirectoryPathError) Error() string {
+	return fmt.Sprintf("BaiduPCS directory create returned unexpected path %q, want %q (fs_id=%s)", err.Actual, err.Expected, err.FSID)
 }
 
 func baiduPCSOnDup(collisionPolicy string) string {
@@ -285,6 +297,7 @@ func newBaiduPCSProviderWithOptions(cookie, bdstoken, userAgent string, requestI
 		chunkConcurrency:     baiduPCSChunkConcurrency,
 		rapidUploadEnabled:   true,
 		preuploadBeforeRapid: preuploadBeforeRapid,
+		confirmedDirectories: map[string]struct{}{"/": {}},
 	}, nil
 }
 
@@ -902,9 +915,22 @@ func (p *baiduPCSProvider) ensureDirectory(ctx context.Context, remotePath strin
 	if remotePath == "/" {
 		return nil
 	}
+	p.directoryMu.Lock()
+	defer p.directoryMu.Unlock()
+	if p.confirmedDirectories == nil {
+		p.confirmedDirectories = map[string]struct{}{"/": {}}
+	}
+	if _, ok := p.confirmedDirectories[remotePath]; ok {
+		p.log(ctx, slog.LevelInfo, "baidu pcs directory already confirmed", "remote_path", remotePath)
+		return nil
+	}
 	currentPath := "/"
 	for _, segment := range strings.Split(strings.Trim(remotePath, "/"), "/") {
 		nextPath := normalizeBaiduOpenPath(pathpkg.Join(currentPath, segment))
+		if _, ok := p.confirmedDirectories[nextPath]; ok {
+			currentPath = nextPath
+			continue
+		}
 		entry, found, err := p.findEntry(ctx, currentPath, segment)
 		if err != nil {
 			return fmt.Errorf("resolve BaiduPCS directory %s: %w", currentPath, err)
@@ -913,19 +939,23 @@ func (p *baiduPCSProvider) ensureDirectory(ctx context.Context, remotePath strin
 			if !entry.IsDir {
 				return fmt.Errorf("BaiduPCS path component is a file: %s", nextPath)
 			}
+			p.confirmedDirectories[nextPath] = struct{}{}
 			currentPath = nextPath
 			continue
 		}
 		if err := p.createDirectory(ctx, nextPath); err != nil {
 			created, foundAfterError, lookupErr := p.findEntry(ctx, currentPath, segment)
 			if lookupErr == nil && foundAfterError && created.IsDir {
+				p.confirmedDirectories[nextPath] = struct{}{}
 				currentPath = nextPath
 				continue
 			}
 			return fmt.Errorf("create BaiduPCS directory %s: %w", nextPath, err)
 		}
+		p.confirmedDirectories[nextPath] = struct{}{}
 		currentPath = nextPath
 	}
+	p.confirmedDirectories[remotePath] = struct{}{}
 	return nil
 }
 
@@ -1017,14 +1047,49 @@ func (p *baiduPCSProvider) createDirectory(ctx context.Context, directoryPath st
 	form.Set("isdir", "1")
 	form.Set("rtype", "1")
 	form.Set("ondup", "fail")
-	var response baiduPCSAPIResponse
+	var response baiduPCSCreateResponse
 	encoded := form.Encode()
 	p.log(ctx, slog.LevelInfo, "baidu pcs directory create started", "remote_path", directoryPath, "rtype", 1)
 	err = p.doJSONRequest(ctx, http.MethodPost, baiduPCSBaseURL+"/api/create", query, []byte(encoded), "application/x-www-form-urlencoded", int64(len(encoded)), false, &response)
-	if err == nil {
-		p.log(ctx, slog.LevelInfo, "baidu pcs directory create result", "remote_path", directoryPath, "rtype", 1)
+	if err != nil {
+		return err
 	}
-	return err
+	actualPath := strings.TrimSpace(response.Path)
+	if response.Info != nil && strings.TrimSpace(response.Info.Path) != "" {
+		actualPath = strings.TrimSpace(response.Info.Path)
+	}
+	fsID := baiduPCSResponseFSID(&response)
+	p.log(ctx, slog.LevelInfo, "baidu pcs directory create result",
+		"remote_path", directoryPath,
+		"actual_path", actualPath,
+		"fs_id", fsID,
+		"rtype", 1,
+	)
+	if actualPath != "" {
+		actualPath = normalizeBaiduOpenPath(actualPath)
+		if actualPath != directoryPath {
+			return &baiduPCSDirectoryPathError{Expected: directoryPath, Actual: actualPath, FSID: fsID}
+		}
+		return nil
+	}
+
+	parentPath := pathpkg.Dir(directoryPath)
+	name := pathpkg.Base(directoryPath)
+	entry, found, lookupErr := p.findEntry(ctx, parentPath, name)
+	if lookupErr != nil {
+		return fmt.Errorf("BaiduPCS directory create returned no path and verification failed: %w", lookupErr)
+	}
+	if !found {
+		return fmt.Errorf("BaiduPCS directory create returned no path and directory is not visible: %s", directoryPath)
+	}
+	if !entry.IsDir {
+		return fmt.Errorf("BaiduPCS directory create returned a file at %s", directoryPath)
+	}
+	actualPath = normalizeBaiduOpenPath(entry.Path)
+	if actualPath != directoryPath {
+		return &baiduPCSDirectoryPathError{Expected: directoryPath, Actual: actualPath, FSID: entry.ID}
+	}
+	return nil
 }
 
 func (p *baiduPCSProvider) precreate(ctx context.Context, remotePath string, modTime time.Time, digest *baiduPCSDigest, collisionPolicy string) (*baiduPCSPrecreateResponse, error) {

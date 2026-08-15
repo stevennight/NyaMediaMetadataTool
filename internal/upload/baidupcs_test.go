@@ -352,11 +352,116 @@ func TestBaiduPCSCreateDirectoryUsesWebAPI(t *testing.T) {
 		if form.Get("path") != "/Video/NEW" || form.Get("isdir") != "1" || form.Get("ondup") != "fail" {
 			return nil, fmt.Errorf("directory create form = %s", formBytes)
 		}
-		return baiduOpenJSONResponse(http.StatusOK, `{"errno":0}`), nil
+		return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"path":"/Video/NEW","isdir":1}`), nil
 	})
 
 	if err := provider.createDirectory(context.Background(), "/Video/NEW"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBaiduPCSEnsureDirectorySerializesConcurrentCreation(t *testing.T) {
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stateMu sync.Mutex
+	created := make(map[string]bool)
+	createCalls := make(map[string]int)
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/list":
+			directory := req.URL.Query().Get("dir")
+			stateMu.Lock()
+			defer stateMu.Unlock()
+			entries := make([]string, 0, 1)
+			for _, child := range []string{"/Video", "/Video/NEW", "/Video/NEW/Season 1"} {
+				if !created[child] {
+					continue
+				}
+				parent := "/"
+				name := child[1:]
+				if index := strings.LastIndex(name, "/"); index >= 0 {
+					parent = "/" + name[:index]
+					name = name[index+1:]
+				}
+				if parent == directory {
+					entries = append(entries, fmt.Sprintf(`{"fs_id":%d,"path":%q,"server_filename":%q,"isdir":1}`, len(entries)+1, child, name))
+				}
+			}
+			return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"list":[%s]}`, strings.Join(entries, ","))), nil
+		case "/api/create":
+			formBytes, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				return nil, readErr
+			}
+			form, parseErr := url.ParseQuery(string(formBytes))
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			directory := form.Get("path")
+			stateMu.Lock()
+			createCalls[directory]++
+			created[directory] = true
+			stateMu.Unlock()
+			return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"path":%q,"isdir":1}`, directory)), nil
+		default:
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		}
+	})
+
+	const workers = 8
+	start := make(chan struct{})
+	errorsCh := make(chan error, workers)
+	var workersGroup sync.WaitGroup
+	workersGroup.Add(workers)
+	for index := 0; index < workers; index++ {
+		go func() {
+			defer workersGroup.Done()
+			<-start
+			errorsCh <- provider.ensureDirectory(context.Background(), "/Video/NEW/Season 1")
+		}()
+	}
+	close(start)
+	workersGroup.Wait()
+	close(errorsCh)
+	for ensureErr := range errorsCh {
+		if ensureErr != nil {
+			t.Fatal(ensureErr)
+		}
+	}
+
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	if len(createCalls) != 3 {
+		t.Fatalf("created directories = %#v, want exactly the three path components", createCalls)
+	}
+	for _, directory := range []string{"/Video", "/Video/NEW", "/Video/NEW/Season 1"} {
+		if createCalls[directory] != 1 {
+			t.Fatalf("create calls for %s = %d, want 1", directory, createCalls[directory])
+		}
+	}
+}
+
+func TestBaiduPCSCreateDirectoryRejectsRenamedPath(t *testing.T) {
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/api/create" {
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		}
+		return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"info":{"fs_id":42,"path":"/Video/NEW/Season 1_20260815_183626","isdir":1}}`), nil
+	})
+
+	err = provider.createDirectory(context.Background(), "/Video/NEW/Season 1")
+	var pathErr *baiduPCSDirectoryPathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("error = %v, want renamed-directory path error", err)
+	}
+	if pathErr.Expected != "/Video/NEW/Season 1" || pathErr.Actual != "/Video/NEW/Season 1_20260815_183626" || pathErr.FSID != "42" {
+		t.Fatalf("path error = %#v", pathErr)
 	}
 }
 

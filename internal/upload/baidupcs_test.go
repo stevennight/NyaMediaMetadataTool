@@ -1,12 +1,14 @@
 package upload
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -120,6 +122,20 @@ func TestBaiduWebMD5EncodingMatchesCapturedValues(t *testing.T) {
 	}
 }
 
+func TestBaiduPCSLogErrorRedactsCredentials(t *testing.T) {
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := provider.logError(fmt.Errorf(`Post "https://pan.baidu.com/api/list?bdstoken=token" with Cookie BDUSS=test: connection failed`))
+	if strings.Contains(message, "token") || strings.Contains(message, "BDUSS=test") {
+		t.Fatalf("redacted message leaked credentials: %s", message)
+	}
+	if !strings.Contains(message, "<redacted>") {
+		t.Fatalf("redacted message = %q, want redaction marker", message)
+	}
+}
+
 func TestBaiduPCSRequestAcceptsPlainJSONWithGzipHeader(t *testing.T) {
 	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
 	if err != nil {
@@ -212,7 +228,8 @@ func TestBaiduPCSUploadUsesReturnedBlockListAndCreateFallback(t *testing.T) {
 	if err := os.WriteFile(localPath, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	var logBuffer bytes.Buffer
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0, slog.New(slog.NewTextHandler(&logBuffer, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,5 +302,22 @@ func TestBaiduPCSUploadUsesReturnedBlockListAndCreateFallback(t *testing.T) {
 	}
 	if len(uploadedParts) != 1 || uploadedParts[0] != "1" {
 		t.Fatalf("uploaded parts = %#v, want [1]", uploadedParts)
+	}
+	logs := logBuffer.String()
+	for _, want := range []string{
+		"operation=precreate",
+		"operation=locateupload",
+		"operation=superfile2",
+		"operation=rapidupload",
+		"code=31023",
+		"operation=create",
+		"baidu pcs rapid upload attempt failed; continuing with upload",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("diagnostic logs do not contain %q:\n%s", want, logs)
+		}
+	}
+	if strings.Contains(logs, "BDUSS=test") || strings.Contains(logs, "bdstoken=token") {
+		t.Fatalf("diagnostic logs leaked credentials:\n%s", logs)
 	}
 }

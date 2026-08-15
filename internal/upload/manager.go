@@ -339,7 +339,15 @@ func (m *Manager) registerBuiltInProviders() {
 		if err != nil {
 			return nil, err
 		}
-		provider, err := newBaiduPCSProvider(cookie, bdstoken, target.UserAgent, time.Duration(store.NormalizeUploadRequestIntervalMS(target.RequestIntervalMS))*time.Millisecond)
+		var providerLogger *slog.Logger
+		if m.logger != nil {
+			providerLogger = m.logger.With(
+				"upload_provider_id", target.ProviderID,
+				"upload_target_id", target.ID,
+				"upload_provider", target.ProviderName,
+			)
+		}
+		provider, err := newBaiduPCSProvider(cookie, bdstoken, target.UserAgent, time.Duration(store.NormalizeUploadRequestIntervalMS(target.RequestIntervalMS))*time.Millisecond, providerLogger)
 		if err != nil {
 			return nil, err
 		}

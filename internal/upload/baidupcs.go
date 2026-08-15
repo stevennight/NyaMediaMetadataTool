@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"NyaMediaMetadataTool/internal/store"
@@ -47,11 +49,13 @@ type baiduPCSProvider struct {
 	cookie    string
 	bdstoken  string
 	userAgent string
+	logger    *slog.Logger
 
 	httpClient       *http.Client
 	requestInterval  time.Duration
 	requestMu        sync.Mutex
 	lastRequest      time.Time
+	requestSequence  atomic.Uint64
 	bdstokenMu       sync.Mutex
 	ukMu             sync.Mutex
 	uk               int64
@@ -177,12 +181,16 @@ type baiduPCSDigest struct {
 	BlockSize int64
 }
 
-func newBaiduPCSProvider(cookie, bdstoken, userAgent string, requestInterval time.Duration) (*baiduPCSProvider, error) {
+func newBaiduPCSProvider(cookie, bdstoken, userAgent string, requestInterval time.Duration, loggers ...*slog.Logger) (*baiduPCSProvider, error) {
 	if strings.TrimSpace(cookie) == "" {
 		return nil, errors.New("BaiduPCS cookie is required")
 	}
 	if strings.TrimSpace(userAgent) == "" {
 		userAgent = baiduPCSDefaultUserAgent
+	}
+	var logger *slog.Logger
+	if len(loggers) > 0 {
+		logger = loggers[0]
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableCompression = true
@@ -190,6 +198,7 @@ func newBaiduPCSProvider(cookie, bdstoken, userAgent string, requestInterval tim
 		cookie:          strings.TrimSpace(cookie),
 		bdstoken:        strings.TrimSpace(bdstoken),
 		userAgent:       strings.TrimSpace(userAgent),
+		logger:          logger,
 		httpClient:      &http.Client{Timeout: baiduPCSRequestTimeout, Transport: transport},
 		requestInterval: requestInterval,
 	}, nil
@@ -197,6 +206,92 @@ func newBaiduPCSProvider(cookie, bdstoken, userAgent string, requestInterval tim
 
 func (p *baiduPCSProvider) setProgressReporter(reporter func(int64)) {
 	p.progressReporter = reporter
+}
+
+func (p *baiduPCSProvider) log(ctx context.Context, level slog.Level, message string, args ...any) {
+	if p.logger == nil {
+		return
+	}
+	p.logger.Log(ctx, level, message, args...)
+}
+
+func (p *baiduPCSProvider) logError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	for _, secret := range []string{p.cookie, p.bdstoken} {
+		if strings.TrimSpace(secret) == "" {
+			continue
+		}
+		for _, encoded := range []string{secret, url.QueryEscape(secret), url.PathEscape(secret)} {
+			message = strings.ReplaceAll(message, encoded, "<redacted>")
+		}
+	}
+	return message
+}
+
+func baiduPCSOperation(parsed *url.URL) string {
+	if parsed == nil {
+		return "unknown"
+	}
+	if parsed.Path == "/rest/2.0/pcs/file" {
+		if method := strings.TrimSpace(parsed.Query().Get("method")); method != "" {
+			return method
+		}
+	}
+	if parsed.Path == "/rest/2.0/pcs/superfile2" {
+		return "superfile2"
+	}
+	if strings.HasPrefix(parsed.Path, "/api/") {
+		return strings.TrimPrefix(parsed.Path, "/api/")
+	}
+	return parsed.Path
+}
+
+func baiduPCSRequestFields(requestID uint64, method string, parsed *url.URL, query url.Values, contentLength int64) []any {
+	fields := []any{
+		"client_request_id", requestID,
+		"operation", baiduPCSOperation(parsed),
+		"http_method", method,
+		"host", parsed.Host,
+		"api_path", parsed.Path,
+	}
+	if remotePath := strings.TrimSpace(query.Get("path")); remotePath != "" {
+		fields = append(fields, "remote_path", remotePath)
+	} else if directoryPath := strings.TrimSpace(query.Get("dir")); directoryPath != "" {
+		fields = append(fields, "remote_path", directoryPath)
+	}
+	if part := strings.TrimSpace(query.Get("partseq")); part != "" {
+		fields = append(fields, "part", part)
+	}
+	if uploadID := strings.TrimSpace(query.Get("uploadid")); uploadID != "" {
+		fields = append(fields, "uploadid_present", true)
+	}
+	if contentLength > 0 {
+		fields = append(fields, "request_bytes", contentLength)
+	}
+	return fields
+}
+
+func summarizeBaiduPCSBlocks(blocks []int) string {
+	if len(blocks) == 0 {
+		return "[]"
+	}
+	if len(blocks) <= 16 {
+		values := make([]string, len(blocks))
+		for index, block := range blocks {
+			values[index] = strconv.Itoa(block)
+		}
+		return "[" + strings.Join(values, ",") + "]"
+	}
+	values := make([]string, 0, 9)
+	for _, block := range blocks[:8] {
+		values = append(values, strconv.Itoa(block))
+	}
+	values = append(values, "...")
+	values = append(values, strconv.Itoa(blocks[len(blocks)-1]))
+	return "[" + strings.Join(values, ",") + "]"
 }
 
 func (p *baiduPCSProvider) Check(ctx context.Context) error {
@@ -226,6 +321,12 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 		return RemoteFile{}, err
 	}
 	remotePath = normalizeBaiduOpenPath(remotePath)
+	p.log(ctx, slog.LevelInfo, "baidu pcs upload started",
+		"local_path", localPath,
+		"remote_path", remotePath,
+		"size", size,
+		"collision_policy", collisionPolicy,
+	)
 	name := pathpkg.Base(remotePath)
 	if name == "." || name == "/" || name == "" {
 		return RemoteFile{}, fmt.Errorf("invalid BaiduPCS target path %q", remotePath)
@@ -257,6 +358,13 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 	collisionPolicy = normalizeBaiduOpenCollisionPolicy(collisionPolicy)
 	intendedOutcome := store.UploadOutcomeCreated
 	if found {
+		p.log(ctx, slog.LevelInfo, "baidu pcs collision check found remote entry",
+			"remote_path", remotePath,
+			"remote_id", existing.ID,
+			"remote_size", existing.Size,
+			"remote_md5_present", baiduOpenMD5IsValid(existing.MD5),
+			"is_directory", existing.IsDir,
+		)
 		if existing.IsDir {
 			return RemoteFile{}, fmt.Errorf("BaiduPCS target path is a directory: %s", remotePath)
 		}
@@ -278,7 +386,22 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("local file changed after hash: %s", localPath)}
 	}
 	localSHA1 = digest.SHA1
+	p.log(ctx, slog.LevelInfo, "baidu pcs digest calculated",
+		"remote_path", remotePath,
+		"size", digest.Size,
+		"block_size", digest.BlockSize,
+		"block_count", len(digest.ChunkMD5s),
+		"sha1", digest.SHA1,
+		"content_md5", digest.MD5,
+		"slice_md5", digest.SliceMD5,
+		"encoded_content_md5", encodeBaiduOpenMD5(digest.MD5),
+		"encoded_slice_md5", encodeBaiduOpenMD5(digest.SliceMD5),
+	)
 	if found && existing.Size == size && baiduOpenMD5IsValid(existing.MD5) && strings.EqualFold(existing.MD5, digest.MD5) {
+		p.log(ctx, slog.LevelInfo, "baidu pcs upload skipped because remote file is unchanged",
+			"remote_path", remotePath,
+			"remote_id", existing.ID,
+		)
 		return RemoteFile{ID: existing.ID, Size: existing.Size, SHA1: localSHA1, LocalSHA1: localSHA1, Outcome: store.UploadOutcomeUnchanged}, nil
 	}
 
@@ -289,8 +412,21 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 	if precreated == nil {
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: errors.New("BaiduPCS precreate returned an empty response")}
 	}
+	p.log(ctx, slog.LevelInfo, "baidu pcs precreate result",
+		"remote_path", remotePath,
+		"return_type", precreated.ReturnType,
+		"block_count", len(precreated.BlockList),
+		"block_list", summarizeBaiduPCSBlocks(precreated.BlockList),
+		"uploadid_present", strings.TrimSpace(precreated.UploadID) != "",
+		"fs_id", strings.TrimSpace(string(precreated.FSID)),
+		"info_fs_id", baiduPCSInfoFSID(precreated.Info),
+	)
 	createdID := baiduPCSResponseFSID(precreated)
 	if precreated.ReturnType == 2 {
+		p.log(ctx, slog.LevelInfo, "baidu pcs precreate reported rapid upload",
+			"remote_path", remotePath,
+			"fs_id", createdID,
+		)
 		if createdID == "" {
 			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: errors.New("BaiduPCS precreate rapid upload returned no fs_id")}
 		}
@@ -323,6 +459,10 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 	if err != nil {
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("locate BaiduPCS upload server: %w", err)}
 	}
+	p.log(ctx, slog.LevelInfo, "baidu pcs upload server selected",
+		"remote_path", remotePath,
+		"server_host", baiduPCSURLHost(serverURL),
+	)
 	for index, part := range parts {
 		if err := p.uploadChunk(ctx, serverURL, remotePath, precreated.UploadID, part, file, digest); err != nil {
 			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS upload block %d for %s: %w", part, remotePath, err)}
@@ -331,7 +471,29 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 		// This preserves the traffic-saving path while retaining a normal
 		// create fallback when the server does not recognize the slice.
 		if (index+1)%baiduPCSRapidAfterBlocks == 0 || index+1 == len(parts) {
-			if rapid, rapidErr := p.rapidUploadFromFile(ctx, remotePath, precreated.UploadID, file, info.ModTime(), digest, 1); rapidErr == nil && rapid.ID != "" {
+			rapid, rapidErr := p.rapidUploadFromFile(ctx, remotePath, precreated.UploadID, file, info.ModTime(), digest, 1)
+			if rapidErr != nil {
+				p.log(ctx, slog.LevelWarn, "baidu pcs rapid upload attempt failed; continuing with upload",
+					"remote_path", remotePath,
+					"uploaded_block", part,
+					"uploaded_block_position", index+1,
+					"uploaded_block_count", len(parts),
+					"error", p.logError(rapidErr),
+				)
+			} else if rapid.ID == "" {
+				p.log(ctx, slog.LevelWarn, "baidu pcs rapid upload attempt returned no fs_id; continuing with upload",
+					"remote_path", remotePath,
+					"uploaded_block", part,
+					"uploaded_block_position", index+1,
+					"uploaded_block_count", len(parts),
+				)
+			} else {
+				p.log(ctx, slog.LevelInfo, "baidu pcs rapid upload succeeded after block upload",
+					"remote_path", remotePath,
+					"fs_id", rapid.ID,
+					"uploaded_block_position", index+1,
+					"uploaded_block_count", len(parts),
+				)
 				verified, verifyErr := p.verifyRemoteFile(ctx, rapid.ID, remotePath, size)
 				if verifyErr != nil {
 					return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("verify BaiduPCS rapid upload %s: %w", remotePath, verifyErr)}
@@ -351,6 +513,13 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 	if err != nil {
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS create %s: %w", remotePath, err)}
 	}
+	p.log(ctx, slog.LevelInfo, "baidu pcs create result",
+		"remote_path", remotePath,
+		"rtype", 3,
+		"fs_id", baiduPCSResponseFSID(created),
+		"path", created.Path,
+		"info_fs_id", baiduPCSInfoFSID(created.Info),
+	)
 	createdID = baiduPCSResponseFSID(created)
 	if createdID == "" {
 		return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: errors.New("BaiduPCS create returned no fs_id")}
@@ -509,6 +678,12 @@ func (p *baiduPCSProvider) listFiles(ctx context.Context, directoryPath string) 
 		if err := p.doJSONRequest(ctx, http.MethodGet, baiduPCSBaseURL+"/api/list", query, nil, "", 0, false, &response); err != nil {
 			return nil, err
 		}
+		p.log(ctx, slog.LevelInfo, "baidu pcs list result",
+			"remote_path", directoryPath,
+			"page", page,
+			"item_count", len(response.List),
+			"has_more", response.HasMore != 0,
+		)
 		for _, item := range response.List {
 			name := strings.TrimSpace(item.ServerFilename)
 			itemPath := normalizeBaiduOpenPath(item.Path)
@@ -553,7 +728,12 @@ func (p *baiduPCSProvider) createDirectory(ctx context.Context, directoryPath st
 	form.Set("ondup", "fail")
 	var response baiduPCSAPIResponse
 	encoded := form.Encode()
-	return p.doJSONRequest(ctx, http.MethodPost, baiduPCSBaseURL+"/api/create", query, []byte(encoded), "application/x-www-form-urlencoded", int64(len(encoded)), false, &response)
+	p.log(ctx, slog.LevelInfo, "baidu pcs directory create started", "remote_path", directoryPath, "rtype", 1)
+	err = p.doJSONRequest(ctx, http.MethodPost, baiduPCSBaseURL+"/api/create", query, []byte(encoded), "application/x-www-form-urlencoded", int64(len(encoded)), false, &response)
+	if err == nil {
+		p.log(ctx, slog.LevelInfo, "baidu pcs directory create result", "remote_path", directoryPath, "rtype", 1)
+	}
+	return err
 }
 
 func (p *baiduPCSProvider) precreate(ctx context.Context, remotePath string, modTime time.Time, digest *baiduPCSDigest) (*baiduPCSPrecreateResponse, error) {
@@ -579,7 +759,15 @@ func (p *baiduPCSProvider) precreate(ctx context.Context, remotePath string, mod
 	form.Set("block_list", string(blockList))
 	form.Set("ondup", "overwrite")
 	var response baiduPCSPrecreateResponse
-	if err := p.doJSONRequest(ctx, http.MethodPost, baiduPCSBaseURL+"/api/precreate", query, []byte(form.Encode()), "application/x-www-form-urlencoded", int64(len(form.Encode())), false, &response); err != nil {
+	encoded := form.Encode()
+	p.log(ctx, slog.LevelInfo, "baidu pcs precreate started",
+		"remote_path", remotePath,
+		"size", digest.Size,
+		"block_count", len(digest.ChunkMD5s),
+		"content_md5", digest.MD5,
+		"slice_md5", digest.SliceMD5,
+	)
+	if err := p.doJSONRequest(ctx, http.MethodPost, baiduPCSBaseURL+"/api/precreate", query, []byte(encoded), "application/x-www-form-urlencoded", int64(len(encoded)), false, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -606,6 +794,13 @@ func (p *baiduPCSProvider) createFile(ctx context.Context, remotePath string, si
 	form.Set("ondup", "overwrite")
 	var response baiduPCSCreateResponse
 	encoded := form.Encode()
+	p.log(ctx, slog.LevelInfo, "baidu pcs file create started",
+		"remote_path", remotePath,
+		"size", size,
+		"rtype", rtype,
+		"block_count", len(digest.ChunkMD5s),
+		"uploadid_present", strings.TrimSpace(uploadID) != "",
+	)
 	if err := p.doJSONRequest(ctx, http.MethodPost, baiduPCSBaseURL+"/api/create", query, []byte(encoded), "application/x-www-form-urlencoded", int64(len(encoded)), false, &response); err != nil {
 		return nil, err
 	}
@@ -621,8 +816,17 @@ func (p *baiduPCSProvider) locateUpload(ctx context.Context, remotePath, uploadI
 	query.Set("uploadid", strings.TrimSpace(uploadID))
 	var response baiduPCSLocateUploadResponse
 	if err := p.doJSONRequest(ctx, http.MethodGet, baiduPCSAPIBaseURL+"/rest/2.0/pcs/file", query, nil, "", 0, false, &response); err != nil {
+		p.log(ctx, slog.LevelWarn, "baidu pcs locateupload failed; using default upload server",
+			"remote_path", remotePath,
+			"error", p.logError(err),
+		)
 		return baiduPCSUploadBaseURL + "/rest/2.0/pcs/superfile2", nil
 	}
+	serverCount := len(response.Servers) + len(response.Server)
+	p.log(ctx, slog.LevelInfo, "baidu pcs locateupload result",
+		"remote_path", remotePath,
+		"server_count", serverCount,
+	)
 	for _, candidate := range response.Servers {
 		server := strings.TrimRight(strings.TrimSpace(candidate.Server), "/")
 		parsed, err := url.Parse(server)
@@ -632,6 +836,10 @@ func (p *baiduPCSProvider) locateUpload(ctx context.Context, remotePath, uploadI
 		if parsed.Path == "" || parsed.Path == "/" {
 			parsed.Path = "/rest/2.0/pcs/superfile2"
 		}
+		p.log(ctx, slog.LevelInfo, "baidu pcs locateupload selected server",
+			"remote_path", remotePath,
+			"server_host", parsed.Host,
+		)
 		return strings.TrimRight(parsed.String(), "/"), nil
 	}
 	for _, candidate := range response.Server {
@@ -643,8 +851,16 @@ func (p *baiduPCSProvider) locateUpload(ctx context.Context, remotePath, uploadI
 		if parsed.Path == "" || parsed.Path == "/" {
 			parsed.Path = "/rest/2.0/pcs/superfile2"
 		}
+		p.log(ctx, slog.LevelInfo, "baidu pcs locateupload selected server",
+			"remote_path", remotePath,
+			"server_host", parsed.Host,
+		)
 		return strings.TrimRight(parsed.String(), "/"), nil
 	}
+	p.log(ctx, slog.LevelWarn, "baidu pcs locateupload returned no usable server; using default upload server",
+		"remote_path", remotePath,
+		"server_count", serverCount,
+	)
 	return baiduPCSUploadBaseURL + "/rest/2.0/pcs/superfile2", nil
 }
 
@@ -680,7 +896,28 @@ func (p *baiduPCSProvider) uploadChunk(ctx context.Context, serverURL, remotePat
 	)
 	bodyLength := int64(len(prefix)) + partSize + int64(len(suffix))
 	var response baiduPCSUploadResponse
-	return p.doJSONRequest(ctx, http.MethodPost, strings.TrimRight(serverURL, "/"), query, body, contentType, bodyLength, false, &response)
+	p.log(ctx, slog.LevelInfo, "baidu pcs superfile2 upload started",
+		"remote_path", remotePath,
+		"part", part,
+		"part_offset", partOffset,
+		"part_size", partSize,
+		"server_host", baiduPCSURLHost(serverURL),
+	)
+	err = p.doJSONRequest(ctx, http.MethodPost, strings.TrimRight(serverURL, "/"), query, body, contentType, bodyLength, false, &response)
+	if err != nil {
+		p.log(ctx, slog.LevelWarn, "baidu pcs superfile2 upload failed",
+			"remote_path", remotePath,
+			"part", part,
+			"error", p.logError(err),
+		)
+		return err
+	}
+	p.log(ctx, slog.LevelInfo, "baidu pcs superfile2 upload completed",
+		"remote_path", remotePath,
+		"part", part,
+		"returned_md5", response.MD5,
+	)
+	return nil
 }
 
 func baiduPCSMultipartEnvelope(filename string) (prefix, suffix []byte, contentType string, err error) {
@@ -714,6 +951,18 @@ func (p *baiduPCSProvider) rapidUploadFromFile(ctx context.Context, remotePath, 
 			return RemoteFile{}, err
 		}
 	}
+	p.log(ctx, slog.LevelInfo, "baidu pcs rapidupload prepared",
+		"remote_path", remotePath,
+		"size", digest.Size,
+		"rtype", rtype,
+		"uploadid_present", strings.TrimSpace(uploadID) != "",
+		"data_offset", offset,
+		"data_length", len(data),
+		"content_md5", digest.MD5,
+		"slice_md5", digest.SliceMD5,
+		"encoded_content_md5", encodeBaiduOpenMD5(digest.MD5),
+		"encoded_slice_md5", encodeBaiduOpenMD5(digest.SliceMD5),
+	)
 	return p.rapidUploadWithData(ctx, remotePath, uploadID, modTime, digest, rtype, offset, dataTime, data)
 }
 
@@ -749,8 +998,21 @@ func (p *baiduPCSProvider) rapidUploadWithData(ctx context.Context, remotePath, 
 	encoded := form.Encode()
 	var response baiduPCSRapidResponse
 	if err := p.doJSONRequest(ctx, http.MethodPost, baiduPCSBaseURL+"/api/rapidupload", query, []byte(encoded), "application/x-www-form-urlencoded", int64(len(encoded)), false, &response); err != nil {
+		p.log(ctx, slog.LevelWarn, "baidu pcs rapidupload response failed",
+			"remote_path", remotePath,
+			"rtype", rtype,
+			"error", p.logError(err),
+		)
 		return RemoteFile{}, err
 	}
+	p.log(ctx, slog.LevelInfo, "baidu pcs rapidupload response",
+		"remote_path", remotePath,
+		"rtype", rtype,
+		"return_type", response.ReturnType,
+		"fs_id", strings.TrimSpace(string(response.FSID)),
+		"info_fs_id", baiduPCSInfoFSID(response.Info),
+		"path", response.Path,
+	)
 	if response.code() != 0 {
 		return RemoteFile{}, &baiduPCSAPIError{Code: response.code(), Message: response.message()}
 	}
@@ -759,8 +1021,16 @@ func (p *baiduPCSProvider) rapidUploadWithData(ctx context.Context, remotePath, 
 		id = strings.TrimSpace(string(response.Info.FSID))
 	}
 	if id == "" {
+		p.log(ctx, slog.LevelWarn, "baidu pcs rapidupload returned no fs_id",
+			"remote_path", remotePath,
+			"rtype", rtype,
+		)
 		return RemoteFile{}, errors.New("BaiduPCS rapid upload did not complete")
 	}
+	p.log(ctx, slog.LevelInfo, "baidu pcs rapidupload returned fs_id",
+		"remote_path", remotePath,
+		"fs_id", id,
+	)
 	return RemoteFile{ID: id, Size: digest.Size}, nil
 }
 
@@ -787,6 +1057,9 @@ func (p *baiduPCSProvider) userUK(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	p.uk = uk
+	p.log(ctx, slog.LevelInfo, "baidu pcs user info resolved",
+		"uk", uk,
+	)
 	return uk, nil
 }
 
@@ -810,6 +1083,11 @@ func (p *baiduPCSProvider) verifyRemoteFile(ctx context.Context, fsID, expectedP
 	for attempt := 0; attempt < baiduPCSVerifyAttempts; attempt++ {
 		entries, err := p.listFiles(ctx, parent)
 		if err != nil {
+			p.log(ctx, slog.LevelWarn, "baidu pcs remote verification list failed",
+				"remote_path", expectedPath,
+				"attempt", attempt+1,
+				"error", p.logError(err),
+			)
 			return RemoteFile{}, err
 		}
 		for _, item := range entries {
@@ -820,8 +1098,20 @@ func (p *baiduPCSProvider) verifyRemoteFile(ctx context.Context, fsID, expectedP
 				return RemoteFile{}, fmt.Errorf("BaiduPCS remote file size %d does not match %d (fs_id=%s)", item.Size, size, item.ID)
 			}
 			if fsID != "" && item.ID != fsID {
+				p.log(ctx, slog.LevelWarn, "baidu pcs remote verification found a different fs_id",
+					"remote_path", expectedPath,
+					"expected_fs_id", fsID,
+					"actual_fs_id", item.ID,
+					"attempt", attempt+1,
+				)
 				return RemoteFile{}, fmt.Errorf("BaiduPCS remote file fs_id %s does not match %s at %s", item.ID, fsID, expectedPath)
 			}
+			p.log(ctx, slog.LevelInfo, "baidu pcs remote verification succeeded",
+				"remote_path", expectedPath,
+				"fs_id", item.ID,
+				"size", item.Size,
+				"attempt", attempt+1,
+			)
 			return RemoteFile{ID: item.ID, Size: item.Size}, nil
 		}
 		if attempt+1 < baiduPCSVerifyAttempts {
@@ -830,6 +1120,11 @@ func (p *baiduPCSProvider) verifyRemoteFile(ctx context.Context, fsID, expectedP
 			}
 		}
 	}
+	p.log(ctx, slog.LevelWarn, "baidu pcs remote verification did not find file",
+		"remote_path", expectedPath,
+		"fs_id", fsID,
+		"attempts", baiduPCSVerifyAttempts,
+	)
 	return RemoteFile{}, fmt.Errorf("BaiduPCS remote file is not visible yet: %s", expectedPath)
 }
 
@@ -888,6 +1183,7 @@ func (p *baiduPCSProvider) doJSONRequest(ctx context.Context, method, endpoint s
 	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil {
+		p.log(ctx, slog.LevelWarn, "baidu pcs request preparation failed", "endpoint", endpoint, "error", p.logError(err))
 		return err
 	}
 	values := cloneBaiduOpenValues(query)
@@ -903,10 +1199,15 @@ func (p *baiduPCSProvider) doJSONRequest(ctx context.Context, method, endpoint s
 	case io.Reader:
 		reader = typed
 	default:
-		return fmt.Errorf("unsupported BaiduPCS request body %T", body)
+		err := fmt.Errorf("unsupported BaiduPCS request body %T", body)
+		p.log(ctx, slog.LevelWarn, "baidu pcs request preparation failed", "operation", baiduPCSOperation(parsed), "error", p.logError(err))
+		return err
 	}
+	requestID := p.requestSequence.Add(1)
+	requestFields := baiduPCSRequestFields(requestID, method, parsed, values, contentLength)
 	req, err := http.NewRequestWithContext(ctx, method, parsed.String(), reader)
 	if err != nil {
+		p.log(ctx, slog.LevelWarn, "baidu pcs request preparation failed", append(requestFields, "error", p.logError(err))...)
 		return err
 	}
 	if contentLength > 0 {
@@ -919,23 +1220,57 @@ func (p *baiduPCSProvider) doJSONRequest(ctx context.Context, method, endpoint s
 	req.Header.Set("User-Agent", p.userAgent)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Accept-Encoding", "identity")
+	requestStarted := time.Now()
+	p.log(ctx, slog.LevelInfo, "baidu pcs request started", requestFields...)
 	if err := p.waitRequest(ctx); err != nil {
+		p.log(ctx, slog.LevelWarn, "baidu pcs request throttling failed", append(requestFields, "error", p.logError(err))...)
 		return err
 	}
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("BaiduPCS request failed: %w", err)
+		wrappedErr := fmt.Errorf("BaiduPCS request failed: %w", err)
+		p.log(ctx, slog.LevelWarn, "baidu pcs request failed", append(requestFields,
+			"duration_ms", time.Since(requestStarted).Milliseconds(),
+			"error", p.logError(wrappedErr),
+		)...)
+		return wrappedErr
 	}
 	defer resp.Body.Close()
 	responseBody, err := readBaiduPCSResponseBody(resp)
 	if err != nil {
-		return fmt.Errorf("read BaiduPCS response: %w", err)
+		wrappedErr := fmt.Errorf("read BaiduPCS response: %w", err)
+		p.log(ctx, slog.LevelWarn, "baidu pcs response read failed", append(requestFields,
+			"status", resp.StatusCode,
+			"duration_ms", time.Since(requestStarted).Milliseconds(),
+			"error", p.logError(wrappedErr),
+		)...)
+		return wrappedErr
 	}
 	var envelope baiduPCSAPIResponse
 	if err := json.Unmarshal(responseBody, &envelope); err != nil {
-		return fmt.Errorf("decode BaiduPCS response status=%d: %w", resp.StatusCode, err)
+		wrappedErr := fmt.Errorf("decode BaiduPCS response status=%d: %w", resp.StatusCode, err)
+		p.log(ctx, slog.LevelWarn, "baidu pcs response decode failed", append(requestFields,
+			"status", resp.StatusCode,
+			"response_bytes", len(responseBody),
+			"duration_ms", time.Since(requestStarted).Milliseconds(),
+			"error", p.logError(wrappedErr),
+		)...)
+		return wrappedErr
 	}
 	code := envelope.code()
+	responseFields := append([]any{}, requestFields...)
+	responseFields = append(responseFields,
+		"status", resp.StatusCode,
+		"code", code,
+		"message", envelope.message(),
+		"response_bytes", len(responseBody),
+		"duration_ms", time.Since(requestStarted).Milliseconds(),
+	)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices || code != 0 {
+		p.log(ctx, slog.LevelWarn, "baidu pcs response received", responseFields...)
+	} else {
+		p.log(ctx, slog.LevelInfo, "baidu pcs response received", responseFields...)
+	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return &baiduPCSAPIError{StatusCode: resp.StatusCode, Code: code, Message: envelope.message()}
 	}
@@ -946,9 +1281,31 @@ func (p *baiduPCSProvider) doJSONRequest(ctx context.Context, method, endpoint s
 		return nil
 	}
 	if err := json.Unmarshal(responseBody, out); err != nil {
-		return fmt.Errorf("decode BaiduPCS response data: %w", err)
+		wrappedErr := fmt.Errorf("decode BaiduPCS response data: %w", err)
+		p.log(ctx, slog.LevelWarn, "baidu pcs response data decode failed", append(requestFields,
+			"status", resp.StatusCode,
+			"code", code,
+			"response_bytes", len(responseBody),
+			"error", p.logError(wrappedErr),
+		)...)
+		return wrappedErr
 	}
 	return nil
+}
+
+func baiduPCSURLHost(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
+}
+
+func baiduPCSInfoFSID(info *baiduPCSFileItem) string {
+	if info == nil {
+		return ""
+	}
+	return strings.TrimSpace(string(info.FSID))
 }
 
 func readBaiduPCSResponseBody(response *http.Response) ([]byte, error) {

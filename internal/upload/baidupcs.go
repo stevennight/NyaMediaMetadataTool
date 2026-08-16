@@ -28,20 +28,21 @@ import (
 )
 
 const (
-	baiduPCSBaseURL          = "https://pan.baidu.com"
-	baiduPCSAPIBaseURL       = "https://pcs.baidu.com"
-	baiduPCSUploadBaseURL    = "https://c2.pcs.baidu.com"
-	baiduPCSAppID            = "250528"
-	baiduPCSDefaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36"
-	baiduPCSRequestTimeout   = 5 * time.Minute
-	baiduPCSSliceSize        = 256 * 1024
-	baiduPCSDataContentSize  = baiduPCSSliceSize
-	baiduPCSMinBlockSize     = 4 * 1024 * 1024
-	baiduPCSChunkConcurrency = 3
-	baiduPCSChunkRetryLimit  = 3
-	baiduPCSWorkerStagger    = time.Second
-	baiduPCSVerifyAttempts   = 8
-	baiduPCSVerifyRetryDelay = time.Second
+	baiduPCSBaseURL                 = "https://pan.baidu.com"
+	baiduPCSAPIBaseURL              = "https://pcs.baidu.com"
+	baiduPCSUploadBaseURL           = "https://c2.pcs.baidu.com"
+	baiduPCSAppID                   = "250528"
+	baiduPCSDefaultUserAgent        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36"
+	baiduPCSRequestTimeout          = 5 * time.Minute
+	baiduPCSSliceSize               = 256 * 1024
+	baiduPCSDataContentSize         = baiduPCSSliceSize
+	baiduPCSMinBlockSize            = 4 * 1024 * 1024
+	baiduPCSChunkConcurrency        = 3
+	baiduPCSChunkRetryLimit         = 3
+	baiduPCSWorkerStagger           = time.Second
+	baiduPCSVerifyAttempts          = 8
+	baiduPCSFileManagerTaskAttempts = 60
+	baiduPCSVerifyRetryDelay        = time.Second
 )
 
 type baiduPCSProvider struct {
@@ -181,6 +182,24 @@ type baiduPCSRapidResponse struct {
 	FSID       json.Number       `json:"fs_id"`
 	Path       string            `json:"path"`
 	Info       *baiduPCSFileItem `json:"info"`
+}
+
+type baiduPCSFileManagerResponse struct {
+	baiduPCSAPIResponse
+	TaskID json.Number `json:"taskid"`
+}
+
+type baiduPCSFileManagerItem struct {
+	ID      json.Number `json:"id"`
+	Path    string      `json:"path"`
+	NewName string      `json:"newname,omitempty"`
+}
+
+type baiduPCSShareTaskQueryResponse struct {
+	baiduPCSAPIResponse
+	TaskErrno json.Number `json:"task_errno"`
+	Status    string      `json:"status"`
+	ShowMsg   string      `json:"show_msg"`
 }
 
 type baiduPCSUserInfoResponse struct {
@@ -486,9 +505,13 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 		}
 	}
 
+	// rapidupload may create a timestamp-suffixed sibling when the target
+	// already exists. The path-repair flow below removes that collision before
+	// renaming the rapid-upload result to the requested name.
+	rapidUploadAllowed := p.rapidUploadEnabled
 	var digest *baiduPCSDigest
 	var precreated *baiduPCSPrecreateResponse
-	preuploadMode := p.preuploadBeforeRapid && p.rapidUploadEnabled && size > baiduPCSDataContentSize
+	preuploadMode := p.preuploadBeforeRapid && rapidUploadAllowed && size > baiduPCSDataContentSize
 	if preuploadMode {
 		initialDigest, initialErr := calculateBaiduPCSInitialDigest(ctx, file)
 		if initialErr != nil {
@@ -536,7 +559,15 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 		}
 		var pathErr *baiduPCSRemotePathError
 		if errors.As(rapidErr, &pathErr) {
-			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: rapidErr}
+			if repaired, repairErr := p.repairUnexpectedRapidUploadPath(ctx, pathErr, remotePath, size); repairErr == nil {
+				repaired.LocalSHA1 = localSHA1
+				repaired.SHA1 = localSHA1
+				repaired.Outcome = intendedOutcome
+				p.reportProgress(ctx, size)
+				return repaired, nil
+			} else {
+				return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("%w (automatic rename repair failed: %v)", rapidErr, repairErr)}
+			}
 		}
 		if uploadErr != nil {
 			return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("BaiduPCS upload chunks for %s: %w", remotePath, uploadErr)}
@@ -590,7 +621,7 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 			"info_fs_id", baiduPCSInfoFSID(precreated.Info),
 		)
 
-		if p.rapidUploadEnabled && digest.Size > baiduPCSDataContentSize {
+		if rapidUploadAllowed && digest.Size > baiduPCSDataContentSize {
 			rapid, rapidErr := p.rapidUploadFromFile(ctx, remotePath, precreated.UploadID, file, info.ModTime(), digest, 1)
 			if rapidErr == nil {
 				verified, verifyErr := p.verifyRemoteFile(ctx, rapid.ID, remotePath, size)
@@ -605,17 +636,30 @@ func (p *baiduPCSProvider) Upload(ctx context.Context, localPath, remotePath str
 			}
 			var pathErr *baiduPCSRemotePathError
 			if errors.As(rapidErr, &pathErr) {
-				return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: rapidErr}
+				if repaired, repairErr := p.repairUnexpectedRapidUploadPath(ctx, pathErr, remotePath, size); repairErr == nil {
+					repaired.LocalSHA1 = localSHA1
+					repaired.SHA1 = localSHA1
+					repaired.Outcome = intendedOutcome
+					p.reportProgress(ctx, size)
+					return repaired, nil
+				} else {
+					return RemoteFile{}, &UploadAttemptError{Outcome: intendedOutcome, LocalSHA1: localSHA1, Err: fmt.Errorf("%w (automatic rename repair failed: %v)", rapidErr, repairErr)}
+				}
 			}
 			p.log(ctx, slog.LevelWarn, "baidu pcs rapid upload missed; falling back to chunk upload",
 				"remote_path", remotePath,
 				"error", p.logError(rapidErr),
 			)
 		} else {
-			p.log(ctx, slog.LevelInfo, "baidu pcs rapid upload skipped for small file or disabled",
+			reason := "small file or disabled"
+			if found {
+				reason = "target exists; using overwrite create"
+			}
+			p.log(ctx, slog.LevelInfo, "baidu pcs rapid upload skipped",
 				"remote_path", remotePath,
 				"size", digest.Size,
-				"rapid_upload_enabled", p.rapidUploadEnabled,
+				"rapid_upload_enabled", rapidUploadAllowed,
+				"reason", reason,
 			)
 		}
 
@@ -1479,6 +1523,180 @@ func (p *baiduPCSProvider) rapidUploadWithData(ctx context.Context, remotePath, 
 		"fs_id", id,
 	)
 	return RemoteFile{ID: id, Size: digest.Size}, nil
+}
+
+// repairUnexpectedRapidUploadPath resolves a server-side collision rename.
+// The rapid-upload result is the file that must survive; any file currently at
+// the requested path is removed before the result is renamed into place.
+func (p *baiduPCSProvider) repairUnexpectedRapidUploadPath(ctx context.Context, pathErr *baiduPCSRemotePathError, expectedPath string, size int64) (RemoteFile, error) {
+	if pathErr == nil {
+		return RemoteFile{}, errors.New("BaiduPCS rapid upload path error is missing")
+	}
+	expectedPath = normalizeBaiduOpenPath(expectedPath)
+	actualPath := normalizeBaiduOpenPath(pathErr.Actual)
+	if actualPath == "/" || actualPath == expectedPath {
+		return RemoteFile{}, fmt.Errorf("invalid rapid upload path repair source %q", actualPath)
+	}
+	fsID := strings.TrimSpace(pathErr.FSID)
+	if fsID == "" {
+		return RemoteFile{}, errors.New("rapid upload path repair has no fs_id")
+	}
+	cleanup := func(primary error) (RemoteFile, error) {
+		cleanupErr := p.deleteFile(ctx, actualPath)
+		if cleanupErr != nil {
+			return RemoteFile{}, fmt.Errorf("%w; cleanup rapid upload result %s failed: %v", primary, actualPath, cleanupErr)
+		}
+		return RemoteFile{}, primary
+	}
+	if pathpkg.Dir(actualPath) != pathpkg.Dir(expectedPath) {
+		return cleanup(fmt.Errorf("rapid upload path repair cannot move %q to %q across directories", actualPath, expectedPath))
+	}
+
+	parentPath := pathpkg.Dir(expectedPath)
+	name := pathpkg.Base(expectedPath)
+	entry, found, err := p.findEntry(ctx, parentPath, name)
+	if err != nil {
+		return cleanup(fmt.Errorf("check rapid upload rename target %s: %w", expectedPath, err))
+	}
+	if found {
+		if entry.IsDir {
+			return cleanup(fmt.Errorf("BaiduPCS rapid upload rename target is a directory: %s", expectedPath))
+		}
+		if err := p.deleteFile(ctx, entry.Path); err != nil {
+			return cleanup(fmt.Errorf("delete existing BaiduPCS target %s: %w", expectedPath, err))
+		}
+	}
+
+	if err := p.renameFile(ctx, fsID, actualPath, name); err != nil {
+		return cleanup(fmt.Errorf("rename rapid upload result %s to %s: %w", actualPath, expectedPath, err))
+	}
+	return p.verifyRemoteFile(ctx, fsID, expectedPath, size)
+}
+
+func (p *baiduPCSProvider) renameFile(ctx context.Context, fsID, oldPath, newName string) error {
+	newName = strings.TrimSpace(newName)
+	if newName == "" || newName == "." || newName == "/" || pathpkg.Base(newName) != newName {
+		return fmt.Errorf("invalid BaiduPCS rename target name %q", newName)
+	}
+	return p.fileManager(ctx, "rename", fsID, oldPath, newName)
+}
+
+func (p *baiduPCSProvider) deleteFile(ctx context.Context, remotePath string) error {
+	return p.fileManager(ctx, "delete", "", remotePath, "")
+}
+
+func (p *baiduPCSProvider) fileManager(ctx context.Context, operation, fsID, remotePath, newName string) error {
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	if operation != "delete" && operation != "rename" {
+		return fmt.Errorf("unsupported BaiduPCS file manager operation %q", operation)
+	}
+	fsID = strings.TrimSpace(fsID)
+	remotePath = normalizeBaiduOpenPath(remotePath)
+	if operation == "rename" && fsID == "" {
+		return fmt.Errorf("BaiduPCS %s requires fs_id", operation)
+	}
+	if operation == "rename" {
+		if _, err := strconv.ParseInt(fsID, 10, 64); err != nil {
+			return fmt.Errorf("BaiduPCS %s fs_id %q is invalid: %w", operation, fsID, err)
+		}
+	}
+	if remotePath == "/" {
+		return fmt.Errorf("BaiduPCS %s requires a file path", operation)
+	}
+	if operation == "rename" && (newName == "" || pathpkg.Base(newName) != newName) {
+		return fmt.Errorf("BaiduPCS rename requires a file name, got %q", newName)
+	}
+
+	var fileList []byte
+	var err error
+	if operation == "delete" {
+		fileList, err = json.Marshal([]string{remotePath})
+	} else {
+		fileList, err = json.Marshal([]baiduPCSFileManagerItem{{
+			ID:      json.Number(fsID),
+			Path:    remotePath,
+			NewName: newName,
+		}})
+	}
+	if err != nil {
+		return fmt.Errorf("encode BaiduPCS %s filelist: %w", operation, err)
+	}
+	form := url.Values{}
+	form.Set("filelist", string(fileList))
+	query := url.Values{}
+	query.Set("async", "2")
+	query.Set("onnest", "fail")
+	query.Set("opera", operation)
+	if operation == "delete" {
+		query.Set("newVerify", "1")
+	}
+	encoded := form.Encode()
+	var response baiduPCSFileManagerResponse
+	p.log(ctx, slog.LevelInfo, "baidu pcs file manager operation started",
+		"operation", operation,
+		"remote_path", remotePath,
+		"new_name", newName,
+		"fs_id", fsID,
+	)
+	if err := p.doJSONRequest(ctx, http.MethodPost, baiduPCSBaseURL+"/api/filemanager", query, []byte(encoded), "application/x-www-form-urlencoded", int64(len(encoded)), true, &response); err != nil {
+		return err
+	}
+	taskID := strings.TrimSpace(string(response.TaskID))
+	p.log(ctx, slog.LevelInfo, "baidu pcs file manager operation accepted",
+		"operation", operation,
+		"remote_path", remotePath,
+		"new_name", newName,
+		"fs_id", fsID,
+		"task_id_present", taskID != "",
+	)
+	if taskID == "" {
+		return nil
+	}
+	return p.waitFileManagerTask(ctx, taskID)
+}
+
+func (p *baiduPCSProvider) waitFileManagerTask(ctx context.Context, taskID string) error {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil
+	}
+	for attempt := 0; attempt < baiduPCSFileManagerTaskAttempts; attempt++ {
+		query := url.Values{}
+		query.Set("taskid", taskID)
+		query.Set("app_id", baiduPCSAppID)
+		query.Set("web", "1")
+		query.Set("clienttype", "0")
+		query.Set("dp-logid", p.nextDPLogID())
+		var response baiduPCSShareTaskQueryResponse
+		if err := p.doJSONRequest(ctx, http.MethodGet, baiduPCSBaseURL+"/share/taskquery", query, nil, "", 0, false, &response); err != nil {
+			return fmt.Errorf("query BaiduPCS file manager task %s: %w", taskID, err)
+		}
+		taskErrno := parseBaiduOpenInt64(string(response.TaskErrno))
+		status := strings.ToLower(strings.TrimSpace(response.Status))
+		if taskErrno != 0 {
+			message := strings.TrimSpace(response.ShowMsg)
+			if message == "" {
+				message = "task failed"
+			}
+			return fmt.Errorf("BaiduPCS file manager task %s failed: task_errno=%d message=%s", taskID, taskErrno, message)
+		}
+		switch status {
+		case "success", "succeeded", "done", "complete", "completed":
+			return nil
+		case "failed", "failure", "error":
+			message := strings.TrimSpace(response.ShowMsg)
+			if message == "" {
+				message = "task failed"
+			}
+			return fmt.Errorf("BaiduPCS file manager task %s failed: %s", taskID, message)
+		}
+		if attempt+1 < baiduPCSFileManagerTaskAttempts {
+			if err := waitBaiduOpen(ctx, baiduPCSVerifyRetryDelay); err != nil {
+				return err
+			}
+		}
+	}
+	return fmt.Errorf("BaiduPCS file manager task %s did not complete", taskID)
 }
 
 func (p *baiduPCSProvider) userUK(ctx context.Context) (int64, error) {

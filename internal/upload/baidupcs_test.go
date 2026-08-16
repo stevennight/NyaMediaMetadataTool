@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"NyaMediaMetadataTool/internal/store"
 )
 
 func TestBaiduPCSUploadUsesRapidUploadAfterPrecreate(t *testing.T) {
@@ -111,6 +113,374 @@ func TestBaiduPCSUploadUsesRapidUploadAfterPrecreate(t *testing.T) {
 	}
 	if rapidCalls != 1 {
 		t.Fatalf("rapid calls = %d, want 1", rapidCalls)
+	}
+}
+
+func TestBaiduPCSUnexpectedRapidPathIsRenamedWhenTargetRemainsAbsent(t *testing.T) {
+	content := bytes.Repeat([]byte("rapid-rename-content"), (baiduPCSDataContentSize/len("rapid-rename-content"))+1)
+	localPath := filepath.Join(t.TempDir(), "episode.mkv")
+	if err := os.WriteFile(localPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listCalls := 0
+	renameCalls := 0
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/list":
+			listCalls++
+			if listCalls < 3 {
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[]}`), nil
+			}
+			return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"list":[{"fs_id":707,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":%d}]}`, len(content))), nil
+		case "/api/gettemplatevariable":
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"result":{"uk":12345}}`), nil
+		case "/api/precreate":
+			formBytes, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				return nil, readErr
+			}
+			form, parseErr := url.ParseQuery(string(formBytes))
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			if form.Get("path") != "/episode.mkv" || form.Get("target_path") != "/" || form.Get("ondup") != "overwrite" {
+				return nil, fmt.Errorf("precreate form = %s", formBytes)
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"return_type":1,"uploadid":"upload-rename","block_list":[0]}`), nil
+		case "/api/rapidupload":
+			return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"info":{"fs_id":707,"path":"/episode_20260816_200159.mkv","size":%d}}`, len(content))), nil
+		case "/api/filemanager":
+			renameCalls++
+			if req.URL.Query().Get("bdstoken") != "token" || req.URL.Query().Get("async") != "2" || req.URL.Query().Get("onnest") != "fail" || req.URL.Query().Get("opera") != "rename" {
+				return nil, fmt.Errorf("rename query = %s", req.URL.RawQuery)
+			}
+			formBytes, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				return nil, readErr
+			}
+			form, parseErr := url.ParseQuery(string(formBytes))
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			var fileList []struct {
+				ID      json.Number `json:"id"`
+				Path    string      `json:"path"`
+				NewName string      `json:"newname"`
+			}
+			if err := json.Unmarshal([]byte(form.Get("filelist")), &fileList); err != nil {
+				return nil, fmt.Errorf("rename filelist: %w", err)
+			}
+			if len(fileList) != 1 || string(fileList[0].ID) != "707" || fileList[0].Path != "/episode_20260816_200159.mkv" || fileList[0].NewName != "episode.mkv" {
+				return nil, fmt.Errorf("rename filelist = %#v", fileList)
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"info":[],"taskid":123}`), nil
+		case "/share/taskquery":
+			if req.URL.Query().Get("taskid") != "123" {
+				return nil, fmt.Errorf("rename task query = %s", req.URL.RawQuery)
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"task_errno":0,"status":"success"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		}
+	})
+
+	remote, err := provider.Upload(context.Background(), localPath, "/episode.mkv", int64(len(content)), "", "replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.ID != "707" || remote.Size != int64(len(content)) || remote.Outcome != store.UploadOutcomeCreated {
+		t.Fatalf("remote = %#v", remote)
+	}
+	if listCalls != 3 || renameCalls != 1 {
+		t.Fatalf("list calls = %d, rename calls = %d, want list=3 rename=1", listCalls, renameCalls)
+	}
+}
+
+func TestBaiduPCSUnexpectedRapidPathDeletesExistingTargetBeforeRename(t *testing.T) {
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listCalls := 0
+	operations := make([]string, 0, 2)
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/list":
+			listCalls++
+			if listCalls == 1 {
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[{"fs_id":909,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":10}]}`), nil
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[{"fs_id":707,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":10}]}`), nil
+		case "/api/filemanager":
+			if req.URL.Query().Get("bdstoken") != "token" || req.URL.Query().Get("async") != "2" || req.URL.Query().Get("onnest") != "fail" {
+				return nil, fmt.Errorf("file manager query = %s", req.URL.RawQuery)
+			}
+			operation := req.URL.Query().Get("opera")
+			operations = append(operations, operation)
+			formBytes, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				return nil, readErr
+			}
+			form, parseErr := url.ParseQuery(string(formBytes))
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			switch operation {
+			case "delete":
+				if req.URL.Query().Get("newVerify") != "1" {
+					return nil, fmt.Errorf("delete query = %s", req.URL.RawQuery)
+				}
+				var fileList []string
+				if err := json.Unmarshal([]byte(form.Get("filelist")), &fileList); err != nil {
+					return nil, fmt.Errorf("delete filelist: %w", err)
+				}
+				if len(fileList) != 1 || fileList[0] != "/episode.mkv" {
+					return nil, fmt.Errorf("delete filelist = %#v", fileList)
+				}
+			case "rename":
+				var fileList []baiduPCSFileManagerItem
+				if err := json.Unmarshal([]byte(form.Get("filelist")), &fileList); err != nil {
+					return nil, fmt.Errorf("rename filelist: %w", err)
+				}
+				if len(fileList) != 1 {
+					return nil, fmt.Errorf("rename filelist = %#v", fileList)
+				}
+				if string(fileList[0].ID) != "707" || fileList[0].Path != "/episode_20260816_200159.mkv" || fileList[0].NewName != "episode.mkv" {
+					return nil, fmt.Errorf("rename filelist = %#v", fileList)
+				}
+			default:
+				return nil, fmt.Errorf("unexpected file manager operation %q", operation)
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		}
+	})
+
+	remote, err := provider.repairUnexpectedRapidUploadPath(context.Background(), &baiduPCSRemotePathError{
+		Expected: "/episode.mkv",
+		Actual:   "/episode_20260816_200159.mkv",
+		FSID:     "707",
+	}, "/episode.mkv", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.ID != "707" || remote.Size != 10 {
+		t.Fatalf("remote = %#v", remote)
+	}
+	if listCalls != 2 || strings.Join(operations, ",") != "delete,rename" {
+		t.Fatalf("list calls = %d, operations = %#v, want list=2 operations=[delete rename]", listCalls, operations)
+	}
+}
+
+func TestBaiduPCSUnexpectedRapidPathCleansUpWhenTargetDeleteFails(t *testing.T) {
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := make([]string, 0, 2)
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/list":
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[{"fs_id":909,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":10}]}`), nil
+		case "/api/filemanager":
+			operation := req.URL.Query().Get("opera")
+			operations = append(operations, operation)
+			if operation != "delete" {
+				return nil, fmt.Errorf("unexpected operation after target delete failure: %s", operation)
+			}
+			formBytes, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				return nil, readErr
+			}
+			form, parseErr := url.ParseQuery(string(formBytes))
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			if len(operations) == 1 {
+				if req.URL.Query().Get("newVerify") != "1" {
+					return nil, fmt.Errorf("target delete query = %s", req.URL.RawQuery)
+				}
+				var fileList []string
+				if err := json.Unmarshal([]byte(form.Get("filelist")), &fileList); err != nil {
+					return nil, err
+				}
+				if len(fileList) != 1 || fileList[0] != "/episode.mkv" {
+					return nil, fmt.Errorf("target delete filelist = %#v", fileList)
+				}
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":12345,"errmsg":"delete failed"}`), nil
+			}
+			if req.URL.Query().Get("newVerify") != "1" {
+				return nil, fmt.Errorf("rapid cleanup query = %s", req.URL.RawQuery)
+			}
+			var fileList []string
+			if err := json.Unmarshal([]byte(form.Get("filelist")), &fileList); err != nil {
+				return nil, err
+			}
+			if len(fileList) != 1 || fileList[0] != "/episode_20260816_200159.mkv" {
+				return nil, fmt.Errorf("cleanup filelist = %#v", fileList)
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		}
+	})
+
+	_, err = provider.repairUnexpectedRapidUploadPath(context.Background(), &baiduPCSRemotePathError{
+		Expected: "/episode.mkv",
+		Actual:   "/episode_20260816_200159.mkv",
+		FSID:     "707",
+	}, "/episode.mkv", 10)
+	if err == nil || !strings.Contains(err.Error(), "delete existing BaiduPCS target") {
+		t.Fatalf("error = %v, want target delete failure", err)
+	}
+	if strings.Join(operations, ",") != "delete,delete" {
+		t.Fatalf("operations = %#v, want [delete delete]", operations)
+	}
+}
+
+func TestBaiduPCSUnexpectedRapidPathCleansUpWhenRenameFails(t *testing.T) {
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := make([]string, 0, 3)
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/list":
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"list":[{"fs_id":909,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":10}]}`), nil
+		case "/api/filemanager":
+			operation := req.URL.Query().Get("opera")
+			operations = append(operations, operation)
+			formBytes, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				return nil, readErr
+			}
+			form, parseErr := url.ParseQuery(string(formBytes))
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			switch len(operations) {
+			case 1:
+				if operation != "delete" || req.URL.Query().Get("newVerify") != "1" {
+					return nil, fmt.Errorf("target delete query = %s", req.URL.RawQuery)
+				}
+				var fileList []string
+				if err := json.Unmarshal([]byte(form.Get("filelist")), &fileList); err != nil {
+					return nil, err
+				}
+				if len(fileList) != 1 || fileList[0] != "/episode.mkv" {
+					return nil, fmt.Errorf("target delete filelist = %#v", fileList)
+				}
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0}`), nil
+			case 2:
+				var fileList []baiduPCSFileManagerItem
+				if err := json.Unmarshal([]byte(form.Get("filelist")), &fileList); err != nil {
+					return nil, err
+				}
+				if len(fileList) != 1 {
+					return nil, fmt.Errorf("rename filelist = %#v", fileList)
+				}
+				if operation != "rename" || string(fileList[0].ID) != "707" {
+					return nil, fmt.Errorf("rename = %#v", fileList)
+				}
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":456,"errmsg":"rename failed"}`), nil
+			case 3:
+				if operation != "delete" || req.URL.Query().Get("newVerify") != "1" {
+					return nil, fmt.Errorf("rapid cleanup query = %s", req.URL.RawQuery)
+				}
+				var fileList []string
+				if err := json.Unmarshal([]byte(form.Get("filelist")), &fileList); err != nil {
+					return nil, err
+				}
+				if len(fileList) != 1 || fileList[0] != "/episode_20260816_200159.mkv" {
+					return nil, fmt.Errorf("rapid cleanup filelist = %#v", fileList)
+				}
+				return baiduOpenJSONResponse(http.StatusOK, `{"errno":0}`), nil
+			default:
+				return nil, fmt.Errorf("unexpected operation %d", len(operations))
+			}
+		default:
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		}
+	})
+
+	_, err = provider.repairUnexpectedRapidUploadPath(context.Background(), &baiduPCSRemotePathError{
+		Expected: "/episode.mkv",
+		Actual:   "/episode_20260816_200159.mkv",
+		FSID:     "707",
+	}, "/episode.mkv", 10)
+	if err == nil || !strings.Contains(err.Error(), "rename rapid upload result") {
+		t.Fatalf("error = %v, want rename failure", err)
+	}
+	if strings.Join(operations, ",") != "delete,rename,delete" {
+		t.Fatalf("operations = %#v, want [delete rename delete]", operations)
+	}
+}
+
+func TestBaiduPCSExistingTargetUsesRapidUploadWhenReplaced(t *testing.T) {
+	content := make([]byte, baiduPCSMinBlockSize+10)
+	for index := range content {
+		content[index] = byte(index % 251)
+	}
+	localPath := filepath.Join(t.TempDir(), "episode.mkv")
+	if err := os.WriteFile(localPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := newBaiduPCSProvider("BDUSS=test", "token", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listCalls := 0
+	rapidCalls := 0
+	createCalls := 0
+	provider.httpClient.Transport = baiduOpenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/list":
+			listCalls++
+			if listCalls == 1 {
+				return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"list":[{"fs_id":99,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":%d}]}`, len(content))), nil
+			}
+			return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"list":[{"fs_id":100,"path":"/episode.mkv","server_filename":"episode.mkv","isdir":0,"size":%d}]}`, len(content))), nil
+		case "/api/gettemplatevariable":
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"result":{"uk":12345}}`), nil
+		case "/api/precreate":
+			formBytes, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				return nil, readErr
+			}
+			form, parseErr := url.ParseQuery(string(formBytes))
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			if form.Get("path") != "/episode.mkv" || form.Get("ondup") != "overwrite" {
+				return nil, fmt.Errorf("precreate form = %s", formBytes)
+			}
+			return baiduOpenJSONResponse(http.StatusOK, `{"errno":0,"return_type":1,"uploadid":"upload-replace","block_list":[0,1]}`), nil
+		case "/api/rapidupload":
+			rapidCalls++
+			return baiduOpenJSONResponse(http.StatusOK, fmt.Sprintf(`{"errno":0,"info":{"fs_id":100,"path":"/episode.mkv","size":%d}}`, len(content))), nil
+		case "/api/create":
+			createCalls++
+			return nil, fmt.Errorf("create must not be called after rapid upload")
+		default:
+			return nil, fmt.Errorf("unexpected BaiduPCS request %s", req.URL.Path)
+		}
+	})
+
+	remote, err := provider.Upload(context.Background(), localPath, "/episode.mkv", int64(len(content)), "", "replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.ID != "100" || remote.Size != int64(len(content)) || remote.Outcome != store.UploadOutcomeReplaced {
+		t.Fatalf("remote = %#v", remote)
+	}
+	if rapidCalls != 1 || createCalls != 0 {
+		t.Fatalf("rapid calls = %d, create calls = %d, want rapid=1 create=0", rapidCalls, createCalls)
 	}
 }
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"NyaMediaMetadataTool/internal/config"
 	"NyaMediaMetadataTool/internal/store"
@@ -158,12 +160,62 @@ func TestTasksEndpointFiltersByScanRun(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("tasks status=%d body=%s", response.Code, response.Body.String())
 	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("tasks cache-control=%q, want no-store", got)
+	}
 	var got store.TaskListResult
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got.Total != 1 || len(got.Items) != 1 || got.Items[0].ScanRunID != "batch-b" {
 		t.Fatalf("unexpected filtered tasks: %+v", got)
+	}
+}
+
+func TestTaskEventsEndpointNotifiesAfterTaskChange(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(NewServer(config.Default(), filepath.Join(t.TempDir(), "config.yaml"), st, nil, nil, slog.Default()))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/api/tasks/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("events status=%d", response.StatusCode)
+	}
+
+	reader := bufio.NewReader(response.Body)
+	for index := 0; index < 2; index++ {
+		if _, err := reader.ReadString('\n'); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.BeginScanRun(context.Background(), "events-test", "manual", "media"); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(line) == "event: tasks-changed" {
+			return
+		}
 	}
 }
 

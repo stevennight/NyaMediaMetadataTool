@@ -623,18 +623,27 @@ WHERE id = ? AND status = ?
 	if err := tx.Commit(); err != nil {
 		return UploadNotification{}, err
 	}
+	s.notifyUploadChanges()
 	item.Status = UploadNotificationProcessing
 	item.Attempts++
 	return item, nil
 }
 
 func (s *Store) CompleteUploadNotification(ctx context.Context, id int64, responseStatus int) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 UPDATE upload_notifications
 SET status = ?, response_status = ?, error_summary = '', delivered_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND status = ?
 `, UploadNotificationDelivered, responseStatus, id, UploadNotificationProcessing)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyUploadChanges()
+	}
+	return nil
 }
 
 func (s *Store) FailUploadNotification(ctx context.Context, id int64, responseStatus int, summary string, retryAt time.Time) error {
@@ -644,21 +653,37 @@ func (s *Store) FailUploadNotification(ctx context.Context, id int64, responseSt
 		status = UploadNotificationPending
 		availableAt = formatStoreTime(retryAt.UTC())
 	}
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 UPDATE upload_notifications
 SET status = ?, response_status = ?, error_summary = ?, available_at = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND status = ?
 `, status, responseStatus, strings.TrimSpace(summary), availableAt, id, UploadNotificationProcessing)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyUploadChanges()
+	}
+	return nil
 }
 
 func (s *Store) ResetProcessingUploadNotifications(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 UPDATE upload_notifications
 SET status = ?, available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 WHERE status = ?
 `, UploadNotificationPending, UploadNotificationProcessing)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyUploadChanges()
+	}
+	return nil
 }
 
 const uploadNotificationSelect = `

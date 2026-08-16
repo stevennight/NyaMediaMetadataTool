@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"NyaMediaMetadataTool/internal/config"
@@ -16,7 +17,13 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db                      *sql.DB
+	taskChangesMu           sync.Mutex
+	taskChangeSubscribers   map[uint64]chan struct{}
+	nextTaskChangeID        uint64
+	uploadChangesMu         sync.Mutex
+	uploadChangeSubscribers map[uint64]chan struct{}
+	nextUploadChangeID      uint64
 }
 
 type UploadRuntimeOptions struct {
@@ -38,7 +45,11 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	store := &Store{db: db}
+	store := &Store{
+		db:                      db,
+		taskChangeSubscribers:   make(map[uint64]chan struct{}),
+		uploadChangeSubscribers: make(map[uint64]chan struct{}),
+	}
 	if err := store.configure(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -62,6 +73,82 @@ func restrictDatabasePermissions(path string) error {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// SubscribeTaskChanges returns a coalescing notification channel for changes
+// that can affect the task list or its scan-batch filters.
+func (s *Store) SubscribeTaskChanges() (<-chan struct{}, func()) {
+	s.taskChangesMu.Lock()
+	defer s.taskChangesMu.Unlock()
+
+	if s.taskChangeSubscribers == nil {
+		s.taskChangeSubscribers = make(map[uint64]chan struct{})
+	}
+	s.nextTaskChangeID++
+	id := s.nextTaskChangeID
+	changes := make(chan struct{}, 1)
+	s.taskChangeSubscribers[id] = changes
+
+	var unsubscribeOnce sync.Once
+	return changes, func() {
+		unsubscribeOnce.Do(func() {
+			s.taskChangesMu.Lock()
+			defer s.taskChangesMu.Unlock()
+			if current, ok := s.taskChangeSubscribers[id]; ok && current == changes {
+				delete(s.taskChangeSubscribers, id)
+				close(changes)
+			}
+		})
+	}
+}
+
+func (s *Store) notifyTaskChanges() {
+	s.taskChangesMu.Lock()
+	defer s.taskChangesMu.Unlock()
+	for _, changes := range s.taskChangeSubscribers {
+		select {
+		case changes <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// SubscribeUploadChanges returns a coalescing notification channel for changes
+// that can affect upload batches, transfer progress, or notification records.
+func (s *Store) SubscribeUploadChanges() (<-chan struct{}, func()) {
+	s.uploadChangesMu.Lock()
+	defer s.uploadChangesMu.Unlock()
+
+	if s.uploadChangeSubscribers == nil {
+		s.uploadChangeSubscribers = make(map[uint64]chan struct{})
+	}
+	s.nextUploadChangeID++
+	id := s.nextUploadChangeID
+	changes := make(chan struct{}, 1)
+	s.uploadChangeSubscribers[id] = changes
+
+	var unsubscribeOnce sync.Once
+	return changes, func() {
+		unsubscribeOnce.Do(func() {
+			s.uploadChangesMu.Lock()
+			defer s.uploadChangesMu.Unlock()
+			if current, ok := s.uploadChangeSubscribers[id]; ok && current == changes {
+				delete(s.uploadChangeSubscribers, id)
+				close(changes)
+			}
+		})
+	}
+}
+
+func (s *Store) notifyUploadChanges() {
+	s.uploadChangesMu.Lock()
+	defer s.uploadChangesMu.Unlock()
+	for _, changes := range s.uploadChangeSubscribers {
+		select {
+		case changes <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (s *Store) configure(ctx context.Context) error {

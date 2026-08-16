@@ -169,6 +169,18 @@ export async function notifyDesktop(title: string, body: string): Promise<void> 
   await bridge()?.Notify(title, body);
 }
 
+export function subscribeDesktopTaskChanges(onChange: () => void): (() => void) | null {
+  const events = window.runtime;
+  if (!events?.EventsOn) return null;
+  return events.EventsOn('nyamedia:tasks-changed', () => onChange());
+}
+
+export function subscribeDesktopUploadChanges(onChange: () => void): (() => void) | null {
+  const events = window.runtime;
+  if (!events?.EventsOn) return null;
+  return events.EventsOn('nyamedia:uploads-changed', () => onChange());
+}
+
 export async function previewDesktopRename(input: DesktopRenamePreviewRequest, onEvent: (event: DesktopRenamePreviewEvent) => void, signal?: AbortSignal): Promise<boolean> {
   const desktop = bridge();
   const events = window.runtime;

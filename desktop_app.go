@@ -66,14 +66,17 @@ type DesktopApp struct {
 	callbackServer      *http.Server
 	callbackForwardHost string
 
-	forceClose      atomic.Bool
-	closeOnce       sync.Once
-	closeDone       chan struct{}
-	shutdownTimeout time.Duration
-	previewMu       sync.Mutex
-	previewWG       sync.WaitGroup
-	previews        map[string]context.CancelFunc
-	previewEnd      bool
+	forceClose       atomic.Bool
+	closeOnce        sync.Once
+	closeDone        chan struct{}
+	shutdownTimeout  time.Duration
+	previewMu        sync.Mutex
+	previewWG        sync.WaitGroup
+	previews         map[string]context.CancelFunc
+	previewEnd       bool
+	taskEventsMu     sync.Mutex
+	taskEventsCancel context.CancelFunc
+	taskEventsWG     sync.WaitGroup
 }
 
 var errDesktopServiceClosed = errors.New("desktop service is shutting down")
@@ -349,6 +352,7 @@ func (a *DesktopApp) finishServiceClose() {
 		a.service = nil
 		a.serviceMu.Unlock()
 		callbackErr := a.closeDesktopCallbackServer(ctx)
+		a.stopTaskEventForwarder()
 		if service == nil {
 			result <- callbackErr
 			return
@@ -434,7 +438,53 @@ func (a *DesktopApp) startDesktopService() (*appcore.Service, error) {
 		_ = service.Close(context.Background())
 		return nil, err
 	}
+	a.startTaskEventForwarder(service)
 	return service, nil
+}
+
+func (a *DesktopApp) startTaskEventForwarder(service *appcore.Service) {
+	if service == nil || service.Store == nil {
+		return
+	}
+	taskChanges, unsubscribeTasks := service.Store.SubscribeTaskChanges()
+	uploadChanges, unsubscribeUploads := service.Store.SubscribeUploadChanges()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.taskEventsMu.Lock()
+	a.taskEventsCancel = cancel
+	a.taskEventsWG.Add(1)
+	a.taskEventsMu.Unlock()
+	go func() {
+		defer a.taskEventsWG.Done()
+		defer unsubscribeTasks()
+		defer unsubscribeUploads()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-taskChanges:
+				runtimeCtx := a.runtimeContext()
+				if runtimeCtx != nil {
+					wailsRuntime.EventsEmit(runtimeCtx, "nyamedia:tasks-changed")
+				}
+			case <-uploadChanges:
+				runtimeCtx := a.runtimeContext()
+				if runtimeCtx != nil {
+					wailsRuntime.EventsEmit(runtimeCtx, "nyamedia:uploads-changed")
+				}
+			}
+		}
+	}()
+}
+
+func (a *DesktopApp) stopTaskEventForwarder() {
+	a.taskEventsMu.Lock()
+	cancel := a.taskEventsCancel
+	a.taskEventsCancel = nil
+	a.taskEventsMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	a.taskEventsWG.Wait()
 }
 
 func (a *DesktopApp) startDesktopCallbackServer(service *appcore.Service) error {

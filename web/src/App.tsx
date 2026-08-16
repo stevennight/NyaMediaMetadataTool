@@ -41,7 +41,7 @@ import {
   X
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { checkDesktopUpdates, downloadAndInstallDesktopUpdate, getDesktopPreferences, getRuntimeInfo, notifyDesktop, pickDesktopDirectory, pickDesktopFile, previewDesktopRename, revealDesktopPath, setDesktopAutostart } from './desktop';
+import { checkDesktopUpdates, downloadAndInstallDesktopUpdate, getDesktopPreferences, getRuntimeInfo, notifyDesktop, pickDesktopDirectory, pickDesktopFile, previewDesktopRename, revealDesktopPath, setDesktopAutostart, subscribeDesktopTaskChanges, subscribeDesktopUploadChanges } from './desktop';
 import type { DesktopPreferences, DesktopRuntimeInfo, DesktopUpdateCheckResult } from './desktop';
 import { applyThemeMode, readThemeMode } from './theme';
 import type { ThemeMode } from './theme';
@@ -802,9 +802,7 @@ function uploadAuthDeviceName(code: string, providerType: string, descriptors: U
   if (!code) return '未记录';
   return uploadAuthDevices(providerType, descriptors).find((device) => device.code === code)?.name ?? code;
 }
-const taskListRefreshIntervalMs = 5000;
 const taskDetailRefreshIntervalMs = 5000;
-const uploadListRefreshIntervalMs = 5000;
 const uploadDetailRefreshIntervalMs = 2000;
 const uploadDetailPageSize = 20;
 const desktopNotificationPollIntervalMs = 10000;
@@ -1534,6 +1532,9 @@ export function App() {
   const observedTaskRunStatusesRef = useRef(new Map<string, string>());
   const notifiedTaskRunIDsRef = useRef(new Set<string>());
   const taskRunNotificationBaselineReadyRef = useRef(false);
+  const taskListRequestRef = useRef(0);
+  const uploadListRequestRef = useRef(0);
+  const uploadNotificationRequestRef = useRef(0);
   const observedUploadStatusesRef = useRef(new Map<number, string>());
   const lastRenameSelectionIndexRef = useRef<number | null>(null);
   const lastTaskSelectionIndexRef = useRef<number | null>(null);
@@ -1685,9 +1686,47 @@ export function App() {
   }, [taskPageSize]);
 
   useEffect(() => {
-    const interval = window.setInterval(() => void loadTaskSummary(), taskListRefreshIntervalMs);
-    return () => window.clearInterval(interval);
-  }, []);
+    if (!runtimeInfo) return;
+    const refreshTaskData = () => {
+      void loadTaskSummary();
+      if (activePage !== 'tasks') return;
+      void loadTasks(taskPage, taskStatusFilter, appliedTaskFilters);
+      void loadTaskRuns();
+    };
+    const unsubscribeDesktop = runtimeInfo.desktop ? subscribeDesktopTaskChanges(refreshTaskData) : null;
+    const events = unsubscribeDesktop || typeof EventSource === 'undefined' ? null : new EventSource('/api/tasks/events');
+    events?.addEventListener('tasks-changed', refreshTaskData);
+    if (activePage === 'tasks') {
+      void loadTasks(taskPage, taskStatusFilter, appliedTaskFilters);
+      void loadTaskRuns();
+    }
+    return () => {
+      unsubscribeDesktop?.();
+      events?.removeEventListener('tasks-changed', refreshTaskData);
+      events?.close();
+    };
+  }, [runtimeInfo?.desktop, activePage, taskPage, taskStatusFilter, taskPageSize, appliedTaskFilters, displayTimezone]);
+
+  useEffect(() => {
+    if (!runtimeInfo) return;
+    const refreshUploadData = () => {
+      if (activePage !== 'uploads') return;
+      if (uploadView === 'batches') {
+        void loadUploadSummary().catch(() => {});
+        void loadUploadBatches(uploadPage, uploadStatusFilter, appliedUploadPathFilter).catch(() => {});
+      } else if (uploadView === 'notificationRecords') {
+        void loadUploadNotificationRecords(uploadNotificationPage, uploadNotificationStatusFilter, appliedUploadNotificationPathFilter).catch(() => {});
+      }
+    };
+    const unsubscribeDesktop = runtimeInfo.desktop ? subscribeDesktopUploadChanges(refreshUploadData) : null;
+    const events = unsubscribeDesktop || typeof EventSource === 'undefined' ? null : new EventSource('/api/uploads/events');
+    events?.addEventListener('uploads-changed', refreshUploadData);
+    return () => {
+      unsubscribeDesktop?.();
+      events?.removeEventListener('uploads-changed', refreshUploadData);
+      events?.close();
+    };
+  }, [runtimeInfo?.desktop, activePage, uploadView, uploadPage, uploadStatusFilter, appliedUploadPathFilter, uploadNotificationPage, uploadNotificationStatusFilter, appliedUploadNotificationPathFilter, taskPageSize]);
 
   useEffect(() => {
     void loadUploadSummary().catch(() => {
@@ -2054,7 +2093,7 @@ export function App() {
 
   async function loadTaskSummary() {
     try {
-      const response = await fetch('/api/tasks/summary');
+      const response = await fetch('/api/tasks/summary', { cache: 'no-store' });
       if (!response.ok) return;
       setTaskSummary(await response.json() as TaskSummary);
     } catch {
@@ -2063,24 +2102,33 @@ export function App() {
   }
 
   async function loadTasks(page = taskPage, status = taskStatusFilter, filters = appliedTaskFilters) {
-    const params = new URLSearchParams({ page: String(page), pageSize: String(taskPageSize) });
-    if (filters.scanRunId) params.set('scanRunId', filters.scanRunId);
-    if (filters.path.trim()) params.set('path', filters.path.trim());
-    if (status !== 'all') params.set('status', status);
-    if (filters.from) params.set('from', zonedInputToUTC(filters.from, displayTimezone, false));
-    if (filters.to) params.set('to', zonedInputToUTC(filters.to, displayTimezone, true));
-    const response = await fetch(`/api/tasks?${params.toString()}`);
-    if (!response.ok) {
-      setError(await readErrorMessage(response));
-      return;
+    const requestID = ++taskListRequestRef.current;
+    try {
+      const params = new URLSearchParams({ page: String(page), pageSize: String(taskPageSize) });
+      if (filters.scanRunId) params.set('scanRunId', filters.scanRunId);
+      if (filters.path.trim()) params.set('path', filters.path.trim());
+      if (status !== 'all') params.set('status', status);
+      if (filters.from) params.set('from', zonedInputToUTC(filters.from, displayTimezone, false));
+      if (filters.to) params.set('to', zonedInputToUTC(filters.to, displayTimezone, true));
+      const response = await fetch(`/api/tasks?${params.toString()}`, { cache: 'no-store' });
+      if (!response.ok) {
+        if (requestID === taskListRequestRef.current) setError(await readErrorMessage(response));
+        return;
+      }
+      const value = await response.json() as TaskListResponse | Task[];
+      if (requestID !== taskListRequestRef.current) return;
+      applyTaskList(value);
+      void loadTaskSummary();
+    } catch (err) {
+      if (requestID === taskListRequestRef.current) {
+        setError(err instanceof Error ? err.message : '刷新任务列表失败');
+      }
     }
-    applyTaskList(await response.json());
-    void loadTaskSummary();
   }
 
   async function loadTaskRuns() {
     try {
-      const response = await fetch('/api/tasks/runs?limit=200');
+      const response = await fetch('/api/tasks/runs?limit=200', { cache: 'no-store' });
       if (!response.ok) return;
       const value = await response.json() as TaskRun[] | TaskRunListResponse;
       setTaskRuns(Array.isArray(value) ? value : asArray<TaskRun>(value.items));
@@ -2203,12 +2251,14 @@ export function App() {
   }
 
   async function loadUploadNotificationRecords(page = uploadNotificationPage, status = uploadNotificationStatusFilter, path = appliedUploadNotificationPathFilter) {
+    const requestID = ++uploadNotificationRequestRef.current;
     const params = new URLSearchParams({ page: String(page), pageSize: String(taskPageSize) });
     if (status !== 'all') params.set('status', status);
     if (path.trim()) params.set('path', path.trim());
-    const response = await fetch(`/api/upload/notifications?${params.toString()}`);
+    const response = await fetch(`/api/upload/notifications?${params.toString()}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(await readErrorMessage(response));
     const value = await response.json() as UploadNotificationRecordListResponse;
+    if (requestID !== uploadNotificationRequestRef.current) return;
     setUploadNotificationRecords(asArray<UploadNotificationRecord>(value.items));
     setUploadNotificationTotal(value.total ?? 0);
     setUploadNotificationPage(value.page ?? 1);
@@ -2266,18 +2316,21 @@ export function App() {
   }
 
   async function loadUploadSummary() {
-    const response = await fetch('/api/uploads/summary');
+    const response = await fetch('/api/uploads/summary', { cache: 'no-store' });
     if (!response.ok) throw new Error(await readErrorMessage(response));
     setUploadSummary(await response.json() as UploadSummary);
   }
 
   async function loadUploadBatches(page = uploadPage, status = uploadStatusFilter, path = appliedUploadPathFilter) {
+    const requestID = ++uploadListRequestRef.current;
     const params = new URLSearchParams({ page: String(page), pageSize: String(taskPageSize) });
     if (status !== 'all') params.set('status', status);
     if (path.trim()) params.set('path', path.trim());
-    const response = await fetch(`/api/uploads?${params.toString()}`);
+    const response = await fetch(`/api/uploads?${params.toString()}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(await readErrorMessage(response));
-    applyUploadBatchList(await response.json() as UploadBatchListResponse);
+    const value = await response.json() as UploadBatchListResponse;
+    if (requestID !== uploadListRequestRef.current) return;
+    applyUploadBatchList(value);
   }
 
   async function refreshUploads(page = uploadPage, status = uploadStatusFilter, path = appliedUploadPathFilter) {
@@ -2365,7 +2418,7 @@ export function App() {
     const requestID = ++uploadDetailRequestRef.current;
     const open = options.open ?? true;
     try {
-      const response = await fetch(`/api/uploads/${batchID}`, { signal: options.signal });
+      const response = await fetch(`/api/uploads/${batchID}`, { cache: 'no-store', signal: options.signal });
       if (!response.ok) throw new Error(await readErrorMessage(response));
       const detail = await response.json() as UploadBatchDetail;
       if (requestID !== uploadDetailRequestRef.current) return;
@@ -2836,16 +2889,6 @@ export function App() {
   }
 
   useEffect(() => {
-    if (activePage !== 'tasks') return;
-    void loadTaskRuns();
-    const interval = window.setInterval(() => {
-      void loadTasks(taskPage, taskStatusFilter);
-      void loadTaskRuns();
-    }, taskListRefreshIntervalMs);
-    return () => window.clearInterval(interval);
-  }, [activePage, taskPage, taskStatusFilter, taskPageSize, appliedTaskFilters, displayTimezone]);
-
-  useEffect(() => {
     if (activePage !== 'uploads') return;
     if (uploadView === 'providers') {
       void refreshUploadProviders();
@@ -2857,16 +2900,9 @@ export function App() {
     }
     if (uploadView === 'notificationRecords') {
       void refreshUploadNotificationRecords(uploadNotificationPage, uploadNotificationStatusFilter, appliedUploadNotificationPathFilter);
-      const interval = window.setInterval(() => {
-        void refreshUploadNotificationRecords(uploadNotificationPage, uploadNotificationStatusFilter, appliedUploadNotificationPathFilter);
-      }, uploadListRefreshIntervalMs);
-      return () => window.clearInterval(interval);
+      return;
     }
     void refreshUploads(uploadPage, uploadStatusFilter, appliedUploadPathFilter);
-    const interval = window.setInterval(() => {
-      void refreshUploads(uploadPage, uploadStatusFilter, appliedUploadPathFilter);
-    }, uploadListRefreshIntervalMs);
-    return () => window.clearInterval(interval);
   }, [activePage, uploadView, uploadPage, uploadStatusFilter, appliedUploadPathFilter, uploadNotificationPage, uploadNotificationStatusFilter, appliedUploadNotificationPathFilter, taskPageSize]);
 
   useEffect(() => {

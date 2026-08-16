@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +19,85 @@ import (
 	"NyaMediaMetadataTool/internal/store"
 	"NyaMediaMetadataTool/internal/upload"
 )
+
+func TestUploadChangeEventsEndpointNotifiesAfterUploadChange(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(NewServer(config.Default(), filepath.Join(t.TempDir(), "config.yaml"), st, nil, nil, slog.Default()))
+	defer server.Close()
+	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, server.URL+"/api/uploads/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("events status=%d", response.StatusCode)
+	}
+
+	reader := bufio.NewReader(response.Body)
+	for index := 0; index < 2; index++ {
+		if _, err := reader.ReadString('\n'); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider, err := st.CreateUploadProvider(ctx, store.UploadProvider{Name: "Event Provider", Type: store.UploadProviderType115Cookie, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := st.CreateWatchDir(ctx, store.WatchDir{
+		Path:         t.TempDir(),
+		Recursive:    true,
+		WatchEnabled: true,
+		UploadConfigs: []store.UploadProviderRoute{{
+			ProviderID:     provider.ID,
+			Enabled:        true,
+			RemoteRoot:     "/Media",
+			CollisionPolicy: "fail",
+			IncludeTypes:   []string{"video"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = st.CollectUploadBatches(ctx, store.UploadCollectionInput{
+		WatchDirID: &dir.ID,
+		SeriesKey:  "events-series",
+		SeriesPath: filepath.Join(dir.Path, "Events"),
+		Files: []store.UploadCandidate{{
+			LocalPath:    filepath.Join(dir.Path, "Events", "episode.mkv"),
+			RelativePath: "episode.mkv",
+			FileType:     "video",
+			Size:         1,
+			ModifiedAt:   time.Now(),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(line) == "event: uploads-changed" {
+			return
+		}
+	}
+}
 
 func TestUploadTransferWithRuntimeProgress(t *testing.T) {
 	transfer := store.UploadTransfer{BytesTotal: 100, BytesTransferred: 0}

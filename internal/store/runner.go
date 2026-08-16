@@ -69,18 +69,27 @@ WHERE id = ?
 	if err := tx.Commit(); err != nil {
 		return Task{}, err
 	}
+	s.notifyTaskChanges()
 	task.Status = "running"
 	task.Attempts++
 	return task, nil
 }
 
 func (s *Store) ResetRunningTasks(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 UPDATE tasks
 SET status = 'pending', started_at = NULL, updated_at = CURRENT_TIMESTAMP
 WHERE status = 'running'
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyTaskChanges()
+	}
+	return nil
 }
 
 func (s *Store) CancelActiveTasks(ctx context.Context) (int, error) {
@@ -138,6 +147,7 @@ VALUES (?, 'info', 'task canceled', 'manual cancel')
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	s.notifyTaskChanges()
 	return len(ids), nil
 }
 
@@ -151,30 +161,54 @@ func (s *Store) IsTaskCanceled(ctx context.Context, taskID int64) (bool, error) 
 }
 
 func (s *Store) CompleteTask(ctx context.Context, taskID int64) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 UPDATE tasks
 SET status = 'completed', error_summary = '', finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND status = 'running'
 `, taskID)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyTaskChanges()
+	}
+	return nil
 }
 
 func (s *Store) FailTask(ctx context.Context, taskID int64, summary string) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 UPDATE tasks
 SET status = 'failed', error_summary = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND status = 'running'
 `, summary, taskID)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyTaskChanges()
+	}
+	return nil
 }
 
 func (s *Store) RetryTask(ctx context.Context, taskID int64, summary string) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 UPDATE tasks
 SET status = 'pending', error_summary = ?, started_at = NULL, finished_at = NULL, updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND status = 'running'
 `, summary, taskID)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyTaskChanges()
+	}
+	return nil
 }
 
 func (s *Store) RetryTasks(ctx context.Context, taskIDs []int64) (int, error) {
@@ -212,6 +246,9 @@ VALUES (?, 'info', 'task manually retried', '')
 
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+	if count > 0 {
+		s.notifyTaskChanges()
 	}
 	return count, nil
 }
@@ -251,6 +288,9 @@ VALUES (?, 'info', 'task ignored', 'manual ignore after failure')
 
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+	if count > 0 {
+		s.notifyTaskChanges()
 	}
 	return count, nil
 }

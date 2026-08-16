@@ -29,20 +29,36 @@ type ScanRunSummary struct {
 }
 
 func (s *Store) BeginScanRun(ctx context.Context, id string, source string, scopePath string) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 INSERT INTO scan_runs (id, source, scope_path)
 VALUES (?, ?, ?)
 `, id, source, scopePath)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyTaskChanges()
+	}
+	return nil
 }
 
 func (s *Store) FinishScanRun(ctx context.Context, id string, errorSummary string) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 UPDATE scan_runs
 SET error_summary = ?, sealed_at = COALESCE(sealed_at, CURRENT_TIMESTAMP)
 WHERE id = ?
 `, errorSummary, id)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyTaskChanges()
+	}
+	return nil
 }
 
 func (s *Store) ListScanRunSummaries(ctx context.Context, limit int) ([]ScanRunSummary, error) {

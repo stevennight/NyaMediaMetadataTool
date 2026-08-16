@@ -58,7 +58,7 @@ func (s *Store) EnqueueMediaTaskWithProcessing(ctx context.Context, mediaFileID 
 		}
 		processingJSON = string(data)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 INSERT INTO tasks (media_file_id, type, status, overwrite_existing, scan_run_id, processing_config)
 SELECT ?, 'media_process', 'pending', ?, ?, ?
 WHERE (? OR EXISTS (
@@ -73,7 +73,15 @@ AND NOT EXISTS (
   WHERE media_file_id = ? AND type = 'media_process' AND status IN ('pending', 'running')
 )
 	`, mediaFileID, boolToIntMedia(overwriteExisting), scanRunID, processingJSON, force, mediaFileID, mediaFileID)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyTaskChanges()
+	}
+	return nil
 }
 
 func boolToIntMedia(value bool) int {

@@ -231,6 +231,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
 	s.mux.HandleFunc("GET /api/tasks/summary", s.handleTaskSummary)
 	s.mux.HandleFunc("GET /api/tasks/runs", s.handleTaskRuns)
+	s.mux.HandleFunc("GET /api/tasks/events", s.handleTaskEvents)
 	s.mux.HandleFunc("POST /api/tasks/cancel-active", s.handleCancelActiveTasks)
 	s.mux.HandleFunc("POST /api/tasks/retry", s.handleRetryTasks)
 	s.mux.HandleFunc("POST /api/tasks/ignore", s.handleIgnoreTasks)
@@ -238,6 +239,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/artifacts", s.handleArtifacts)
 	s.mux.HandleFunc("GET /api/uploads/summary", s.handleUploadSummary)
 	s.mux.HandleFunc("GET /api/uploads", s.handleUploadBatches)
+	s.mux.HandleFunc("GET /api/uploads/events", s.handleUploadChangeEvents)
 	s.mux.HandleFunc("GET /api/uploads/", s.handleUploadBatchDetail)
 	s.mux.HandleFunc("POST /api/uploads/targets/", s.handleUploadTargetAction)
 	s.mux.HandleFunc("GET /api/upload/events", s.handleUploadEvents)
@@ -380,6 +382,54 @@ func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, runs)
+}
+
+func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request) {
+	changes, unsubscribe := s.store.SubscribeTaskChanges()
+	defer unsubscribe()
+	serveChangeEvents(w, r, changes, "tasks-changed")
+}
+
+func (s *Server) handleUploadChangeEvents(w http.ResponseWriter, r *http.Request) {
+	changes, unsubscribe := s.store.SubscribeUploadChanges()
+	defer unsubscribe()
+	serveChangeEvents(w, r, changes, "uploads-changed")
+}
+
+func serveChangeEvents(w http.ResponseWriter, r *http.Request, changes <-chan struct{}, eventName string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, errors.New("streaming is not supported"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(30 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-changes:
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: {}\n\n", eventName); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Server) handleCancelActiveTasks(w http.ResponseWriter, r *http.Request) {
@@ -1209,6 +1259,7 @@ func (s *Server) snapshotConfig() config.Config {
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }

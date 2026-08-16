@@ -1033,6 +1033,9 @@ WHERE batch_target_id = ? AND batch_file_id = ?
 	if err := tx.Commit(); err != nil {
 		return nil, 0, err
 	}
+	if len(batchIDs) > 0 {
+		s.notifyUploadChanges()
+	}
 	batches := make([]UploadBatch, 0, len(batchIDs))
 	for _, batchID := range batchIDs {
 		batch, err := s.GetUploadBatch(ctx, batchID)
@@ -1078,6 +1081,7 @@ ORDER BY id ASC
 	}
 
 	sealed := 0
+	changed := 0
 	for _, item := range items {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -1103,9 +1107,13 @@ ORDER BY id ASC
 		if err := tx.Commit(); err != nil {
 			return sealed, err
 		}
+		changed++
 		if !active {
 			sealed++
 		}
+	}
+	if changed > 0 {
+		s.notifyUploadChanges()
 	}
 	return sealed, nil
 }
@@ -1141,6 +1149,7 @@ WHERE id = ? AND status = ?
 	if err := tx.Commit(); err != nil {
 		return UploadBatchTarget{}, err
 	}
+	s.notifyUploadChanges()
 	target.Status = UploadTargetRunning
 	target.Attempts++
 	target.ErrorSummary = ""
@@ -1177,12 +1186,20 @@ func (s *Store) IsUploadTargetCanceled(ctx context.Context, targetID int64) (boo
 }
 
 func (s *Store) StartUploadTransfer(ctx context.Context, transferID int64) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 UPDATE upload_transfers
 SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, error_summary = '', updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND status IN (?, ?)
 `, UploadTransferRunning, transferID, UploadTransferPending, UploadTransferFailed)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyUploadChanges()
+	}
+	return nil
 }
 
 func (s *Store) CompleteUploadTransfer(ctx context.Context, transferID int64, remoteID string) error {
@@ -1228,7 +1245,11 @@ WHERE id = (SELECT batch_file_id FROM upload_transfers WHERE id = ?)
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyUploadChanges()
+	return nil
 }
 
 func (s *Store) FailUploadTransfer(ctx context.Context, transferID int64, summary string) error {
@@ -1261,7 +1282,11 @@ WHERE id = (SELECT batch_file_id FROM upload_transfers WHERE id = ?)
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyUploadChanges()
+	return nil
 }
 
 // CompleteUploadTarget finalizes successful reconciliation. It writes an
@@ -1314,7 +1339,11 @@ WHERE id = ?
 	if err := refreshUploadBatchStatusTx(ctx, tx, target.BatchID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyUploadChanges()
+	return nil
 }
 
 func buildUploadEventPayloadTx(ctx context.Context, tx *sql.Tx, target UploadBatchTarget) ([]byte, int, error) {
@@ -1426,7 +1455,11 @@ WHERE batch_target_id = ? AND status IN (?, ?)
 	if _, err := tx.ExecContext(ctx, `UPDATE upload_batches SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN (?, ?, ?)`, UploadBatchPending, batchID, UploadBatchFailed, UploadBatchPartial, UploadBatchCanceled); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyUploadChanges()
+	return nil
 }
 
 func (s *Store) CancelUploadTarget(ctx context.Context, targetID int64) error {
@@ -1468,16 +1501,28 @@ WHERE batch_target_id = ? AND status IN (?, ?, ?)
 	if err := refreshUploadBatchStatusTx(ctx, tx, batchID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyUploadChanges()
+	return nil
 }
 
 func (s *Store) RescheduleUploadTarget(ctx context.Context, targetID int64, summary string, availableAt time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
+result, err := s.db.ExecContext(ctx, `
 UPDATE upload_batch_targets
 SET status = ?, error_summary = ?, available_at = ?, started_at = NULL, updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND status = ?
 `, UploadTargetPending, strings.TrimSpace(summary), formatStoreTime(availableAt.UTC()), targetID, UploadTargetRunning)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		s.notifyUploadChanges()
+	}
+	return nil
 }
 
 func (s *Store) FailUploadTarget(ctx context.Context, targetID int64, summary string) error {
@@ -1504,7 +1549,11 @@ WHERE id = ?
 	if err := refreshUploadBatchStatusTx(ctx, tx, batchID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyUploadChanges()
+	return nil
 }
 
 func (s *Store) GetUploadBatch(ctx context.Context, id int64) (UploadBatch, error) {
@@ -1793,42 +1842,69 @@ func (s *Store) ResetRunningUploadWork(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `
+	changed := false
+	if result, err := tx.ExecContext(ctx, `
 UPDATE upload_transfers
 SET status = ?, started_at = NULL, updated_at = CURRENT_TIMESTAMP
 WHERE status = ?
 `, UploadTransferPending, UploadTransferRunning); err != nil {
 		return err
+	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		changed = true
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if result, err := tx.ExecContext(ctx, `
 UPDATE upload_batch_targets
 SET status = ?, started_at = NULL, available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 WHERE status = ?
 `, UploadTargetPending, UploadTargetRunning); err != nil {
 		return err
+	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		changed = true
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if result, err := tx.ExecContext(ctx, `
 UPDATE upload_batches
 SET status = ?, updated_at = CURRENT_TIMESTAMP
 WHERE status = ?
 `, UploadBatchPending, UploadBatchRunning); err != nil {
 		return err
+	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		changed = true
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if result, err := tx.ExecContext(ctx, `
 UPDATE upload_events
 SET status = ?, lease_id = '', lease_until = '', available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 WHERE status = ?
 `, UploadEventPending, UploadEventProcessing); err != nil {
 		return err
+	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		changed = true
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if result, err := tx.ExecContext(ctx, `
 UPDATE upload_notifications
 SET status = ?, available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 WHERE status = ?
 `, UploadNotificationPending, UploadNotificationProcessing); err != nil {
 		return err
+	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if rows > 0 {
+		changed = true
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if changed {
+		s.notifyUploadChanges()
+	}
+	return nil
 }
 
 func (s *Store) CountUploadTargetsByStatuses(ctx context.Context, statuses ...string) (int, error) {
